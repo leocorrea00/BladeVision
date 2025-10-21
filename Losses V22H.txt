@@ -2252,30 +2252,47 @@ function computeFlowOut_gpm(dt_s) {
   const riserAboveBOP = (top < BOP_DEPTH);
   const lossesActive = LOSSES_ON && totalLossRate_gpm() > 1.0;
 
-  // CRITICAL: During losses, level drops - FO must be ZERO until level is truly at surface
+  // CRITICAL: Multiple checks to prevent FO during losses
+  // Check 1: Active losses and level not at surface → FO must be zero
   if (lossesActive && !riserAtSurface) {
     FLOW_OUT_gpm = 0;
     FLOWOUT_VELOCITY_gpm_s = 0;
     return 0;
   }
 
+  // Check 2: Level below BOP → no returns possible
   if (!riserAboveBOP) {
-    // Riser not above BOP - decay to zero (level too low for returns)
-    const decay = Math.exp(-dt_s / 0.5);
-    FLOW_OUT_gpm *= decay;
-    FLOWOUT_VELOCITY_gpm_s *= decay;
-    return FLOW_OUT_gpm;
+    FLOW_OUT_gpm = 0;
+    FLOWOUT_VELOCITY_gpm_s = 0;
+    return 0;
   }
 
-  // Riser above BOP - calculate target
+  // Check 3: If level is dropping (losses consuming flow) → FO must be zero
+  const totalIn_gpm = (Q_DS || 0) + (Q_BO || 0);
+  const lossRate_gpm = totalLossRate_gpm();
+  if (lossRate_gpm > totalIn_gpm * 0.5) {  // Losing >50% of flow
+    FLOW_OUT_gpm = 0;
+    FLOWOUT_VELOCITY_gpm_s = 0;
+    return 0;
+  }
+
+  // Riser above BOP and no significant losses - calculate target
   const qAnnUp_m3s = window.__qAnnAbove_m3s || 0;
+
+  // Check 4: Sanity check on qAnnUp itself
+  if (qAnnUp_m3s < 1e-9) {
+    FLOW_OUT_gpm = 0;
+    FLOWOUT_VELOCITY_gpm_s = 0;
+    return 0;
+  }
+
   let targetFO_gpm = qAnnUp_m3s * 15850.323;
 
-  // CRITICAL SANITY CHECK: FO cannot exceed total inflow + reasonable margin
-  const totalInflow_gpm = (Q_DS || 0) + (Q_BO || 0) + (Q_TOPFILL || 0);
-  const maxReasonableFO_gpm = totalInflow_gpm * 1.5; // 50% margin for transients
+  // CRITICAL SANITY CHECK: FO cannot exceed total inflow
+  const totalInflow_gpm = totalIn_gpm;
+  const maxReasonableFO_gpm = totalInflow_gpm * 1.2; // Only 20% margin (reduced from 1.5)
   if (targetFO_gpm > maxReasonableFO_gpm) {
-    console.warn(`FO explosion detected! targetFO=${targetFO_gpm.toFixed(0)} gpm, clamping to ${maxReasonableFO_gpm.toFixed(0)} gpm. qAnnUp_m3s=${qAnnUp_m3s.toFixed(4)}`);
+    console.warn(`FO explosion detected! targetFO=${targetFO_gpm.toFixed(0)} gpm, clamping to ${maxReasonableFO_gpm.toFixed(0)} gpm. qAnnUp_m3s=${qAnnUp_m3s.toFixed(4)}, lossRate=${lossRate_gpm.toFixed(0)}`);
     targetFO_gpm = maxReasonableFO_gpm;
   }
 
