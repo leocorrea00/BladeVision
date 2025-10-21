@@ -1048,11 +1048,18 @@ function stepAdvection(){
       // Remove from surface, add mixture at BOP (from below + booster entering riser)
       annAboveGrid.shift();
 
-      // Calculate booster contribution to riser (when riser is full, booster enters here)
-      const riserFull = (typeof annulusTopDepthGlobal === 'function' ? annulusTopDepthGlobal() : 0) <= 0.5;
+      // Calculate booster contribution to riser
+      // CRITICAL: Booster enters riser when level is ABOVE BOP (not just at surface!)
+      const fluidTop = (typeof annulusTopDepthGlobal === 'function' ? annulusTopDepthGlobal() : 0);
+      const levelAboveBOP = fluidTop < BOP_DEPTH;
+      const lossesActive = LOSSES_ON && totalLossRate_gpm() > 1.0;
+
       const qBO_m3s = (Q_BO || 0) / 15850.323;
       const qDS_m3s = (Q_DS || 0) / 15850.323;
-      const qBoosterToRiser = riserFull ? qBO_m3s : 0;  // Booster only enters riser when full
+
+      // Booster enters riser when: level above BOP AND no active losses (fluid going UP)
+      // Booster goes DOWN when: level below BOP OR losses active (fluid going DOWN)
+      const qBoosterToRiser = (levelAboveBOP && !lossesActive) ? qBO_m3s : 0;
 
       const qFromBelow = Math.max(0, qUp_m3s - qBoosterToRiser);  // DS + TF flow from below
       const qTotal = Math.max(qFromBelow + qBoosterToRiser, 1e-12);
@@ -1066,9 +1073,11 @@ function stepAdvection(){
     if (annAboveGrid.length){
       const k = annAboveGrid.length - 1;
       // Calculate booster contribution for partial cell mixing
-      const riserFull = (typeof annulusTopDepthGlobal === 'function' ? annulusTopDepthGlobal() : 0) <= 0.5;
+      const fluidTop2 = (typeof annulusTopDepthGlobal === 'function' ? annulusTopDepthGlobal() : 0);
+      const levelAboveBOP2 = fluidTop2 < BOP_DEPTH;
+      const lossesActive2 = LOSSES_ON && totalLossRate_gpm() > 1.0;
       const qBO_m3s = (Q_BO || 0) / 15850.323;
-      const qBoosterToRiser = riserFull ? qBO_m3s : 0;
+      const qBoosterToRiser = (levelAboveBOP2 && !lossesActive2) ? qBO_m3s : 0;
 
       const qFromBelow = Math.max(0, qUp_m3s - qBoosterToRiser);
       const qTotal = Math.max(qFromBelow + qBoosterToRiser, 1e-12);
@@ -1749,26 +1758,26 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // Amount that actually goes to the loss zone this step
   const qToLoss = Math.min(qDem, qSupply);
 
-  // How to source qToLoss: prefer Booster (downward) while level below surface,
-  // then DS, then TopFill; this ensures booster goes DOWN to the zone when not full.
-  const riserFull = ((typeof annulusTopDepthGlobal==='function' ? annulusTopDepthGlobal() : (LOSS_TOP_DEPTH_m||0)) <= 0.5);
+  // Booster routing decision based on level position and loss activity
+  const fluidTop = (typeof annulusTopDepthGlobal==='function' ? annulusTopDepthGlobal() : (LOSS_TOP_DEPTH_m||0));
+  const levelAboveBOP = fluidTop < BOP_DEPTH;
+  const lossesActive = qToLoss > 1e-9; // Any loss demand means losses active
 
   let takeBO = 0, takeDS = 0, takeTF = 0;
 
-  if (!riserFull) {
-    // prioritize booster → DS → TF to feed the loss zone
+  if (levelAboveBOP && !lossesActive) {
+    // Level above BOP, no losses: Booster goes to riser (returns), DS feeds zone if needed
+    takeDS = Math.min(qDS, qToLoss);
+    let rem = qToLoss - takeDS;
+    takeTF = Math.min(qTF, rem);
+    takeBO = 0; // Booster to riser, not to losses
+  } else {
+    // Level below BOP OR losses active: Booster goes DOWN toward zone
     takeBO = Math.min(qBO, qToLoss);                // booster down first
     let rem = qToLoss - takeBO;
     takeDS = Math.min(qDS, rem);                    // then drillstring
     rem    = rem - takeDS;
     takeTF = Math.min(qTF, rem);                    // then topfill
-  } else {
-    // riser full: let DS/TF supply zone first; booster contributes to returns
-    takeDS = Math.min(qDS, qToLoss);
-    let rem = qToLoss - takeDS;
-    takeTF = Math.min(qTF, rem);
-    rem    = rem - takeTF;
-    takeBO = Math.min(qBO, rem);
   }
 
   // Leftovers after feeding losses
@@ -1776,8 +1785,9 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const BO_left = Math.max(0, qBO - takeBO);
   const TF_left = Math.max(0, qTF - takeTF);
 
-  // Upward annulus flow contributor (ONLY leftover DS + TF; Booster leftover goes up only if riser is full)
-  const qAnnUp = DS_left + TF_left + (riserFull ? BO_left : 0);
+  // Upward annulus flow contributor
+  // Booster leftover goes up when: level above BOP AND no active losses
+  const qAnnUp = DS_left + TF_left + ((levelAboveBOP && !lossesActive) ? BO_left : 0);
 
   // Downward annulus flow contributor (Booster that is taken by zone travels downward)
   const qAnnDown = takeBO; // this is *downward* internal flow to the zone
@@ -2224,17 +2234,18 @@ function effective_Q_CML_gpm(){
 
 function computeFlowOut_gpm(dt_s) {
   const top = annulusTopDepthGlobal();
-  const riserFull = (top <= 0.5);
-  
-  if (!riserFull) {
-    // Riser not full - decay to zero
+  const riserAtSurface = (top <= 0.5);
+  const riserAboveBOP = (top < BOP_DEPTH);
+
+  if (!riserAboveBOP) {
+    // Riser not above BOP - decay to zero (level too low for returns)
     const decay = Math.exp(-dt_s / 0.5);
     FLOW_OUT_gpm *= decay;
     FLOWOUT_VELOCITY_gpm_s *= decay;
     return FLOW_OUT_gpm;
   }
-  
-  // Riser full - calculate target
+
+  // Riser above BOP - calculate target
   const qAnnUp_m3s = window.__qAnnAbove_m3s || 0;
   let targetFO_gpm = qAnnUp_m3s * 15850.323;
 
@@ -2246,10 +2257,18 @@ function computeFlowOut_gpm(dt_s) {
     targetFO_gpm = maxReasonableFO_gpm;
   }
 
-  // Current state
+  // CRITICAL FIX: When riser is AT SURFACE, FO must equal inflow IMMEDIATELY
+  // Incompressible fluid cannot accumulate - this prevents oscillation
+  if (riserAtSurface) {
+    FLOW_OUT_gpm = targetFO_gpm;
+    FLOWOUT_VELOCITY_gpm_s = 0; // Reset integrator
+    return FLOW_OUT_gpm;
+  }
+
+  // Riser above BOP but not at surface - use smooth integrator
   const FO_current = FLOW_OUT_gpm || 0;
   const FO_vel_current = FLOWOUT_VELOCITY_gpm_s || 0;
-  
+
   // Apply deadband
   const error = targetFO_gpm - FO_current;
   if (Math.abs(error) < FLOWOUT_DEADBAND_GPM) {
@@ -2258,19 +2277,19 @@ function computeFlowOut_gpm(dt_s) {
     FLOW_OUT_gpm += FLOWOUT_VELOCITY_gpm_s * dt_s;
     return FLOW_OUT_gpm;
   }
-  
+
   // Desired velocity (with LPF)
   const tau = FLOWOUT_LPF_TAU;
   const alpha = Math.min(1.0, dt_s / (tau + dt_s));
   const FO_vel_desired = error / tau;
-  
+
   // Acceleration limit
   const max_accel = FLOWOUT_MAX_ACCEL * dt_s;
   const FO_vel_new = Math.max(
     FO_vel_current - max_accel,
     Math.min(FO_vel_current + max_accel, FO_vel_desired)
   );
-  
+
   // Integrate
   FLOWOUT_VELOCITY_gpm_s = FO_vel_new;
   FLOW_OUT_gpm = Math.max(0, FO_current + FO_vel_new * dt_s);
@@ -3471,10 +3490,16 @@ updateDiagnosticsUI(dt_frame);
 
   // In draw(), after equilibrateFluidLevel:
 if (frameCount % 30 === 0) {
+  const fluidTop = annulusTopDepthGlobal();
+  const levelAboveBOP = fluidTop < BOP_DEPTH;
+  const boosterRoute = (levelAboveBOP && totalLossRate_gpm() < 1) ? 'TO_RISER' : 'DOWN';
+
   console.log('=== LEVEL DEBUG ===');
   console.log('  Fluid Level (depth from surface):', LOSS_TOP_DEPTH_m.toFixed(1), 'm');
-  console.log('  Riser Status:', LOSS_TOP_DEPTH_m <= 0.5 ? 'FULL' : `NOT FULL (${LOSS_TOP_DEPTH_m.toFixed(1)}m below surface)`);
-  console.log('  Q_in:', (Q_DS + Q_BO).toFixed(1), 'gpm');
+  console.log('  Riser Status:', LOSS_TOP_DEPTH_m <= 0.5 ? 'FULL' : (LOSS_TOP_DEPTH_m < BOP_DEPTH ? 'ABOVE_BOP' : 'BELOW_BOP'));
+  console.log('  Booster Route:', boosterRoute, levelAboveBOP ? '(level above BOP)' : '(level below BOP)');
+  console.log('  Q_DS:', (Q_DS || 0).toFixed(1), 'gpm');
+  console.log('  Q_BO:', (Q_BO || 0).toFixed(1), 'gpm →', boosterRoute);
   console.log('  Q_out (FO):', (FLOW_OUT_gpm || 0).toFixed(1), 'gpm');
   console.log('  Q_loss:', totalLossRate_gpm().toFixed(1), 'gpm');
   console.log('  MassBal Resid:', (window.qResid_gpm || 0).toFixed(1), 'gpm');
