@@ -41,8 +41,8 @@ const PSI_PER_PASCAL = 1 / 6894.757;      // psi per Pa
 // ============================================================================
 
 // === Loss Zone Stabilization Constants ===
-const LOSS_ACTIVATION_HYST_PSI = 50;    // Pressure must exceed Pfrac by this to START
-const LOSS_DEACTIVATION_HYST_PSI = 25;  // Pressure must fall below Pfrac by this to STOP
+const LOSS_ACTIVATION_HYST_PSI = 10;    // Pressure must exceed Pfrac by this to START (reduced from 50)
+const LOSS_DEACTIVATION_HYST_PSI = 5;   // Pressure must fall below Pfrac by this to STOP (reduced from 25)
 const LOSS_MAX_ACCEL_GPM_S2 = 200;      // Max acceleration (gpm/s²) - prevents spikes
 const LOSS_GLOBAL_RATE_LIMIT = 400;     // Max TOTAL loss change (gpm/s)
 
@@ -1801,8 +1801,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // Booster leftover goes up when: level above BOP AND no active losses
   const qAnnUp = DS_left + TF_left + ((levelAboveBOP && !lossesActive) ? BO_left : 0);
 
-  // Downward annulus flow contributor (Booster that is taken by zone travels downward)
-  const qAnnDown = takeBO; // this is *downward* internal flow to the zone
+  // Downward annulus flow contributor
+  // When losses active OR level below BOP: full booster flow goes DOWN (not just what's consumed)
+  // The advection code will subtract actual losses to get net flow past zone
+  const qAnnDown = (!levelAboveBOP || lossesActive) ? qBO : 0;
 
   // Publish clean section "signals" (magnitudes, signless)
   window.__qToLoss_m3s   = qToLoss;
@@ -2396,8 +2398,20 @@ function recomputeAnnulusSectionFlowsForLosses(dt_s = 1/60){
   let qAbove_m3s = (qIn_m3s + qTopFill_m3s - qCML_m3s) - qBelow_m3s; // remainder goes up the riser
 
   // Add imbalances to section flows (important for accurate flow tracking)
+  // CRITICAL: During full losses, don't allow imbalances to create upward flow
   qBelow_m3s += QIMB_DS2ANN_m3s;  // DS→Ann imbalance (can be negative)
-  qAbove_m3s += QIMB_BO2RIS_m3s;  // Booster→Riser imbalance (can be negative)
+
+  // Only add booster imbalance to riser if there's actually flow available for riser
+  // During full losses (qAbove_m3s = 0), booster should go down, not create phantom upward flow
+  if (qAbove_m3s > 1e-9) {
+    qAbove_m3s += QIMB_BO2RIS_m3s;  // Booster→Riser imbalance (only when returns exist)
+  }
+
+  // CRITICAL: During losses, prevent negative upward flow (would cause glitch)
+  const lossesActive = qDem_m3s > 1e-9;
+  if (lossesActive && qAbove_m3s < 0) {
+    qAbove_m3s = 0;  // No upward flow during losses
+  }
 
   // SANITY CHECK: Clamp section flows to reasonable bounds
   const totalInflow_m3s = qIn_m3s + qTopFill_m3s;
