@@ -2236,8 +2236,16 @@ function computeFlowOut_gpm(dt_s) {
   
   // Riser full - calculate target
   const qAnnUp_m3s = window.__qAnnAbove_m3s || 0;
-  const targetFO_gpm = qAnnUp_m3s * 15850.323;
-  
+  let targetFO_gpm = qAnnUp_m3s * 15850.323;
+
+  // CRITICAL SANITY CHECK: FO cannot exceed total inflow + reasonable margin
+  const totalInflow_gpm = (Q_DS || 0) + (Q_BO || 0) + (Q_TOPFILL || 0);
+  const maxReasonableFO_gpm = totalInflow_gpm * 1.5; // 50% margin for transients
+  if (targetFO_gpm > maxReasonableFO_gpm) {
+    console.warn(`FO explosion detected! targetFO=${targetFO_gpm.toFixed(0)} gpm, clamping to ${maxReasonableFO_gpm.toFixed(0)} gpm. qAnnUp_m3s=${qAnnUp_m3s.toFixed(4)}`);
+    targetFO_gpm = maxReasonableFO_gpm;
+  }
+
   // Current state
   const FO_current = FLOW_OUT_gpm || 0;
   const FO_vel_current = FLOWOUT_VELOCITY_gpm_s || 0;
@@ -2352,6 +2360,15 @@ function recomputeAnnulusSectionFlowsForLosses(dt_s = 1/60){
   qBelow_m3s += QIMB_DS2ANN_m3s;  // DS→Ann imbalance (can be negative)
   qAbove_m3s += QIMB_BO2RIS_m3s;  // Booster→Riser imbalance (can be negative)
 
+  // SANITY CHECK: Clamp section flows to reasonable bounds
+  const totalInflow_m3s = qIn_m3s + qTopFill_m3s;
+  const maxReasonable_m3s = totalInflow_m3s * 2.0; // 2x margin
+  if (Math.abs(qAbove_m3s) > maxReasonable_m3s || Math.abs(qBelow_m3s) > maxReasonable_m3s) {
+    console.warn(`Section flow explosion! qAbove=${(qAbove_m3s*15850.323).toFixed(0)} gpm, qBelow=${(qBelow_m3s*15850.323).toFixed(0)} gpm`);
+    qAbove_m3s = Math.max(-maxReasonable_m3s, Math.min(maxReasonable_m3s, qAbove_m3s));
+    qBelow_m3s = Math.max(-maxReasonable_m3s, Math.min(maxReasonable_m3s, qBelow_m3s));
+  }
+
   // Publish section flows
   window.__qAnnBelow_m3s   = qBelow_m3s;
   window.__qAnnAbove_m3s   = qAbove_m3s;
@@ -2386,10 +2403,16 @@ function updateRiserLevelWithLosses(dt_s) {
   const qStillNeeded_m3s = Math.max(0, qDeficit_m3s - qComp_m3s);
   
   const qNet_m3s = (qIn_m3s + qTopFill_m3s - qCML_m3s - qOutSurface_m3s - qLossActual_m3s + qComp_m3s);
-  
+
   // NET CHANGE (volumetric)
   let remaining_dV = (qNet_m3s - qStillNeeded_m3s) * dt_s;  // m³
-  
+
+  // CRITICAL: Cap the volume change to prevent huge jumps
+  // Max change based on riser volume (prevent emptying/filling more than physically possible)
+  const A_riser = area_annulus(riser_ID_m, ds_OD_m);
+  const maxVolChange_m3 = A_riser * LEVEL_MAX_DROP_RATE_M_S * dt_s * 2; // 2x safety factor
+  remaining_dV = Math.max(-maxVolChange_m3, Math.min(maxVolChange_m3, remaining_dV));
+
   const currentTop = LOSS_TOP_DEPTH_m || 0;
   let newTop = currentTop;
   
@@ -2437,20 +2460,25 @@ function updateRiserLevelWithLosses(dt_s) {
   }
   
   // === RATE LIMITING (prevents level spikes) ===
+  // First clamp to physical bounds
   newTop = Math.max(0, Math.min(TD_DEPTH, newTop));
-  
+
+  // Then apply rate limits
   const deltaTop = newTop - currentTop;
   const maxRise = LEVEL_MAX_RISE_RATE_M_S * dt_s;
   const maxDrop = LEVEL_MAX_DROP_RATE_M_S * dt_s;
-  
+
   if (deltaTop < 0) {
-    // Dropping
+    // Dropping (rising towards surface - depth decreasing)
     newTop = Math.max(newTop, currentTop - maxDrop);
-  } else {
-    // Rising
+  } else if (deltaTop > 0) {
+    // Rising (falling away from surface - depth increasing)
     newTop = Math.min(newTop, currentTop + maxRise);
   }
-  
+
+  // Final bounds check (critical safety)
+  newTop = Math.max(0, Math.min(TD_DEPTH, newTop));
+
   // Commit
   LOSS_TOP_DEPTH_m = newTop;
   if (typeof ANN_TOP_DEPTH_m !== 'undefined') ANN_TOP_DEPTH_m = newTop;
@@ -2476,15 +2504,8 @@ function equilibrateFluidLevel(dt_s, maxIterations = 5) {
       refreshLossDemandFiltered(dt_sub);
     }
 
-    // 3) Route flows so friction/advection know directions & returns are stable
-    if (typeof routeAnnulusFlowsWithLosses === 'function') {
-      routeAnnulusFlowsWithLosses(dt_sub); // publishes __qAnnUp_m3s, __qAnnDown_m3s, smooth FLOW_OUT_gpm
-    } else if (typeof recomputeAnnulusSectionFlowsForLosses === 'function') {
-      // Backward-compatible: if you kept the older helper name
-      recomputeAnnulusSectionFlowsForLosses(dt_sub);
-    }
-
-    // (Your friction/advection step should read __qAnnUp_m3s / __qAnnDown_m3s and wet lengths)
+    // 3) REMOVED - Flow routing now happens OUTSIDE this function to avoid double-calculation
+    // Section flows (__qAnnAbove_m3s, __qAnnBelow_m3s) are already set before this is called
 
     // 4) Level solver: hybrid (actual zone outflow + demand deficit)
     updateRiserLevelWithLosses(dt_sub);
@@ -3451,10 +3472,12 @@ updateDiagnosticsUI(dt_frame);
   // In draw(), after equilibrateFluidLevel:
 if (frameCount % 30 === 0) {
   console.log('=== LEVEL DEBUG ===');
-  console.log('  Fluid Level:', LOSS_TOP_DEPTH_m.toFixed(1), 'm');
+  console.log('  Fluid Level (depth from surface):', LOSS_TOP_DEPTH_m.toFixed(1), 'm');
+  console.log('  Riser Status:', LOSS_TOP_DEPTH_m <= 0.5 ? 'FULL' : `NOT FULL (${LOSS_TOP_DEPTH_m.toFixed(1)}m below surface)`);
   console.log('  Q_in:', (Q_DS + Q_BO).toFixed(1), 'gpm');
+  console.log('  Q_out (FO):', (FLOW_OUT_gpm || 0).toFixed(1), 'gpm');
   console.log('  Q_loss:', totalLossRate_gpm().toFixed(1), 'gpm');
-  console.log('  Net flow:', ((Q_DS + Q_BO) - totalLossRate_gpm()).toFixed(1), 'gpm');
+  console.log('  MassBal Resid:', (window.qResid_gpm || 0).toFixed(1), 'gpm');
   
   for (const z of lossZones.filter(z => z && z.enabled && z.Qloss_gpm > 0)) {
     const P = pressureAtDepth(z.depth_m);
