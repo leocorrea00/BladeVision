@@ -1790,31 +1790,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
   window.__qAnnAbove_m3s = qAnnUp;
   window.__qAnnBelow_m3s = qAnnDown;
 
-  // ------------------- Stable FLOW_OUT with hysteresis -------------------
-  const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
-  const HYST_UP = 0.25, HYST_DN = 0.75;
-  if (typeof routeAnnulusFlowsWithLosses._full === 'undefined'){
-    routeAnnulusFlowsWithLosses._full = (top <= HYST_UP);
-  }
-  const wasFull = routeAnnulusFlowsWithLosses._full;
-  const nowFull = wasFull ? (top <= HYST_DN) : (top <= HYST_UP);
-  routeAnnulusFlowsWithLosses._full = nowFull;
-
-  // If riser full, surface return equals upward annulus flow; otherwise zero
-  const targetFO_gpm = nowFull ? Math.max(0, qAnnUp * 15850.323) : 0;
-
-  // Low-pass + slew
-  const ALPHA = 0.25, DQDT_MAX = 800;
-  const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
-  const lp   = prev + ALPHA*(targetFO_gpm - prev);
-  const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
-  const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
-  FLOW_OUT_gpm = prev + step;
-
-  // Optional smoother you already have
-  if (typeof FLOW_OUT_ALPHA==='number') {
-    window.FLOW_OUT_smooth = (window.FLOW_OUT_smooth||0) + FLOW_OUT_ALPHA*(FLOW_OUT_gpm - (window.FLOW_OUT_smooth||0));
-  }
+  // NOTE: FLOW_OUT_gpm is now updated by computeFlowOut_gpm() only
+  // This function just routes flows for loss zones
 }
 
 
@@ -2258,7 +2235,7 @@ function computeFlowOut_gpm(dt_s) {
   }
   
   // Riser full - calculate target
-  const qAnnUp_m3s = window.__qAnnUp_m3s || 0;
+  const qAnnUp_m3s = window.__qAnnAbove_m3s || 0;
   const targetFO_gpm = qAnnUp_m3s * 15850.323;
   
   // Current state
@@ -2380,36 +2357,8 @@ function recomputeAnnulusSectionFlowsForLosses(dt_s = 1/60){
   window.__qAnnAbove_m3s   = qAbove_m3s;
   window.__qBelowIsDownward = true; // sign convention handled in friction function
 
-  // ------------------- Stable FLOW_OUT with hysteresis -------------------
-  // Hysteresis on "riser is full" decision to avoid flip-flop
-  // When rising (toward surface), declare "full" once top < HYST_UP.
-  // When falling (away from surface), keep "full" until top > HYST_DN.
-  const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
-  const HYST_UP = 0.25;   // m (declare full when within 25 cm of surface)
-  const HYST_DN = 0.75;   // m (keep full until we drop below 75 cm)
-  if (typeof recomputeAnnulusSectionFlowsForLosses._full === 'undefined'){
-    recomputeAnnulusSectionFlowsForLosses._full = (top <= HYST_UP);
-  }
-  const wasFull = recomputeAnnulusSectionFlowsForLosses._full;
-  const nowFull = wasFull ? (top <= HYST_DN) : (top <= HYST_UP);
-  recomputeAnnulusSectionFlowsForLosses._full = nowFull;
-
-  // If riser "full", returns equal the upward section flow; else zero.
-  const targetFlowOut_gpm = nowFull ? Math.max(0, qAbove_m3s * 15850.323) : 0;
-
-  // Smooth & slew FLOW_OUT to avoid frame-to-frame jumps
-  const ALPHA = 0.25;          // low-pass (0..1)
-  const DQDT_MAX = 800;        // gpm/s cap on change
-  const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
-  const lp   = prev + ALPHA*(targetFlowOut_gpm - prev);
-  const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
-  const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
-  FLOW_OUT_gpm = prev + step;
-
-  // Optional historical smoother you already had (harmless to keep)
-  if (typeof FLOW_OUT_ALPHA==='number'){
-    FLOW_OUT_smooth = FLOW_OUT_smooth + FLOW_OUT_ALPHA*(FLOW_OUT_gpm - FLOW_OUT_smooth);
-  }
+  // NOTE: FLOW_OUT_gpm is now updated by computeFlowOut_gpm() only
+  // This function just publishes section flows for friction/advection
 }
 
 
@@ -2813,35 +2762,8 @@ function showFittedParams(){
 }
 
 // --- Global annulus top (can drop below BOP due to losses) ---
-function annulusTopDepthGlobal(){
-  // Returns the PHYSICAL top of fluid column (deepest of all constraints)
-  
-  let top = 0;
-  
-  // CML contribution
-  if (CML_ON && typeof CML_TOP_DEPTH === 'number') {
-    top = Math.max(top, CML_TOP_DEPTH);
-  }
-  
-  // Loss contribution
-  if (LOSSES_ON && typeof LOSS_TOP_DEPTH_m === 'number') {
-    top = Math.max(top, LOSS_TOP_DEPTH_m);
-  }
-  
-  // ✅ CRITICAL FIX: When BOTH are active, they should converge
-  // If losses are occurring, LOSS_TOP_DEPTH_m is the TRUE physical boundary
-  if (LOSSES_ON && totalLossRate_gpm() > 0) {
-    // Loss-driven top takes precedence
-    top = LOSS_TOP_DEPTH_m;
-    
-    // Sync CML to match (they should be the same in steady state)
-    if (CML_ON && Math.abs(CML_TOP_DEPTH - LOSS_TOP_DEPTH_m) > 0.1) {
-      CML_TOP_DEPTH = LOSS_TOP_DEPTH_m; // Force sync
-    }
-  }
-  
-  return top;
-}
+// REMOVED DUPLICATE - Using simple version from line ~384 instead
+// This function was causing oscillations by returning LOSS_TOP_DEPTH_m even when no losses active
 
 // ================== CML level update + simple controller ==================
 
@@ -3497,25 +3419,24 @@ plotTimeSeriesLine(tsChoke_pct, 0, 100, null);
   
   
   // Advection last (after SPP/levels reflect current step)
-// ---- LOSSES → FO → CHOKE → ADVECT → LEVEL ----
-// ---- PHYSICS UPDATE ORDER (Pattern A) ----
+// ---- PHYSICS UPDATE ORDER (FIXED for correct FLOW_OUT) ----
 const dt_frame = frameSeconds();
 
 // 1. Calculate U-tube imbalances FIRST
 computeImbalanceFlows();
 
-// 2-5: Equilibrate losses and level together (iterative)
-equilibrateFluidLevel(dt_frame, 3); // 3 iterations per frame
-
-// 6. Recompute section flows with final loss rates
+// 2. Compute section flows (sets __qAnnAbove_m3s, __qAnnBelow_m3s)
 recomputeAnnulusSectionFlowsForLosses(dt_frame);
 
-// 7. Update CML controller
-// (already called earlier - skip if done)
-
-// 8. Calculate flow out and choke
+// 3. Calculate flow out based on section flows (BEFORE equilibration!)
 computeFlowOut_gpm(dt_frame);
 if (MPD_ON) updateChokeFromFO();
+
+// 4. Equilibrate losses and level together (now uses correct FLOW_OUT_gpm)
+equilibrateFluidLevel(dt_frame, 1); // 1 iteration per frame (reduced for performance)
+
+// 5. Update section flows again after equilibration (final values)
+recomputeAnnulusSectionFlowsForLosses(dt_frame);
 
 // 9. Advect fluids
 stepAdvection();
