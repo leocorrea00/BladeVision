@@ -1,0 +1,245 @@
+The two codes we're combining are:
+
+New Code: The reorganized code I provided in my previous response (the fixed version with sections like Globals, Utilities, Hydraulics, UI).
+V8 Code: The content from the "Losses V8.txt" DOCUMENT in your query (the longer, original code with some truncated parts, but I'll refer to it as full for the guide).
+
+The New Code is already a cleaned-up, fixed version of V8 (incorporating V7 elements as per your request), with better organization, unified level logic, friction in losses, and plot masks. To create the "new code", use New Code as the base (it's complete and addresses your issues), but stitch in missing or specific pieces from V8 Code that aren't in New Code (e.g., some UI elements, full p5.js setup/draw if needed, or untruncated parts). This avoids duplication and ensures physics rules (e.g., unified ANN_TOP_DEPTH_m) are preserved.
+I'll give a line-by-line stitching guide based on approximate line numbers and unique starting/ending phrases (since codes are long and truncated in messages, use search in your editor to find them). Copy into a new file in this order. If line numbers don't match exactly (due to truncation or formatting), use the phrase matches. Assume both codes are pasted into separate files for copying.
+
+1) From New Code, copy the entire "// Globals and Constants" section: Start from line 1 ("// Globals and Constants") to approximately line 316 (ends with "// UI refs (created in setup)" followed by various let statements, up to "let uiDiag = { root:null, text:null };"). This includes all constants, state, EH, CML, losses, etc. This replaces the scattered globals in V8.
+
+The "scattered globals" in the V8 Code ("Losses V8.txt") refer to global variables and constants spread across the file, particularly in the `// ========================== CONFIG & CONSTANTS ==========================` and `// ============================ GLOBAL STATE =============================` sections, as well as other global declarations mixed throughout (e.g., near time series, UI refs, and loss zones). These are replaced by the consolidated `// Globals and Constants` section in the New Code (lines 1–316 in my previous response), which organizes all constants, state variables, and UI refs into one cohesive block.
+
+To help you identify and remove the scattered globals in V8 Code, I'll pinpoint the specific lines or sections in V8 that contain these globals, based on the provided V8 text. Since the V8 Code is long and partially truncated, I'll use approximate line numbers and unique starting/ending phrases to guide you. You can search for these phrases in your editor to locate them. The goal is to remove these scattered globals from V8 and rely on the New Code's consolidated section instead, then stitch in the remaining necessary pieces as outlined previously.
+
+Below, I list the key sections of scattered globals in V8 Code to delete or avoid copying when combining with the New Code. I'll reference line numbers from the V8 Code as provided in your query and use descriptive phrases to ensure accuracy. If line numbers don't match exactly due to truncation or formatting, use the phrases to find them.
+
+### Scattered Globals in V8 Code to Remove
+These sections overlap with the New Code’s `// Globals and Constants` (lines 1–316) and should be removed from V8 to avoid duplication when stitching:
+
+1. **CONFIG & CONSTANTS Section**
+   - **Location in V8**: Lines 1–31
+   - **Start**: `// ========================== CONFIG & CONSTANTS ==========================` (line 1)
+   - **End**: `const M3_PER_GPM  = 1 / GPM_PER_M3S;  // 1 gpm = 6.309e-5 m³/s` (line 31)
+   - **Description**: Includes `MAX_DEPTH`, `BOP_DEPTH`, `PSI_COEF`, `PPG_TO_KGM3`, flow limits (`MW_MIN`, `Q_MAX`), discretization (`CELL_M`, `N_DS`), advection tuning (`Q_REF`, `BASE_M_PER_FRAME`), rotation tunables (`ROT_COUPLE`, `TAYLOR_BOOST`), and flow unit conversions (`GPM_PER_M3S`, `M3_PER_GPM`).
+   - **Action**: Do **not** copy this section. The New Code’s `// Globals and Constants` (lines 1–51) already includes these, identically or updated.
+
+2. **Auto-CML Tunables**
+   - **Location in V8**: Lines 34–41
+   - **Start**: `// ===== Auto-CML (anchored on ECD/pressure) tunables =====` (line 34)
+   - **End**: `let cmlCtrl = { I_gpm: 0, P_lpf_psi: 0 };` (line 41)
+   - **Description**: Defines CML control parameters (`CML_DB_PSI`, `CML_KP_GPM_PER_PSI`, etc.) and the `cmlCtrl` object.
+   - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 54–61).
+
+3. **Graphics Defaults**
+   - **Location in V8**: Lines 44–51
+   - **Start**: `// Graphics (some defaults; refined in setup)` (line 44)
+   - **End**: `const MARKS = [ { d: BOP_DEPTH, name: "BOP" }, { d: SHOE_DEPTH, name: "Casing Shoe" }, { d: TD_DEPTH, name: "TD" } ];` (line 51)
+   - **Description**: Defines `W`, `H`, `well`, `dp`, `GAUGE_SCALE`, `R_BASE`, `R`, and `MARKS`.
+   - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 64–71).
+
+4. **Global State**
+   - **Location in V8**: Lines 53–104
+   - **Start**: `// ============================ GLOBAL STATE =============================` (line 53)
+   - **End**: `let boosterGrid = new Array(N_ABV).fill(MW_BO); // downwards (Surf→BOP)` (line 104)
+   - **Description**: Includes `HYDRAULICS_MODEL`, `FRICTION_MODE`, `ACTIVE_RHEO_MODEL`, `fitParams`, fluid/flow vars (`MW_DS`, `Q_DS`, `MW_BO`, `Q_BO`), `RPM`, `K_FAC`, level deficits, rheology/gel (`gel_Pa`, `use_gel`), geometry (`riser_ID_in`, etc.), and grids (`dsGrid`, `annBelowGrid`, `annAboveGrid`, `boosterGrid`).
+   - **Action**: Do **not** copy. New Code consolidates these in `// Globals and Constants` (lines 73–124).
+
+5. **MPD/SBP and Time Series**
+   - **Location in V8**: Lines 106–112
+   - **Start**: `// MPD / SBP` (line 106)
+   - **End**: `const TS_MAX = 600, TS_STRIDE = 5;` (line 112)
+   - **Description**: Defines `MPD_ON`, `SBP_MODE`, `SBP_MANUAL`, `CURRENT_SBP`, `ANCHOR_DEPTH`, `ANCHOR_ECD`, and time series limits.
+   - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 126–132).
+
+6. **UI References**
+   - **Location in V8**: Lines 114–124
+   - **Start**: `// UI refs (created in setup)` (line 114)
+   - **End**: `let rheoPanel = {};` (line 124)
+   - **Description**: Defines UI refs like `apDepthInput`, `cmlApDepthInput`, `dsMWSlider`, etc., and `rheoPanel`.
+   - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 134–144).
+
+7. **Frame and Captured Overlays**
+   - **Location in V8**: Lines 126–132
+   - **Start**: `let frameWidth;` (line 126)
+   - **End**: `let showCaptured = false;` (line 132)
+   - **Description**: Defines `frameWidth`, `capturedP`, `capturedECD`, and `showCaptured`.
+   - **Action**: Do **not** copy this part. New Code includes these in `// Globals and Constants` (lines 146–149). **Note**: You’ll copy the time series part later (V8 lines 156–168, 172–175) as instructed in the stitching guide.
+
+8. **Advection FIFOs**
+   - **Location in V8**: Lines 134–137
+   - **Start**: `// Advection coupling FIFOs (ensure arrival order)` (line 134)
+   - **End**: `let boosterOutQ = []; // Booster bottom → BOP → feeds annAbove` (line 137)
+   - **Description**: Defines `bitOutQ`, `belowOutQ`, `boosterOutQ`.
+   - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 151–154).
+
+9. **Bottom Frames and CML UI**
+   - **Location in V8**: Lines 139–145
+   - **Start**: `// --- bottom frames (for Rheology/Gels/Geometry) ---` (line 139)
+   - **End**: `let cmlQSlider, cmlQInput, cmlDepthInput, cmlBtn, cmlAutoBtn;` (line 145)
+   - **Description**: Defines `frameY`, `frameHeight`, `rheoFrameX`, `gelFrameX`, `geomFrameX`, and CML UI refs.
+   - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 156–162).
+
+10. **Booster SPP and Time Series Data**
+    - **Location in V8**: Lines 147–161
+    - **Start**: `// Booster SPP smoothing (top-level)` (line 147)
+    - **End**: `let tsData = { ... };` (line 161, ends with `sbpAPActual: []`)
+    - **Description**: Defines `BoosterSPP_smooth`, `updateBoosterSPP`, and `tsData` (time series arrays).
+    - **Action**: Do **not** copy `BoosterSPP_smooth` and `updateBoosterSPP` (lines 147–150), as New Code has them (lines 164–167). **Copy** `tsData` (lines 152–161) later as per stitching guide step 2.
+
+11. **Rheology Defaults and SPP Smoothing**
+    - **Location in V8**: Lines 170–178
+    - **Start**: `// Defaults for rheology inputs` (line 170)
+    - **End**: `function updateSPP(targetSPP){ ... }` (line 178)
+    - **Description**: Defines `rheoDefaults`, `ehFrameX`, `ehFrameW`, `ehFrameY`, `ehFrameH`, `SPP_ALPHA`, and `SPP_smooth`.
+    - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 176–184).
+
+12. **CML Tunables and Enhanced Hydraulics**
+    - **Location in V8**: Lines 181–209
+    - **Start**: `// --- Auto-CML control tunables (smooth tracking of inflow) ---` (line 181)
+    - **End**: `}; // --- Imbalance globals (small & smoothed) ---` (line 209)
+    - **Description**: Includes `CML_TRIM_KI`, `EH_ON`, `EH` object, `QIMB_DS2ANN_m3s`, `QIMB_BO2RIS_m3s`, `IMB_ALPHA`, `IMB_DEADBAND_PSI`.
+    - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 187–209).
+
+13. **EH Tuning and P-only Corrections**
+    - **Location in V8**: Lines 211–242
+    - **Start**: `// UI refs` (line 211, for `ehPanel`)
+    - **End**: `function alphaPV(fluid) { ... }` (line 242)
+    - **Description**: Includes `ehPanel`, `EH_TUNE`, `PSI_TO_PA`, `betaCompressibility`, and `alphaPV`.
+    - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 211–242).
+
+14. **CML and Loss Zones**
+    - **Location in V8**: Lines 244–275
+    - **Start**: `// ======== CML (Controlled Mud Level) ========` (line 244)
+    - **End**: `let prevPavg_psi = 0;` (line 275)
+    - **Description**: Defines `CML_ON`, `CML_DEPTH`, `Q_CML`, `AUTO_CML_ON`, `CML_AP_DEPTH`, `CML_AP_ECD`, `CML_Q_MAX`, `cmlPipeGrid`, `accCML`, section tops (`levelRiserTop_m`, etc.), `FLOW_OUT_gpm`, `FLOW_OUT_smooth`, `FLOW_OUT_ALPHA`, `LOSSES_ON`, `MAX_LOSS_ZONES`, `lossZones`, `CHOKE_POS_pct`, `CHOKE_CV_MAX`, `CHOKE_K`, `prevPavg_psi`.
+    - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 244–309).
+
+15. **Losses UI and Diagnostics Refs**
+    - **Location in V8**: Lines 277–285
+    - **Start**: `// ===================== LOSSES UI + DIAGNOSTICS (UI refs) =====================` (line 277)
+    - **End**: `let uiDiag = { root:null, text:null };` (line 285)
+    - **Description**: Defines `uiLosses` and `uiDiag` objects.
+    - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 311–316).
+
+16. **Global Free-Surface**
+    - **Location in V8**: Lines 287–291
+    - **Start**: `// ---- Global free-surface for the WHOLE annulus (can sink below BOP) ----` (line 287)
+    - **End**: `function annulusTopDepthGlobal(){ ... }` (line 291)
+    - **Description**: Defines `ANN_TOP_DEPTH_m` and `annulusTopDepthGlobal`.
+    - **Action**: Do **not** copy. New Code includes these in `// Globals and Constants` (lines 297–301).
+
+### Stitching Instructions (Refined)
+Now, using the New Code as the base (from my previous response), stitch in the necessary pieces from V8 Code while avoiding the scattered globals above. Here’s the step-by-step guide, referencing the specific lines to copy from V8 and where to insert them in the new file:
+
+1. **Start with New Code’s Entire `// Globals and Constants`**
+   - **From New Code**: Lines 1–316 (from `// Globals and Constants` to `let uiDiag = { root:null, text:null };`)
+   - **Insert**: At the start of your new file.
+   - **Reason**: This consolidates all globals, replacing the scattered ones in V8 (lines 1–31, 34–41, 44–51, 53–104, 106–112, 114–124, 126–132, 134–137, 139–145, 147–161, 170–178, 181–209, 211–242, 244–275, 277–285, 287–291).
+
+2. **Add V8’s Time Series and Choke Data**
+   - **From V8 Code**: 
+     - Lines 156–168 (from `// Time series` to `let showCaptured = false;`)
+     - Lines 172–175 (from `// === Time series for Flow Out & Choke Position ===` to `let tsChoke_pct   = [];      // newest at index 0`)
+   - **Insert**: In the new file, right after `let uiDiag = { root:null, text:null };` (New Code line 316).
+   - **Reason**: These add `tsData`, `tsFlowOut_gpm`, and `tsChoke_pct`, which are partially in New Code but need V8’s full definitions.
+
+3. **Continue with New Code’s `// Utilities and Helpers`**
+   - **From New Code**: Lines 318–372 (from `// Utilities and Helpers` to `function lossesUIPosition() { ... }`)
+   - **Insert**: After the V8 time series block in the new file.
+   - **Reason**: These utilities are cleaned up and include fixes (e.g., `annulusTopDepthGlobal`).
+
+4. **Add V8’s Additional Utilities**
+   - **From V8 Code**: 
+     - Lines 244–255 (from `function deadband(x, db){ ... }` to `function mapDepthToY(d){ ... }`)
+     - Lines 293–329 (from `function riserTopDepth(){ ... }` to `function wetLength_openhole_m(){ ... }`)
+   - **Insert**: After `function lossesUIPosition() { ... }` in the new file (New Code line 372).
+   - **Reason**: These include V8-specific helpers like `levelRiserTop_m` assignments, which may be needed for compatibility with other V8 logic.
+
+5. **Add New Code’s `// Hydraulics Functions`**
+   - **From New Code**: Lines 374–526 (from `// Hydraulics Functions` to `function updateHydraulics(dt_s) { ... }`)
+   - **Insert**: After the V8 utilities block in the new file.
+   - **Reason**: This includes fixed hydraulics logic with unified level, friction in losses, and iteration.
+
+6. **Add V8’s Rheology Fit (if missing)**
+   - **From V8 Code**: Search for `function doRheologyFit(){ ... }` (around line 800+ in V8, not explicit in provided text due to truncation). If found, copy the entire function (likely a block of ~20–50 lines).
+   - **Insert**: After `function updateHydraulics(dt_s) { ... }` in the new file (New Code line 526).
+   - **Reason**: New Code references `doRheologyFit` but doesn’t define it. V8 likely has it; include to ensure rheology works.
+
+7. **Add New Code’s `// UI Functions`**
+   - **From New Code**: Lines 528–end (from `// UI Functions` to the end, including `buildRheologyUI`, `buildEnhancedHydraulicsUI`, state setters, `buildLossesUI`, etc., and plot functions).
+   - **Insert**: After the V8 rheology fit function (or after hydraulics if `doRheologyFit` isn’t found).
+   - **Reason**: These are updated UI functions with plot masking for ECD/P above the top level.
+
+8. **Add V8’s Draw Functions (if needed for compatibility)**
+   - **From V8 Code**: 
+     - Lines 581–605 (from `// --------- SIMPLE BADGES / ICONS ---------` to `function drawStar(x,y){ ... }`)
+     - Lines 607–625 (from `// --------- GAUGE ---------` to `function drawGauge(...){ ... }`)
+     - Lines 627–740 (from `// --------- CHART PANELS + PLOTS ---------` to `function plotDepthOverlayMasked(...){ ... }`)
+   - **Insert**: After `buildEnhancedHydraulicsUI` in the new file (within New Code’s UI section, around line 600).
+   - **Reason**: These are likely redundant with New Code’s UI (lines 528–end), but include if V8 has specific draw tweaks. Compare `drawGauge` in both; keep New Code’s if identical.
+
+9. **Add p5.js Setup/Draw from V8 (if explicit)**
+   - **From V8 Code**: Search for `function setup(){ ... }` and `function draw(){ ... }` (likely after line 800 in V8, not in provided text due to truncation). If found, copy both functions (typically ~10–50 lines each).
+   - **Insert**: At the end of the new file.
+   - **Example Content**: 
+     ```javascript:disable-run
+     function setup() {
+       createCanvas(W, H);
+       buildRheologyUI(40, 600);
+       buildEnhancedHydraulicsUI(40, 800);
+       buildLossesUI();
+       buildDiagnosticsUI();
+       // Add other UI setups
+     }
+     function draw() {
+       background(0);
+       updateHydraulics(deltaTime/1000);
+       updateDiagnosticsUI(deltaTime/1000);
+       // Add drawing calls: drawChartPanel, plotDepthFunction, etc., with masks
+     }
+     ```
+   - **Reason**: New Code assumes p5.js but doesn’t define setup/draw. V8 may have them; include for completeness.
+
+### How to Remove Scattered Globals in V8
+To ensure no duplication when stitching:
+- Open V8 Code in your editor.
+- Search for and delete (or mark to skip) the sections listed above (lines 1–31, 34–41, 44–51, 53–104, 106–112, 114–124, 126–132, 134–137, 139–145, 147–150, 170–178, 181–209, 211–242, 244–275, 277–285, 287–291).
+- Use the phrases (e.g., `// ========================== CONFIG & CONSTANTS ==========================`, `let cmlCtrl = { I_gpm: 0, P_lpf_psi: 0 };`) to locate them.
+- Alternatively, when copying V8 pieces, only copy the specific lines mentioned in the stitching steps (e.g., time series, utilities, draw functions) and skip everything else in those ranges.
+
+### Notes
+- **Truncation Handling**: If V8’s `doRheologyFit`, `setup`, or `draw` functions are missing due to truncation, check your full V8 file. Search for `function doRheologyFit`, `function setup`, or `function draw`. If not found, you may need to reimplement or debug rheology/UI logic separately.
+- **Duplicate Check**: After stitching, search for duplicates (e.g., `drawGauge`, `annulusTopDepthGlobal`) in the new file. Keep New Code’s versions for fixes (e.g., plot masking, unified level).
+- **Testing**: Load in p5.js editor. Ensure `updateHydraulics(deltaTime/1000)` runs in `draw()`. Check if riser level shows consistently for CML/losses and ECD plots start at `ANN_TOP_DEPTH_m`.
+- **Physics Priority**: The New Code ensures physics rules (mass balance, friction in losses, CML pump limits) via `updateAnnulusTopDepth` and `pressureAtDepth`. Verify in tests.
+
+If you need help finding a specific V8 function or resolving conflicts, share the relevant V8 section (e.g., `doRheologyFit` or `setup`), and I’ll refine the stitching.
+```
+
+
+2) From V8 Code, insert the advection and time series globals: Start from approximately line 156 ("// Time series") to line 168 (ends with "let showCaptured = false;"), then skip to line 172 ("// === Time series for Flow Out & Choke Position ===") to line 175 ("let tsChoke_pct   = [];      // newest at index 0"). Insert this right after the UI refs in the new file (after "let uiDiag = { root:null, text:null };"). This adds missing TS elements from V8 that aren't in New Code.
+
+
+
+3) From New Code, copy the "// Utilities and Helpers" section: Start from approximately line 318 ("// Utilities and Helpers") to line 372 (ends with "function lossesUIPosition() { ... }"). This includes clamp, remap, etc.
+
+
+4) From V8 Code, insert additional utilities: Start from approximately line 244 ("function deadband(x, db){ ... }") to line 255 (ends with "function mapDepthToY(d){ ... }"). Insert this after the utilities in the new file (after "function lossesUIPosition()"). Then, from V8 line 293 ("function riserTopDepth(){ ... }") to line 329 (ends with "function wetLength_openhole_m(){ ... }"). This adds V8-specific helpers that overlap but include details like levelRiserTop_m.
+
+
+5) From New Code, copy the "// Hydraulics Functions" section: Start from approximately line 374 ("// Hydraulics Functions") to line 526 (ends with "function updateHydraulics(dt_s) { ... }"). This includes fixed pressureAtDepth, updateAnnulusTopDepth, etc., with friction and iteration.
+
+
+6) From V8 Code, insert rheology fit and other hydraulics: Start from approximately line 406 ("// ============================== RHEOLOGY UI BUILDER =============================") wait, no—V8 has rheology later. Actually, skip this step if not needed, as New Code has it in UI. But to add V8's doRheologyFit if missing, find in V8 around line 800 or search for "function doRheologyFit(){ ... }" and insert after updateHydraulics in new file.
+
+
+7) From New Code, copy the "// UI Functions" section: Start from approximately line 528 ("// UI Functions") to the end (includes buildRheologyUI, buildEnhancedHydraulicsUI, state setters, buildLossesUI, etc., ending with plot functions).
+
+
+8) From V8 Code, insert missing draw functions and badges: Start from approximately line 581 ("// --------- SIMPLE BADGES / ICONS ---------") to line 605 (ends with "function drawStar(x,y){ ... }"). If already in New Code's UI, skip. Then, from V8 line 607 ("// --------- GAUGE ---------") to line 625 (ends with "function drawGauge(...){ ... }"). Insert after buildEnhancedHydraulicsUI in new file. Finally, from V8 line 627 ("// --------- CHART PANELS + PLOTS ---------") to line 740 or so (ends with plotDepthOverlayMasked).
+
+
+9) From V8 Code, add any p5.js setup/draw if needed: Search for "function setup(){ ... }" (around line 800+ in V8, but may not be explicit—V8 seems global). If present, add at the end of the new file: function setup() { createCanvas(W, H); /* add UI creations like buildRheologyUI(40, 600); buildEnhancedHydraulicsUI(40, 800); buildLossesUI(); buildDiagnosticsUI(); / }. Then function draw() { background(0); updateHydraulics(deltaTime/1000); updateDiagnosticsUI(deltaTime/1000); / add drawing calls like drawChartPanel, plotDepthFunction with masks */ }.
+
+This should give a complete, fixed code. Test in p5.js editor; adjust for any overlaps (e.g., duplicate functions—keep New Code's version for fixes). The result prioritizes New Code's physics/logic while pulling V8's visuals/UI. If truncation hides parts, search for phrases like "buildDiagnosticsUI" in V8 to copy.

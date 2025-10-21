@@ -1,0 +1,1464 @@
+// Globals and Helpers for Losses V8: Constants, State Variables, and Utility Functions
+// This module includes all global constants, state variables, and helper utilities from Losses V8.
+// It provides the foundation for core logic, UI, and drawing modules.
+
+// Part 1: Constants
+const MAX_DEPTH = 5000; // m
+const BOP_DEPTH = 2000; // m
+const SHOE_DEPTH = 4000; // m
+const TD_DEPTH = 5000; // m
+const PSI_COEF = 0.1704; // psi per (ppg·m)
+const PPG_TO_KGM3 = 119.826427; // kg/m³ per ppg
+const LBF100FT2_to_Pa = 0.4788025892; // Pa per (lbf/100ft^2)
+const GPM_PER_M3S = 15850.323;   // 1 m³/s = 15850.323 gpm
+const M3_PER_GPM  = 1 / GPM_PER_M3S;  // 1 gpm = 6.309e-5 m³/s
+const PSI_TO_PA = 6894.757;
+const PSI_PER_PASCAL = 1 / PSI_TO_PA;
+
+// Flow limits for UI
+const MW_MIN = 7.0, MW_MAX = 18.0, MW_STEP = 0.1;
+const Q_MIN = 0, Q_MAX = 2000, Q_STEP = 10;
+
+// Discretization (for fluid tracking)
+const CELL_M = 25;
+const N_DS = Math.ceil(TD_DEPTH / CELL_M);
+const N_ABV = Math.ceil(BOP_DEPTH / CELL_M);
+const N_BELOW = Math.ceil((TD_DEPTH - BOP_DEPTH) / CELL_M);
+
+// Advection tuning (simple, frame-based)
+const Q_REF = 500;
+const BASE_M_PER_FRAME = CELL_M * 0.5;
+
+// --- Rotation coupling tunables ---
+const ROT_COUPLE = 3.0; // scales how strongly rotation adds to effective shear
+const TAYLOR_BOOST = { Ta_c: 1200, C0: 0.18, Cn: 0.6 }; // stronger Taylor boost
+
+// ===== Auto-CML (anchored on ECD/pressure) tunables =====
+const CML_DB_PSI = 20;            // pressure deadband around setpoint (psi)
+const CML_PSI_SOFT = 50;         // psi range where gains taper toward zero
+const CML_KP_GPM_PER_PSI = 1;   // proportional gain (gpm per psi)  <-- start conservative
+const CML_KI_GPM_PER_PSI_S = 3;// integral gain (gpm per psi per s)
+const CML_SLEW_GPM_PER_S = 80;   // max |ΔQ_CML| per second (slew limiter)
+const CML_LPF_TAU_S = 60.0;        // low-pass filter on measured pressure (s)
+
+// Graphics (some defaults; refined in setup)
+let W = 2100, H = 980;
+let well = { x: 140, y: 130, w: 160, h: 420 };
+let dp = { w: 60 };
+const GAUGE_SCALE = 0.70, R_BASE = 65;
+const R = Math.round(R_BASE * GAUGE_SCALE);
+// Reference marks to annotate
+const MARKS = [ { d: BOP_DEPTH, name: "BOP" }, { d: SHOE_DEPTH, name: "Casing Shoe" }, { d: TD_DEPTH, name: "TD" } ];
+
+// Time series
+const TS_MAX = 600, TS_STRIDE = 5;
+
+// ===== Loss zones (up to 3) =====
+const MAX_LOSS_ZONES = 3;
+
+// ===== Choke (equal-percentage Cv) =====
+let CHOKE_CV_MAX = 50;
+let CHOKE_K = 4.0;
+
+// ===== Flow-Out (surface returns) =====
+const FLOW_OUT_ALPHA = 0.20;
+
+// SPP smoothing
+const SPP_ALPHA = 0.15; // 0–1 (higher = faster response)
+
+// --- Auto-CML control tunables (smooth tracking of inflow) ---
+const CML_TRIM_KI = 0.02;           // small I trim (gpm per (gpm·s))
+
+// Optional baselines you can tune
+const EH_TUNE = {
+  ecc_max_gain: 0.40, // up to ±40% dp change in tight annuli due to eccentricity
+  rough_max_gain: 0.60, // up to ±60% on turbulent f (stronger at high Re)
+  kloss_spp_base: 250, // psi baseline extra when s=+1 (and -250 psi at s=-1)
+};
+
+// --- P-only correction knobs ---
+const PSI_TO_PA = 6894.757;
+
+// --- Imbalance globals (small & smoothed) ---
+const IMB_ALPHA = 0.25;    // smoothing 0..1
+const IMB_DEADBAND_PSI = 0.5; // minimum ΔP to move
+
+// Part 2: Global State Variables
+let HYDRAULICS_MODEL = "Refined"; // "API" | "Refined"
+let FRICTION_MODE = "hydraulics"; // keep hydraulics by default
+let ACTIVE_RHEO_MODEL = "HB"; // "HB" | "PowerLaw" | "Bingham"
+let fitParams = { mu_p_Pa_s: null, tau_y_Pa: null, K_PL_Pa_s_n: null, n_PL: null, K_HB_Pa_s_n: null, n_HB: null, tau_y_HB_Pa: null };
+
+// Fluids / flows
+let MW_DS = 9.5; // ppg, drillstring
+let MW_BO = 10.0; // ppg, booster line
+let Q_DS = 500; // gpm
+let Q_BO = 100; // gpm
+
+// Rotational speed (affects shear)
+let RPM = 80;
+
+// Generic friction fallback (when FRICTION_MODE === "generic")
+let K_FAC = 0.00005;
+
+// Level deficits (U-tube), meters from surface
+let levelDeficit_m = 0; // DS
+let levelDeficit_bo_m = 0; // Booster
+
+// Rheology / gel
+let gel_Pa = 5.0;
+let use_gel = true;
+
+// Geometry (inches → meters in setup)
+let riser_ID_in = 21.0;
+let casing_ID_in = 9.625;
+let openhole_OD_in = 8.5;
+let ds_OD_in = 5.0;
+let ds_ID_in = 3.75;
+let booster_ID_in = 4.5;
+let riser_ID_m = 0, casing_ID_m = 0, openhole_ODm = 0, ds_OD_m = 0, ds_ID_m = 0, booster_ID_m = 0;
+
+// Segmented tracking grids
+let dsGrid = new Array(N_DS).fill(MW_DS); // downwards
+let annBelowGrid = new Array(N_BELOW).fill(MW_DS); // upwards (BOP→TD)
+let annAboveGrid = new Array(N_ABV).fill(MW_DS); // upwards (Surf→BOP)
+let boosterGrid = new Array(N_ABV).fill(MW_BO); // downwards (Surf→BOP)
+
+// fractional advection accumulators
+let accDS = 0, accBelow = 0, accAbove = 0, accBo = 0;
+
+// MPD / SBP
+let MPD_ON = false;
+let SBP_MODE = "manual"; // "manual" | "anchor"
+let SBP_MANUAL = 0;
+let CURRENT_SBP = 0;
+let ANCHOR_DEPTH = 0;
+let ANCHOR_ECD = 0;
+
+// Captured overlays
+let capturedP = null;
+let capturedECD = null;
+let showCaptured = false;
+
+// Advection coupling FIFOs (ensure arrival order)
+let bitOutQ = []; // DS → TD (bit exit) → feeds annBelow bottom
+let belowOutQ = []; // annBelow top → BOP → feeds annAbove
+let boosterOutQ = []; // Booster bottom → BOP → feeds annAbove
+
+// --- bottom frames (for Rheology/Gels/Geometry) ---
+let frameY, frameHeight;
+let rheoFrameX, rheoFrameW, gelFrameX, gelFrameW, geomFrameX, geomFrameW;
+let tsFrame = 0;
+
+// Booster SPP smoothing (top-level)
+let BoosterSPP_smooth = 0;
+
+// Add this with your other global variable declarations
+let tsData = {
+  totalFlowIn: [],
+  dsFlow: [],
+  cmlFlow: [],
+  spp: [],
+  sbpSetpoint: [],
+  sbpApplied: [],
+  cmlAnchorSet: [],
+  cmlAnchorActual: [],
+  sbpAPSet: [],
+  sbpAPActual: []
+};
+
+// === Time series for Flow Out & Choke Position ===
+let tsFlowOut_gpm = [];      // newest at index 0
+let tsChoke_pct   = [];      // newest at index 0
+
+// Defaults for rheology inputs
+let rheoDefaults = { fv: 72, T: 49, R600: 69.4, R300: 46.3, R200: 36.3, R100: 27.6, R6: 12.0, R3: 11.9, R1: 9.5, PV: 40, YP: 22, G10s: 18.5, G10m: 26.9, G30m: 27.2 };
+let ehFrameX, ehFrameW, ehFrameY, ehFrameH;
+
+// SPP smoothing
+let SPP_smooth = 0;
+
+// -------- Enhanced Hydraulics (flags + sliders) --------
+let EH_ON = true; // master section is visible
+// Each feature has: ON/OFF + slider in [-1, +1] where 0 = nominal
+let EH = {
+  ECC: { on: false, s: 0.0 }, // Eccentric annulus effect
+  ROUGH: { on: false, s: 0.0 }, // Roughness effect (turbulent primarily)
+  KLOSS: { on: false, s: 0.0 }, // Local K-losses (bit, tools) into SPP/Booster SPP
+  PCOR: { on: false, s: 1.0, fluid: "WBM" }, // P-only corrections (ρ & μ) with strength scalar
+};
+// --- Imbalance globals (small & smoothed) ---
+let QIMB_DS2ANN_m3s = 0;   // DS → Annulus (m³/s)
+let QIMB_BO2RIS_m3s = 0;   // Booster → Riser (m³/s)
+
+// ======== CML (Controlled Mud Level) ========
+let CML_ON = false; // master toggle
+let CML_DEPTH = 0; // m (0..BOP_DEPTH)
+let Q_CML = 0; // gpm (manual command)
+let AUTO_CML_ON = false; // anchor controller
+let CML_AP_DEPTH = 0; // m (anchor depth for AUTO-CML)
+let CML_AP_ECD = 0; // ppg (anchor ECD for AUTO-CML)
+let CML_Q_MAX = 0; // dynamic: max allowed (DS+Booster)
+// riser top exposed to atmosphere due to CML pump (depth from surface)
+let CML_TOP_DEPTH = 0; // m (0 = riser full)
+// CML pipe (visual-only) fluid tracking (upwards to surface)
+let cmlPipeGrid = new Array(N_ABV).fill(MW_DS);
+let accCML = 0; // advection accumulator for CML pipe
+
+// ===== Loss-driven free surface (independent of CML) =====
+let LOSS_TOP_DEPTH_m = 0;
+
+// ===== Section tops =====
+let levelRiserTop_m   = 0;
+let levelBoosterTop_m = 0;
+let levelDSTop_m      = 0;
+let levelCMLTop_m     = 0;
+
+// ===== Flow-Out (surface returns) =====
+let FLOW_OUT_gpm = 0;
+let FLOW_OUT_smooth = 0;
+
+// ===== Loss zones (up to 3) =====
+let LOSSES_ON = false;
+let lossZones = Array.from({length: MAX_LOSS_ZONES}, () => ({
+  enabled: false,
+  depth_m: 0,
+  fracPressure_psi: 0,
+  Qref_gpm: 0,
+  DPref_psi: 0,
+  n: 1.0,
+  CL: 0,
+  Qloss_gpm: 0,
+  section: '',
+  cellIdx: -1
+}));
+
+// ===== Choke (equal-percentage Cv) =====
+let CHOKE_POS_pct = 0;
+
+// ===== Compressibility (distributed) =====
+let prevPavg_psi = 0;
+
+// ===================== LOSSES UI + DIAGNOSTICS (UI refs) =====================
+let uiLosses = {
+  root: null, title: null, toggleBtn: null,
+  rows: [
+    { depth:null, fracP:null, qref:null, dpref:null, n:null },
+    { depth:null, fracP:null, qref:null, dpref:null, n:null },
+    { depth:null, fracP:null, qref:null, dpref:null, n:null }
+  ],
+  help: null
+};
+let uiDiag = { root:null, text:null };
+
+// ---- Global free-surface for the WHOLE annulus (can sink below BOP) ----
+// 0 = full to surface; up to TD_DEPTH when totally drained.
+let ANN_TOP_DEPTH_m = 0; // master top of wet annulus (riser + below BOP)
+
+// UI refs (created in setup)
+let apDepthInput, apEcdInput;
+let cmlApDepthInput, cmlApEcdInput; // Separate CML anchor inputs
+let dsMWSlider, dsMWInput, dsQSlider, dsQInput;
+let boMWSlider, boMWInput, boQSlider, boQInput;
+let kSlider, kInput;
+let rpmSlider, rpmInput;
+let sbpSlider, sbpInput;
+let mpdBtn, sbpModeBtn, captureBtn, displayBtn, fricBtn, hydBtn;
+let rheoPanel = {};
+let frameWidth;
+// --- bottom frames (for Rheology/Gels/Geometry) ---
+let cmlQSlider, cmlQInput, cmlDepthInput, cmlBtn, cmlAutoBtn;
+let tsFrame = 0;
+// UI refs
+let ehPanel = {};
+
+// Part 3: Helper Functions
+// --- Safe, non-p5 helpers (no name collisions) ---
+function clamp(val, min, max){ return Math.max(min, Math.min(max, val)); }
+function remap(x, inMin, inMax, outMin, outMax, withinBounds=false){ if (inMax === inMin) return outMin; // avoid /0
+  const t = (x - inMin) / (inMax - inMin);
+  let y = outMin + t * (outMax - outMin);
+  if (withinBounds){ const lo = Math.min(outMin, outMax); const hi = Math.max(outMin, outMax); y = Math.max(lo, Math.min(hi, y)); }
+  return y;
+}
+// Graphics (some defaults; refined in setup)
+
+// Reference marks to annotate
+
+// --- global, re-usable helpers (moved out of setup) ---
+function num(v){ if (v==null) return 0; const s=String(v).trim().replace(',','.'); const x=parseFloat(s); return isFinite(x)?x:0; }
+function average(arr){ if (!arr.length) return 0; return arr.reduce((a,b)=>a+b,0)/arr.length; }
+function sumCells(arr,i0,i1){ if (i1<i0) return 0; i0=Math.max(0,i0); i1=Math.min(arr.length-1,i1); let s=0; for(let i=i0;i<=i1;i++) s+=arr[i]; return s; }
+function area_circ(D){ return Math.PI * (D*D) / 4; }
+function area_annulus(Do, Di){ return Math.max(Math.PI * (Do*Do - Di*Di) / 4, 1e-12); }
+function Dh_annulus(Do, Di){ return Math.max(Do - Di, 1e-6); }
+function smooth01(x){ return 1/(1+Math.exp(-8*(x-0.5))); }
+function mapDepthToY(d){ return remap(d, 0, MAX_DEPTH, well.y, well.y + well.h); }
+// Graphics (some defaults; refined in setup)
+
+// A_riserAnn etc.
+const A_riserAnn = () => area_annulus(riser_ID_m,  ds_OD_m);
+const A_casingAnn= () => area_annulus(casing_ID_m, ds_OD_m);
+const A_openAnn  = () => area_annulus(openhole_ODm,ds_OD_m);
+const A_DS       = () => Math.PI * ds_ID_m * ds_ID_m / 4;
+const A_booster  = () => Math.PI * booster_ID_m * booster_ID_m / 4;
+
+// Fluid tag
+function betaFluid(fl) {
+  if (fl === "OBM") return 3.5e-10;   // 1/Pa
+  if (fl === "Diesel")return 8.0e-10;
+  return 5.0e-10; // WBM default
+}
+const FLUID_TAG = () => (EH && EH.PCOR && EH.PCOR.fluid) ? EH.PCOR.fluid : 'WBM';
+
+// Clamp + expose a single function to get it
+function annulusTopDepthGlobal(){
+  return Math.max(0, Math.min(ANN_TOP_DEPTH_m, TD_DEPTH));
+}
+
+// Section area at a given depth (annulus)
+function annulusAreaAtDepth(d){
+  if (d < BOP_DEPTH) return area_annulus(riser_ID_m,  ds_OD_m);          // riser annulus
+  if (d < SHOE_DEPTH) return area_annulus(casing_ID_m, ds_OD_m);         // casing annulus
+  return area_annulus(openhole_ODm, ds_OD_m);                             // open hole annulus
+}
+
+// Helper to place Losses UI under Rheology pane (fallback to bottom-left)
+function lossesUIPosition() {
+  const x = (typeof rheoFrameX!=='undefined') ? rheoFrameX : 40;
+  const yBase = (typeof rheoFrameY!=='undefined' && typeof rheoFrameH!=='undefined')
+                  ? (rheoFrameY + rheoFrameH + 16) : (height - 200);
+  const y = Math.min(height - 180, Math.max(20, yBase));
+  return { x, y };
+}
+
+// deadband
+function deadband(x, db){ return (Math.abs(x) <= db) ? 0 : (x > 0 ? x - db : x + db); }
+
+// --- global, re-usable helpers (moved out of setup) ---
+function smoothDeadbandPsi(dp_psi, db = IMB_DEADBAND_PSI){
+  // tanh soft-threshold so small |ΔP| produce ~0 flow ~0
+  const s = Math.tanh(Math.abs(dp_psi)/Math.max(db,1e-6));
+  return Math.sign(dp_psi) * Math.max(0, Math.abs(dp_psi) - db) * s;
+}
+
+// Export for other modules (if using modular JS)
+window.clamp = clamp;
+window.remap = remap;
+// Add more as needed
+
+// Core Logic for Losses V8: Hydraulics, Rheology, CML, Losses, and Related Functions
+// This module includes globals, utilities, and core physics/hydraulics functions.
+// UI and drawing functions are excluded for separation.
+
+// Part 1: Globals and Constants (Consolidated)
+const MAX_DEPTH = 5000; // m
+const BOP_DEPTH = 2000; // m
+const SHOE_DEPTH = 4000; // m
+const TD_DEPTH = 5000; // m
+const PSI_COEF = 0.1704; // psi per (ppg·m)
+const PPG_TO_KGM3 = 119.826427; // kg/m³ per ppg
+const LBF100FT2_to_Pa = 0.4788025892; // Pa per (lbf/100ft^2)
+const GPM_PER_M3S = 15850.323;   // 1 m³/s = 15850.323 gpm
+const M3_PER_GPM  = 1 / GPM_PER_M3S;  // 1 gpm = 6.309e-5 m³/s
+const PSI_TO_PA = 6894.757;
+const PA_TO_PSI = 1 / PSI_TO_PA;
+
+// Flow limits
+const MW_MIN = 7.0, MW_MAX = 18.0, MW_STEP = 0.1;
+const Q_MIN = 0, Q_MAX = 2000, Q_STEP = 10;
+
+// Discretization
+const CELL_M = 25;
+const N_DS = Math.ceil(TD_DEPTH / CELL_M);
+const N_ABV = Math.ceil(BOP_DEPTH / CELL_M);
+const N_BELOW = Math.ceil((TD_DEPTH - BOP_DEPTH) / CELL_M);
+
+// Advection tuning
+const Q_REF = 500;
+const BASE_M_PER_FRAME = CELL_M * 0.5;
+
+// Rotation coupling
+const ROT_COUPLE = 3.0;
+const TAYLOR_BOOST = { Ta_c: 1200, C0: 0.18, Cn: 0.6 };
+
+// Auto-CML tunables
+const CML_DB_PSI = 20;
+const CML_PSI_SOFT = 50;
+const CML_KP_GPM_PER_PSI = 1;
+const CML_KI_GPM_PER_PSI_S = 3;
+const CML_SLEW_GPM_PER_S = 80;
+const CML_LPF_TAU_S = 60.0;
+let cmlCtrl = { I_gpm: 0, P_lpf_psi: 0 };
+
+// Global State
+let HYDRAULICS_MODEL = "Refined"; // "API" | "Refined"
+let FRICTION_MODE = "hydraulics";
+let ACTIVE_RHEO_MODEL = "HB"; // "HB" | "PowerLaw" | "Bingham"
+let fitParams = { mu_p_Pa_s: null, tau_y_Pa: null, K_PL_Pa_s_n: null, n_PL: null, K_HB_Pa_s_n: null, n_HB: null, tau_y_HB_Pa: null };
+
+// Fluids / flows
+let MW_DS = 9.5; // ppg, drillstring
+let MW_BO = 10.0; // ppg, booster line
+let Q_DS = 500; // gpm
+let Q_BO = 100; // gpm
+
+// Rotational speed (affects shear)
+let RPM = 80;
+
+// Generic friction fallback
+let K_FAC = 0.00005;
+
+// Level deficits (U-tube)
+let levelDeficit_m = 0; // DS
+let levelDeficit_bo_m = 0; // Booster
+
+// Rheology / gel
+let gel_Pa = 5.0;
+let use_gel = true;
+
+// Geometry (inches → meters in setup)
+let riser_ID_in = 21.0;
+let casing_ID_in = 9.625;
+let openhole_OD_in = 8.5;
+let ds_OD_in = 5.0;
+let ds_ID_in = 3.75;
+let booster_ID_in = 4.5;
+let riser_ID_m = 0, casing_ID_m = 0, openhole_ODm = 0, ds_OD_m = 0, ds_ID_m = 0, booster_ID_m = 0;
+
+// Segmented tracking grids
+let dsGrid = new Array(N_DS).fill(MW_DS); // downwards
+let annBelowGrid = new Array(N_BELOW).fill(MW_DS); // upwards (BOP→TD)
+let annAboveGrid = new Array(N_ABV).fill(MW_DS); // upwards (Surf→BOP)
+let boosterGrid = new Array(N_ABV).fill(MW_BO); // downwards (Surf→BOP)
+
+// fractional advection accumulators
+let accDS = 0, accBelow = 0, accAbove = 0, accBo = 0;
+
+// MPD / SBP
+let MPD_ON = false;
+let SBP_MODE = "manual"; // "manual" | "anchor"
+let SBP_MANUAL = 0;
+let CURRENT_SBP = 0;
+let ANCHOR_DEPTH = 0;
+let ANCHOR_ECD = 0;
+
+// CML
+let CML_ON = false;
+let CML_DEPTH = 0;
+let Q_CML = 0;
+let AUTO_CML_ON = false;
+let CML_AP_DEPTH = 0;
+let CML_AP_ECD = 0;
+let CML_Q_MAX = 0;
+let CML_TOP_DEPTH = 0;
+let cmlPipeGrid = new Array(N_ABV).fill(MW_DS);
+let accCML = 0;
+
+// Loss zones
+let LOSSES_ON = false;
+const MAX_LOSS_ZONES = 3;
+let lossZones = Array.from({length: MAX_LOSS_ZONES}, () => ({
+  enabled: false,
+  depth_m: 0,
+  fracPressure_psi: 0,
+  Qref_gpm: 0,
+  DPref_psi: 0,
+  n: 1.0,
+  CL: 0,
+  Qloss_gpm: 0,
+  section: '',
+  cellIdx: -1
+}));
+
+// Choke
+let CHOKE_POS_pct = 0;
+let CHOKE_CV_MAX = 50;
+let CHOKE_K = 4.0;
+
+// Compressibility
+let prevPavg_psi = 0;
+
+// Imbalance
+let QIMB_DS2ANN_m3s = 0;
+let QIMB_BO2RIS_m3s = 0;
+const IMB_ALPHA = 0.25;
+const IMB_DEADBAND_PSI = 0.5;
+
+// Enhanced Hydraulics
+let EH_ON = true;
+let EH = {
+  ECC: { on: false, s: 0.0 },
+  ROUGH: { on: false, s: 0.0 },
+  KLOSS: { on: false, s: 0.0 },
+  PCOR: { on: false, s: 1.0, fluid: "WBM" },
+};
+const EH_TUNE = {
+  ecc_max_gain: 0.40,
+  rough_max_gain: 0.60,
+  kloss_spp_base: 250,
+};
+
+// SPP smoothing
+const SPP_ALPHA = 0.15;
+let SPP_smooth = 0;
+let BoosterSPP_smooth = 0;
+
+// Advection coupling FIFOs
+let bitOutQ = [];
+let belowOutQ = [];
+let boosterOutQ = [];
+
+// Part 2: Utilities and Helpers
+function clamp(val, min, max){ return Math.max(min, Math.min(max, val)); }
+function remap(x, inMin, inMax, outMin, outMax, withinBounds=false){ if (inMax === inMin) return outMin; 
+  const t = (x - inMin) / (inMax - inMin);
+  let y = outMin + t * (outMax - outMin);
+  if (withinBounds){ y = Math.max(Math.min(outMin, outMax), Math.min(Math.max(outMin, outMax), y)); }
+  return y;
+}
+
+function area_circ(D) { return Math.PI * (D * D) / 4; }
+function area_annulus(Do, Di) { return Math.PI * (Do * Do - Di * Di) / 4; }
+function Dh_annulus(Do, Di) { return Do - Di; }
+
+function betaCompressibility(fluid) {
+  if (fluid === "WBM") return 4.5e-10;
+  if (fluid === "OBM") return 1.0e-9;
+  if (fluid === "Diesel") return 1.4e-9;
+  return 8e-10;
+}
+
+function alphaPV(fluid) {
+  if (fluid === "WBM") return 2e-10;
+  if (fluid === "OBM") return 1.0e-8;
+  if (fluid === "Diesel") return 1.4e-8;
+  return 1e-9;
+}
+
+function average(arr) { return arr.reduce((a, b) => a + b, 0) / arr.length; }
+
+// Part 3: Rheology Functions
+function doRheologyFit() {
+  // Collect readings from inputs (assuming rheoPanel exists; in full code, it's UI)
+  const R600 = parseFloat(rheoPanel.R600.value()) || rheoDefaults.R600;
+  const R300 = parseFloat(rheoPanel.R300.value()) || rheoDefaults.R300;
+  const R200 = parseFloat(rheoPanel.R200.value()) || rheoDefaults.R200;
+  const R100 = parseFloat(rheoPanel.R100.value()) || rheoDefaults.R100;
+  const R6 = parseFloat(rheoPanel.R6.value()) || rheoDefaults.R6;
+  const R3 = parseFloat(rheoPanel.R3.value()) || rheoDefaults.R3;
+  const R1 = parseFloat(rheoPanel.R1.value()) || rheoDefaults.R1;
+  const PV = parseFloat(rheoPanel.PV.value()) || rheoDefaults.PV;
+  const YP = parseFloat(rheoPanel.YP.value()) || rheoDefaults.YP;
+
+  const rPoints = [
+    { rpm: 600, R: R600 },
+    { rpm: 300, R: R300 },
+    { rpm: 200, R: R200 },
+    { rpm: 100, R: R100 },
+    { rpm: 6, R: R6 },
+    { rpm: 3, R: R3 },
+    { rpm: 1, R: R1 }
+  ].filter(p => isFinite(p.R));
+
+  if (ACTIVE_RHEO_MODEL === "Bingham") {
+    fitParams.mu_p_Pa_s = (PV / 1000) || 0.04; // cP to Pa·s
+    fitParams.tau_y_Pa = LBF100FT2_to_Pa * (YP || 22);
+  } else if (ACTIVE_RHEO_MODEL === "PowerLaw") {
+    // Simple fit from R600/R300
+    fitParams.n_PL = Math.log(R600 / R300) / Math.log(600 / 300);
+    fitParams.K_PL_Pa_s_n = (R600 / 511) * Math.pow(600, fitParams.n_PL) * LBF100FT2_to_Pa;
+  } else { // HB
+    // Use least-squares or approximation from rPoints
+    fitParams.tau_y_HB_Pa = LBF100FT2_to_Pa * 2 * (R3 - R6); // Example approximation
+    fitParams.n_HB = Math.log((R600 - fitParams.tau_y_HB_Pa / LBF100FT2_to_Pa) / (R300 - fitParams.tau_y_HB_Pa / LBF100FT2_to_Pa)) / Math.log(2);
+    fitParams.K_HB_Pa_s_n = (R600 - fitParams.tau_y_HB_Pa / LBF100FT2_to_Pa) * Math.pow(511, fitParams.n_HB) * LBF100FT2_to_Pa;
+  }
+}
+
+function showFittedParams() {
+  console.log(fitParams); // Or alert in full code
+}
+
+// Part 4: Hydraulics Functions
+function updateSPP(target) {
+  SPP_smooth = SPP_smooth + SPP_ALPHA * (target - SPP_smooth);
+  return SPP_smooth;
+}
+
+function updateBoosterSPP(target) {
+  BoosterSPP_smooth = BoosterSPP_smooth + SPP_ALPHA * (target - BoosterSPP_smooth);
+  return BoosterSPP_smooth;
+}
+
+function pressureForPCOR(d) {
+  const ecd = ecdAtDepth(d);
+  const P_hyd = PSI_COEF * ecd * d;
+  const P_sbp = CURRENT_SBP;
+  return P_hyd + P_sbp;
+}
+
+function applyPressureOnly(d, rho0, K0, n0, tauY0) {
+  if (!EH.PCOR.on) return { rho: rho0, K: K0, n: n0, tauY: tauY0 };
+  const P_pa = pressureForPCOR(d) * PSI_TO_PA;
+  const beta = betaCompressibility(EH.PCOR.fluid) * EH.PCOR.s;
+  const alpha = alphaPV(EH.PCOR.fluid) * EH.PCOR.s;
+  const deltaP = P_pa - 101325;
+  const rhoP = rho0 * Math.exp(beta * deltaP);
+  const KP = K0 * Math.exp(alpha * deltaP);
+  return { rho: rhoP, K: KP, n: n0, tauY: tauY0 };
+}
+
+// Friction per meter functions (example for drillstring; add others similarly)
+function dPperM_drillstring(q_m3s) {
+  // Use ACTIVE_RHEO_MODEL, fitParams, geometry, RPM, EH
+  // Calculate Re, f, v, etc.
+  // Example stub
+  const rho = PPG_TO_KGM3 * MW_DS;
+  const mu = fitParams.mu_p_Pa_s;
+  const D = ds_ID_m;
+  const v = q_m3s / area_circ(D);
+  const Re = rho * v * D / mu;
+  const f = 64 / Re; // Laminar assumption
+  return f * rho * v * v / (2 * D) * PA_TO_PSI; // psi/m
+}
+
+// Similar for dPperM_riserAnnulus, dPperM_casingAnnulus, dPperM_openholeAnnulus, dPperM_booster
+
+function surfacePumpPressure() {
+  // Sum frictions in DS, bit, annBelow, annAbove + EH.KLOSS
+  return dPperM_drillstring(Q_DS * M3_PER_GPM) * TD_DEPTH + EH.KLOSS.s * EH_TUNE.kloss_spp_base;
+}
+
+function boosterPumpPressure() {
+  // Similar for booster
+  return dPperM_booster(Q_BO * M3_PER_GPM) * BOP_DEPTH;
+}
+
+function pressureAtDepth(d) {
+  const top = Math.max(0, Math.min(ANN_TOP_DEPTH_m, TD_DEPTH));
+  if (d <= top) return 0;
+  const effectiveDepth = d - top;
+  const hydro = PSI_COEF * ecdAtDepth(d) * effectiveDepth;
+  const fric = 0; // Sum frictions to d (implement based on sections)
+  const sbp = CURRENT_SBP;
+  return hydro + fric + sbp;
+}
+
+function ecdAtDepth(d) {
+  const top = Math.max(0, Math.min(ANN_TOP_DEPTH_m, TD_DEPTH));
+  if (d <= top) return 0;
+  // Average MW from grids in section
+  return MW_DS; // Stub; use annAboveGrid, annBelowGrid averages
+}
+
+// CML Functions
+function effective_Q_CML_gpm() {
+  if (!CML_ON || ANN_TOP_DEPTH_m >= CML_DEPTH) return 0;
+  return Q_CML;
+}
+
+// Losses Functions
+function mapLossZonesToGrid() {
+  lossZones.forEach(z => {
+    if (!z.enabled) return;
+    // Compute cellIdx, section, CL from Qref/DPref/n
+    z.CL = z.Qref_gpm / Math.pow(z.DPref_psi, z.n);
+  });
+}
+
+function updateLossRates() {
+  lossZones.forEach(z => {
+    if (!z.enabled) z.Qloss_gpm = 0;
+    const dp = pressureAtDepth(z.depth_m) - z.fracPressure_psi;
+    z.Qloss_gpm = z.CL * Math.pow(Math.max(dp, 0), z.n);
+  });
+}
+
+function totalLossRate_gpm() {
+  return lossZones.reduce((sum, z) => sum + z.Qloss_gpm, 0);
+}
+
+// Main Update (call per frame)
+function updateHydraulics(dt_s) {
+  updateSPP(surfacePumpPressure());
+  updateBoosterSPP(boosterPumpPressure());
+  mapLossZonesToGrid();
+  updateLossRates();
+  // Add advection, imbalance, level updates, etc.
+  // For full, include iteration loop for coupled losses/friction
+  for (let iter = 0; iter < 10; iter++) {
+    updateLossRates();
+    // Recompute flows if needed
+  }
+}
+
+// Export for other modules
+window.updateHydraulics = updateHydraulics;
+// Add more exports as needed
+
+// Drawing Functions for Losses V8: Visualization and Rendering Logic
+// This module includes all drawing-related functions from Losses V8.
+// It assumes p5.js environment and globals like well, R, MARKS, colors, etc.
+// Call these in draw() as needed.
+
+// Helper for drawing simple badges/icons
+function drawBadge(x, y, line1, line2 = "") {
+  push();
+  textAlign(CENTER, CENTER);
+  rectMode(CENTER);
+  noStroke();
+  fill(0, 0, 30, 200);
+  rect(x, y, 210, 40, 8);
+  fill(0, 0, 95);
+  textSize(12);
+  if (line2) {
+    text(line1, x, y - 8);
+    text(line2, x, y + 8);
+  } else {
+    text(line1, x, y);
+  }
+  pop();
+}
+
+function drawStar(x, y) {
+  push();
+  noStroke();
+  fill(50, 80, 90);
+  const r1 = 6, r2 = 3, n = 5;
+  beginShape();
+  for (let i = 0; i < 2 * n; i++) {
+    const a = i * PI / n;
+    const r = (i % 2 === 0) ? r1 : r2;
+    vertex(x + r * Math.cos(a), y + r * Math.sin(a));
+  }
+  endShape(CLOSE);
+  pop();
+}
+
+// Gauge drawing
+function drawGauge(cx, cy, value, vMax, label, units, r, labelSide) {
+  noFill();
+  stroke(0, 0, 95);
+  strokeWeight(2.5);
+  arc(cx, cy, r * 2, r * 2, PI, TWO_PI);
+  strokeWeight(6);
+  stroke(120, 60, 80);
+  arc(cx, cy, r * 2, r * 2, PI, PI + 0.33 * PI);
+  stroke(40, 70, 80);
+  arc(cx, cy, r * 2, r * 2, PI + 0.33 * PI, PI + 0.66 * PI);
+  stroke(0, 80, 80);
+  arc(cx, cy, r * 2, r * 2, PI + 0.66 * PI, TWO_PI);
+  const norm = clamp(value / Math.max(1e-9, vMax), 0, 1);
+  const ang = PI + norm * PI;
+  stroke(0, 0, 95);
+  strokeWeight(2.5);
+  line(cx, cy, cx + r * cos(ang), cy + r * sin(ang));
+  noStroke();
+  fill(0, 0, 95);
+  circle(cx, cy, 7);
+  fill(0, 0, 95);
+  textSize(Math.max(12, Math.round(r * 0.26)));
+  const dec = (units === 'ppg' ? 2 : 0);
+  text(`${nf(value, 0, dec)} ${units}`, cx, cy + (r * 0.35));
+  fill(0, 0, 80);
+  textSize(Math.max(10, Math.round(r * 0.18)));
+  textAlign(labelSide === "left" ? RIGHT : LEFT, CENTER);
+  const lx = labelSide === "left" ? (cx - r - 14) : (cx + r + 14);
+  text(label, lx, cy);
+  textAlign(CENTER, CENTER);
+}
+
+// Chart panels and plots
+function drawChartPanel(x, y, w, h, title) {
+  noStroke();
+  fill(0, 0, 20, 200);
+  rect(x - 10, y - 14, w + 20, h + 44, 10);
+  fill(0, 0, 0);
+  rect(x, y, w, h, 8);
+  fill(0, 0, 95);
+  noStroke();
+  textSize(14);
+  textAlign(CENTER, TOP);
+  text(title, x + w / 2, y + h + 6);
+}
+
+function drawChartGrid(x, y, w, h, padL, padR, padT, padB, gridCol) {
+  const left = x + padL, right = x + w - padR, top = y + padT, bottom = y + h - padB;
+  push();
+  stroke(gridCol);
+  strokeWeight(1);
+  // horizontal lines
+  for (let i = 0; i <= 6; i++) {
+    const yy = top + i * (bottom - top) / 6;
+    line(left, yy, right, yy);
+  }
+  // vertical lines
+  for (let i = 0; i <= 4; i++) {
+    const xx = left + i * (right - left) / 4;
+    line(xx, top, xx, bottom);
+  }
+  pop();
+}
+
+function drawAxes(x, y, w, h, padL, padR, padT, padB, axisCol) {
+  const left = x + padL, right = x + w - padR, top = y + padT, bottom = y + h - padB;
+  push();
+  stroke(axisCol);
+  strokeWeight(2);
+  line(left, top, left, bottom);
+  line(left, bottom, right, bottom);
+  pop();
+}
+
+function drawDepthTicks(x, y, w, h, padL, padR, padT, padB, col) {
+  const innerH = h - padT - padB, left = x + padL, top = y + padT;
+  fill(col);
+  noStroke();
+  textSize(11);
+  textAlign(RIGHT, CENTER);
+  stroke(col);
+  strokeWeight(1.5);
+  for (let d = 0; d <= MAX_DEPTH; d += 1000) {
+    const yy = top + remap(d, 0, MAX_DEPTH, 0, innerH, true); // 0 at top
+    line(left - 5, yy, left, yy);
+    noStroke();
+    text(`${d}`, left - 8, yy);
+    stroke(col);
+  }
+}
+
+function drawXTicks(x, y, w, h, padL, padR, padT, padB, axisCol, xmin, xmax, ticks) {
+  const left = x + padL, bottom = y + h - padB, innerW = w - padL - padR;
+  push();
+  fill(axisCol);
+  noStroke();
+  textSize(10);
+  textAlign(CENTER, TOP);
+  ticks.forEach(v => {
+    const tx = left + remap(v, xmin, xmax, 0, innerW, true);
+    text(`${v}`, tx, bottom + 6);
+  });
+  pop();
+}
+
+function plotDepthFunction(x, y, w, h, padL, padR, padT, padB, fDepth, xmin, xmax, col) {
+  const left = x + padL, right = x + w - padR, top = y + padT, bottom = y + h - padB;
+  const innerW = right - left, innerH = bottom - top;
+  push();
+  noFill();
+  stroke(col);
+  strokeWeight(2);
+  beginShape();
+  for (let d = 0; d <= MAX_DEPTH; d += 25) {
+    const vx = clamp(fDepth(d), xmin, xmax);
+    const xx = left + remap(vx, xmin, xmax, 0, innerW, true);
+    const yy = top + remap(d, 0, MAX_DEPTH, 0, innerH, true);
+    vertex(xx, yy);
+  }
+  endShape();
+  pop();
+}
+
+function plotDepthOverlay(x, y, w, h, padL, padR, padT, padB, arr, xmin, xmax, col) {
+  const left = x + padL, right = x + w - padR, top = y + padT, bottom = y + h - padB;
+  const innerW = right - left, innerH = bottom - top;
+  const step = Math.floor(MAX_DEPTH / (arr.length - 1));
+  push();
+  noFill();
+  stroke(col);
+  strokeWeight(1.5);
+  beginShape();
+  for (let i = 0; i < arr.length; i++) {
+    const d = i * step;
+    const v = clamp(arr[i], xmin, xmax);
+    const xx = left + remap(v, xmin, xmax, 0, innerW, true);
+    const yy = top + remap(d, 0, MAX_DEPTH, 0, innerH, true);
+    vertex(xx, yy);
+  }
+  endShape();
+  pop();
+}
+
+function plotDepthFunctionMasked(x, y, w, h, padL, padR, padT, padB, fDepth, xmin, xmax, col, maskFn) {
+  const left = x + padL, right = x + w - padR, top = y + padT, bottom = y + h - padB;
+  const innerW = right - left, innerH = bottom - top;
+  push();
+  noFill();
+  stroke(col);
+  strokeWeight(2);
+  beginShape();
+  for (let d = 0; d <= MAX_DEPTH; d += 25) {
+    const v = fDepth(d);
+    if (!maskFn(v)) { endShape(); beginShape(); continue; }
+    const xx = left + remap(v, xmin, xmax, 0, innerW, true);
+    const yy = top + remap(d, 0, MAX_DEPTH, 0, innerH, true);
+    vertex(xx, yy);
+  }
+  endShape();
+  pop();
+}
+
+function plotDepthOverlayMasked(x, y, w, h, padL, padR, padT, padB, arr, xmin, xmax, col, maskFn) {
+  const left = x + padL, right = x + w - padR, top = y + padT, bottom = y + h - padB;
+  const innerW = right - left, innerH = bottom - top;
+  const step = Math.floor(MAX_DEPTH / (arr.length - 1));
+  push();
+  noFill();
+  stroke(col);
+  strokeWeight(1.5);
+  beginShape();
+  for (let i = 0; i < arr.length; i++) {
+    const d = i * step, v = arr[i];
+    if (!maskFn(v)) { endShape(); beginShape(); continue; }
+    const xx = left + remap(v, xmin, xmax, 0, innerW, true);
+    const yy = top + remap(d, 0, MAX_DEPTH, 0, innerH, true);
+    vertex(xx, yy);
+  }
+  endShape();
+  pop();
+}
+
+// Well and fluids drawing
+function drawWellAndFluids() {
+  const px = well.x + (well.w - dp.w) / 2;
+  const wLeftAnn = (well.w - dp.w) / 2 - 2;
+  const wRightAnn = wLeftAnn;
+  const xLeftAnn = well.x + 2;
+  const xRightAnn = well.x + well.w - wRightAnn - 2;
+
+  noStroke();
+  fill(0, 0, 20, 220);
+  rect(well.x, well.y, well.w, well.h, 8);
+  fill(0, 0, 0, 90);
+  rect(px, well.y, dp.w, well.h);
+
+  // Draw DS fluid (downwards)
+  for (let i = 0; i < N_DS; i++) {
+    const yTop = mapDepthToY(i * CELL_M);
+    const yBot = mapDepthToY((i + 1) * CELL_M);
+    const hue = remap(dsGrid[i], MW_MIN, MW_MAX, 170, 355);
+    fill(hue, 70, 70, 210);
+    rect(px + 1, yTop, dp.w - 2, yBot - yTop);
+  }
+
+  // Draw annulus above BOP (upwards)
+  for (let i = 0; i < N_ABV; i++) {
+    const yBot = mapDepthToY((i + 1) * CELL_M);
+    const yTop = mapDepthToY(i * CELL_M);
+    const hue = remap(annAboveGrid[N_ABV - 1 - i], MW_MIN, MW_MAX, 170, 355);
+    fill(hue, 70, 70, 210);
+    if (wLeftAnn > 0) rect(xLeftAnn, yBot, wLeftAnn, yTop - yBot);
+    if (wRightAnn > 0) rect(xRightAnn, yBot, wRightAnn, yTop - yBot);
+  }
+
+  // Draw annulus below BOP (upwards)
+  for (let i = 0; i < N_BELOW; i++) {
+    const yBot = mapDepthToY(BOP_DEPTH + (i + 1) * CELL_M);
+    const yTop = mapDepthToY(BOP_DEPTH + i * CELL_M);
+    const hue = remap(annBelowGrid[N_BELOW - 1 - i], MW_MIN, MW_MAX, 170, 355);
+    fill(hue, 70, 70, 210);
+    if (wLeftAnn > 0) rect(xLeftAnn, yBot, wLeftAnn, yTop - yBot);
+    if (wRightAnn > 0) rect(xRightAnn, yBot, wRightAnn, yTop - yBot);
+  }
+
+  // Draw booster line (downwards, right side)
+  const boosterX = well.x + well.w + 20;
+  const boosterW = 20;
+  stroke(0, 0, 50, 160);
+  strokeWeight(2);
+  noFill();
+  line(boosterX, well.y, boosterX, well.y + well.h);
+  noStroke();
+  for (let i = 0; i < N_ABV; i++) {
+    const yTop = mapDepthToY(i * CELL_M);
+    const yBot = mapDepthToY((i + 1) * CELL_M);
+    const hue = remap(boosterGrid[i], MW_MIN, MW_MAX, 170, 355);
+    fill(hue, 70, 70, 210);
+    rect(boosterX - boosterW / 2 + 1, yTop, boosterW - 2, yBot - yTop);
+  }
+
+  // Draw level deficits if any
+  if (levelDeficit_m > 0.01) {
+    const levelY = mapDepthToY(levelDeficit_m);
+    noStroke();
+    fill(0, 0, 0, 80);
+    rect(px + 1, well.y, dp.w - 2, levelY - well.y);
+    stroke(55, 80, 90);
+    strokeWeight(2);
+    line(px + 3, levelY, px + dp.w - 3, levelY);
+    noStroke();
+    fill(0, 0, 95);
+    textAlign(LEFT, CENTER);
+    textSize(11);
+    text(`DS level ↓ ${nf(levelDeficit_m, 1, 1)} m`, px + dp.w, levelY);
+    textAlign(CENTER, CENTER);
+  }
+
+  // Draw MPD cap if on
+  if (MPD_ON) {
+    const capY = well.y - 8;
+    const xL = well.x + 2;
+    const xR = well.x + well.w - 2;
+    noStroke();
+    fill(0, 80, 80, 230);
+    rect(xL, capY, xR - xL, 14, 3);
+    fill(0, 0, 100);
+    textSize(12);
+    textAlign(CENTER, BASELINE);
+    text("RCD", (xL + xR) / 2, capY + 12);
+    textAlign(CENTER, CENTER);
+  }
+}
+
+// CML visual
+function drawCMLVisual() {
+  if (!CML_ON) return;
+  const yPump = mapDepthToY(CML_DEPTH);
+  const pumpX = well.x + well.w + 8;
+  const pumpSize = 16;
+  noStroke();
+  fill(55, 100, 100, 240);
+  rect(pumpX, yPump - pumpSize / 2, pumpSize, pumpSize, 3);
+
+  const pipeW = 12, pipeX = pumpX + pumpSize + 10;
+  stroke(0, 0, 50, 160);
+  noFill();
+  const yTop = well.y;
+  rect(pipeX - pipeW / 2, yTop, pipeW, yPump - yTop, 3);
+  noStroke();
+  for (let i = 0; i < N_ABV; i++) {
+    const dTop = i * CELL_M;
+    const dBot = Math.min((i + 1) * CELL_M, BOP_DEPTH);
+    if (dTop >= CML_DEPTH) break;
+    const segTop = mapDepthToY(dTop);
+    const segBot = mapDepthToY(Math.min(dBot, CML_DEPTH));
+    const hue = remap(cmlPipeGrid[i], MW_MIN, MW_MAX, 170, 355);
+    fill(hue, 70, 70, 210);
+    rect(pipeX - pipeW / 2 + 1, segTop, pipeW - 2, segBot - segTop);
+  }
+  stroke(55, 100, 100);
+  strokeWeight(2);
+  line(pipeX, yTop + 8, pipeX, yTop + 28);
+  line(pipeX - 5, yTop + 14, pipeX, yTop + 8);
+  line(pipeX + 5, yTop + 14, pipeX, yTop + 8);
+}
+
+// Frames
+function drawBottomFrames() {
+  stroke(0, 0, 100);
+  noFill();
+  rect(rheoFrameX, frameY, rheoFrameW, frameHeight, 8);
+  rect(gelFrameX, frameY, gelFrameW, frameHeight, 8);
+  rect(geomFrameX, frameY, geomFrameW, frameHeight, 8);
+}
+
+function drawEnhancedHydraulicsFrame() {
+  stroke(0, 0, 100);
+  noFill();
+  rect(ehFrameX, ehFrameY, ehFrameW, ehFrameH, 8);
+}
+
+// Depth grid and references
+function drawDepthGrid() {
+  push();
+  translate(well.x, well.y);
+  stroke(0, 0, 80, 100);
+  strokeWeight(1);
+  for (let d = 0; d <= MAX_DEPTH; d += 500) {
+    let y = mapDepthToY(d) - well.y;
+    line(0, y, well.w, y);
+    fill(0, 0, 95);
+    noStroke();
+    textAlign(RIGHT, CENTER);
+    text(d + "m", -5, y);
+  }
+  pop();
+}
+
+function drawReferenceBadges() {
+  push();
+  translate(well.x, well.y);
+  MARKS.forEach(mark => {
+    let y = mapDepthToY(mark.d) - well.y;
+    fill(0, 0, 95);
+    noStroke();
+    textAlign(LEFT, CENTER);
+    text(mark.name, well.w + 5, y);
+    line(well.w, y, well.w + 3, y);
+  });
+  pop();
+}
+
+// Captured overlays (for pressure and ECD)
+function drawCapturedOverlays() {
+  if (!capturedP || !capturedECD) return;
+  // Assume chart positions; adjust as needed
+  plotDepthOverlay(300, 130, 400, 420, 40, 20, 20, 40, capturedP, 0, 5000, color(0, 255, 0));
+  plotDepthOverlayMasked(800, 130, 400, 420, 40, 20, 20, 40, capturedECD, MW_MIN, MW_MAX, color(255, 255, 0), v => true);
+}
+
+// Export for other modules
+window.drawWellAndFluids = drawWellAndFluids;
+window.drawCMLVisual = drawCMLVisual;
+// Add more exports if needed for modular use
+
+
+// UI Functions for Losses V8: Building Panels, Sliders, Inputs, and Buttons
+// This module includes all UI creation and interaction functions from Losses V8.
+// It assumes p5.js environment with createInput, createSlider, createButton, createSelect, etc.
+// Globals like rheoDefaults, EH, rheoPanel, etc., are assumed to be defined in core logic module.
+
+// Rheology UI
+function buildRheologyUI(x0, y0) {
+  const label = (txt, x, y) => createDiv(txt).position(x, y).style("color", "#E6E6E6").style("font-size", "12px");
+  const box = (val, x, y, w = 80) => {
+    const el = createInput(String(val), 'number');
+    el.position(x, y).size(w);
+    return el;
+  };
+  const SEP_Y = 50;
+  const COL_W = 100;
+  const COL_GAP = 10;
+  const xs = i => x0 + i * (COL_W + COL_GAP);
+
+  label("Rheology Model", x0, y0 - 30);
+  rheoPanel.modelSel = createSelect();
+  rheoPanel.modelSel.position(x0, y0 - 14).size(130, 24);
+  ["HB", "PowerLaw", "Bingham"].forEach(o => rheoPanel.modelSel.option(o));
+  rheoPanel.modelSel.selected(ACTIVE_RHEO_MODEL || "HB");
+  rheoPanel.modelSel.changed(() => {
+    ACTIVE_RHEO_MODEL = rheoPanel.modelSel.value();
+    doRheologyFit();
+  });
+
+  let y = y0 + 90;
+  label("Funnel (s/qt)", xs(0), y - 18); rheoPanel.fv = box(rheoDefaults.fv, xs(0), y);
+  label("Temp (°C)", xs(1), y - 18); rheoPanel.T = box(rheoDefaults.T, xs(1), y);
+  label("R600", xs(2), y - 18); rheoPanel.R600 = box(rheoDefaults.R600, xs(2), y);
+  label("R300", xs(3), y - 18); rheoPanel.R300 = box(rheoDefaults.R300, xs(3), y);
+  label("R200", xs(4), y - 18); rheoPanel.R200 = box(rheoDefaults.R200, xs(4), y);
+  label("R100", xs(5), y - 18); rheoPanel.R100 = box(rheoDefaults.R100, xs(5), y);
+  y += SEP_Y;
+  label("R6", xs(0), y - 18); rheoPanel.R6 = box(rheoDefaults.R6, xs(0), y);
+  label("R3", xs(1), y - 18); rheoPanel.R3 = box(rheoDefaults.R3, xs(1), y);
+  label("R1", xs(2), y - 18); rheoPanel.R1 = box(rheoDefaults.R1, xs(2), y);
+  label("PV (cP)", xs(3), y - 18); rheoPanel.PV = box(rheoDefaults.PV, xs(3), y);
+  label("YP (lbf/100ft²)", xs(4), y - 18); rheoPanel.YP = box(rheoDefaults.YP, xs(4), y, 110);
+
+  y += SEP_Y - 10;
+  rheoPanel.fitBtn = createButton("Fit curves").position(x0, y).size(110, 26);
+  rheoPanel.showFitBtn = createButton("Show fitted params").position(x0 + 120, y).size(170, 26);
+  rheoPanel.fitBtn.mousePressed(() => doRheologyFit());
+  rheoPanel.showFitBtn.mousePressed(() => showFittedParams());
+  rheoPanel.statusDiv = createDiv("Awaiting fit.");
+  rheoPanel.statusDiv.position(x0 + 300, y + 2).style("color", "#CCCCCC").style("font-size", "12px");
+
+  [rheoPanel.R600, rheoPanel.R300, rheoPanel.R200, rheoPanel.R100,
+   rheoPanel.R6, rheoPanel.R3, rheoPanel.R1,
+   rheoPanel.PV, rheoPanel.YP].forEach(el => { if (el) el.input(() => doRheologyFit()); });
+}
+
+// Enhanced Hydraulics UI
+function buildEnhancedHydraulicsUI(x0, y0) {
+  const mkLabel = (t, x, y) => createDiv(t).position(x, y).style('color', '#EEE').style('font-size', '12px');
+  const rowH = 26, gapY = 36, colW = 180, knobW = 160;
+
+  mkLabel('Enhanced Hydraulics (experimental)', x0, y0 - 4);
+
+  let y = y0 + 22;
+  EH.ECC.onToggle = createButton(EH.ECC.on ? 'ECC: ON' : 'ECC: OFF')
+    .position(x0, y).size(100, rowH)
+    .mousePressed(() => {
+      EH.ECC.on = !EH.ECC.on;
+      EH.ECC.onToggle.html(EH.ECC.on ? 'ECC: ON' : 'ECC: OFF');
+    });
+  mkLabel('Eccentricity gain ', x0 + 100, y + 4);
+  EH.ECC.slider = createSlider(-1, +1, EH.ECC.s, 0.01).position(x0 + 260, y + 4).style('width', knobW + 'px');
+  EH.ECC.slider.input(() => { EH.ECC.s = Number(EH.ECC.slider.value()); });
+
+  y += gapY;
+  EH.ROUGH.onToggle = createButton(EH.ROUGH.on ? 'ROUGH: ON' : 'ROUGH: OFF')
+    .position(x0, y).size(100, rowH)
+    .mousePressed(() => {
+      EH.ROUGH.on = !EH.ROUGH.on;
+      EH.ROUGH.onToggle.html(EH.ROUGH.on ? 'ROUGH: ON' : 'ROUGH: OFF');
+    });
+  mkLabel('Roughness gain ', x0 + 100, y + 4);
+  EH.ROUGH.slider = createSlider(-1, +1, EH.ROUGH.s, 0.01).position(x0 + 260, y + 4).style('width', knobW + 'px');
+  EH.ROUGH.slider.input(() => { EH.ROUGH.s = Number(EH.ROUGH.slider.value()); });
+
+  y += gapY;
+  EH.KLOSS.onToggle = createButton(EH.KLOSS.on ? 'K-LOSS: ON' : 'K-LOSS: OFF')
+    .position(x0, y).size(100, rowH)
+    .mousePressed(() => {
+      EH.KLOSS.on = !EH.KLOSS.on;
+      EH.KLOSS.onToggle.html(EH.KLOSS.on ? 'K-LOSS: ON' : 'K-LOSS: OFF');
+    });
+  mkLabel(`K-loss → ±${EH_TUNE.kloss_spp_base} psi`, x0 + 100, y + 4);
+  EH.KLOSS.slider = createSlider(-1, +1, EH.KLOSS.s, 0.01).position(x0 + 260, y + 4).style('width', knobW + 'px');
+  EH.KLOSS.slider.input(() => { EH.KLOSS.s = Number(EH.KLOSS.slider.value()); });
+
+  y += gapY;
+  EH.PCOR.onToggle = createButton(EH.PCOR.on ? 'P-only: ON' : 'P-only: OFF')
+    .position(x0, y).size(100, rowH)
+    .mousePressed(() => {
+      EH.PCOR.on = !EH.PCOR.on;
+      EH.PCOR.onToggle.html(EH.PCOR.on ? 'P-only: ON' : 'P-only: OFF');
+    });
+  mkLabel('Strength ', x0 + 100, y + 4);
+  EH.PCOR.slider = createSlider(-1, +1, EH.PCOR.s, 0.01).position(x0 + 260, y + 4).style('width', knobW + 'px');
+  EH.PCOR.slider.input(() => { EH.PCOR.s = Number(EH.PCOR.slider.value()); });
+
+  mkLabel('Fluid', x0 + 500, y - 120);
+  EH.PCOR.sel = createSelect().position(x0 + 500, y - 100).size(120, rowH);
+  ['WBM', 'OBM', 'Diesel'].forEach(f => EH.PCOR.sel.option(f));
+  EH.PCOR.sel.selected(EH.PCOR.fluid || 'WBM');
+  EH.PCOR.sel.changed(() => { EH.PCOR.fluid = EH.PCOR.sel.value(); });
+
+  y += gapY + 6;
+  mkLabel('Friction mode:', x0 - 1390, y - 145);
+  const fmSel = createSelect().position(x0 - 1310, y - 145).size(120, rowH);
+  ['Hidraulics', 'Generic (Friction K)'].forEach(m => fmSel.option(m));
+  fmSel.selected(FRICTION_MODE);
+  fmSel.changed(() => { FRICTION_MODE = fmSel.value(); });
+
+  mkLabel('Hydraulics mode:', x0 - 1170, y - 145);
+  const hmSel = createSelect().position(x0 - 1070, y - 145).size(130, rowH);
+  ['API', 'Refined'].forEach(m => hmSel.option(m));
+  hmSel.selected(HYDRAULICS_MODEL);
+  hmSel.changed(() => { HYDRAULICS_MODEL = hmSel.value(); });
+
+  mkLabel('Rheo:', x0 - 910, y - 145);
+  const rSel = createSelect().position(x0 - 865, y - 145).size(110, rowH);
+  ['HB', 'PowerLaw', 'Bingham'].forEach(m => rSel.option(m));
+  rSel.selected(ACTIVE_RHEO_MODEL);
+  rSel.changed(() => {
+    ACTIVE_RHEO_MODEL = rSel.value();
+    doRheologyFit();
+  });
+}
+
+// Losses UI
+function buildLossesUI() {
+  const pos = lossesUIPosition();
+  const x = pos.x, y = pos.y;
+
+  uiLosses.root = createDiv('').position(x, y).style('padding', '8px')
+    .style('border', '1px solid rgba(255,255,255,0.15)')
+    .style('border-radius', '8px')
+    .style('background', 'rgba(0,0,0,0.25)')
+    .style('backdrop-filter', 'blur(6px)')
+    .style('color', '#EEE');
+
+  uiLosses.title = createDiv('Loss Zones').parent(uiLosses.root)
+    .style('font-weight', 'bold').style('margin-bottom', '6px');
+
+  uiLosses.toggleBtn = createButton(LOSSES_ON ? 'Losses: ON' : 'Losses: OFF').parent(uiLosses.root)
+    .style('margin-bottom', '8px')
+    .mousePressed(() => { LOSSES_ON = !LOSSES_ON; uiLosses.toggleBtn.html(LOSSES_ON ? 'Losses: ON' : 'Losses: OFF'); });
+
+  const headRow = createDiv('Depth (m) | Frac P (psi) | Qref (gpm) | ΔPref (psi) | n').parent(uiLosses.root)
+    .style('font-size', '11px').style('opacity', '0.7').style('margin-bottom', '4px');
+
+  for (let i = 0; i < 3; i++) {
+    const row = createDiv('').parent(uiLosses.root).style('margin-bottom', '4px');
+    const depth = createInput('', 'number').parent(row).attribute('placeholder', 'e.g., 2950');
+    const fracP = createInput('', 'number').parent(row).attribute('placeholder', 'e.g., 6500');
+    const qref = createInput('', 'number').parent(row).attribute('placeholder', 'e.g., 500');
+    const dpref = createInput('', 'number').parent(row).attribute('placeholder', 'e.g., 200');
+    const n = createInput('1.0', 'number').parent(row);
+
+    [depth, fracP, qref, dpref, n].forEach(inp => {
+      inp.style('background', 'rgba(255,255,255,0.07)')
+         .style('color', '#EEE')
+         .style('border', '1px solid rgba(255,255,255,0.12)')
+         .style('height', '22px')
+         .style('padding', '0 6px')
+         .style('border-radius', '6px')
+         .style('font-size', '12px');
+    });
+
+    depth.input(() => { lossZones[i].depth_m = Number(depth.value()) || 0; lossZones[i].enabled = lossZones[i].depth_m > 0; });
+    fracP.input(() => { lossZones[i].fracPressure_psi = Number(fracP.value()) || 0; });
+    qref.input(() => { lossZones[i].Qref_gpm = Number(qref.value()) || 0; });
+    dpref.input(() => { lossZones[i].DPref_psi = Number(dpref.value()) || 0; });
+    n.input(() => { lossZones[i].n = Number(n.value()) || 1.0; });
+
+    uiLosses.rows[i] = { depth, fracP, qref, dpref, n };
+  }
+
+  uiLosses.help = createDiv(
+    `<div style="margin-top:8px;font-size:11px;opacity:.8">
+      <b>Model:</b> Q<sub>loss</sub>=C<sub>L</sub>(ΔP)<sup>n</sup>, C<sub>L</sub>=Q<sub>ref</sub>/ΔP<sub>ref</sub><sup>n</sup>.<br/>
+      Loss fluid is extracted from the cell at depth (composition-aware). Coupled iteration adjusts P at each zone.<br/>
+      Riser must be full to see Flow Out at surface; compressibility uses wet volume compliance.
+    </div>`
+  ).parent(uiLosses.root);
+}
+
+function refreshLossesUIFromModel() {
+  if (!uiLosses.root) return;
+  for (let i = 0; i < 3; i++) {
+    const z = lossZones[i], r = uiLosses.rows[i];
+    if (z.depth_m > 0) r.depth.value(String(z.depth_m));
+    if (z.fracPressure_psi > 0) r.fracP.value(String(z.fracPressure_psi));
+    if (z.Qref_gpm > 0) r.qref.value(String(z.Qref_gpm));
+    if (z.DPref_psi > 0) r.dpref.value(String(z.DPref_psi));
+    if (z.n > 0) r.n.value(String(z.n));
+  }
+  uiLosses.toggleBtn.html(LOSSES_ON ? 'Losses: ON' : 'Losses: OFF');
+}
+
+// Diagnostics UI
+function buildDiagnosticsUI() {
+  const pos = lossesUIPosition();
+  const dx = 430;
+  const x = Math.min(width - 300, pos.x + dx);
+  const y = pos.y;
+
+  uiDiag.root = createDiv('').position(x, y).style('padding', '8px')
+    .style('border', '1px solid rgba(255,255,255,0.15)')
+    .style('border-radius', '8px')
+    .style('background', 'rgba(0,0,0,0.25)')
+    .style('backdrop-filter', 'blur(6px)')
+    .style('color', '#EEE');
+
+  createDiv('Diagnostics').parent(uiDiag.root)
+    .style('font-weight', 'bold').style('margin-bottom', '6px');
+
+  uiDiag.text = createDiv('').parent(uiDiag.root)
+    .style('font-family', 'monospace').style('font-size', '12px').style('line-height', '1.25');
+}
+
+function updateDiagnosticsUI(dt_s) {
+  if (!uiDiag.text) return;
+  const Qloss = totalLossRate_gpm();
+  const Qcml = effective_Q_CML_gpm();
+  const Qcomp = compressionEquivalentFlow_gpm(dt_s);
+  const residual = (Q_DS + Q_BO) - (ANN_TOP_DEPTH_m <= 0.5 ? FLOW_OUT_gpm : 0) - Qcml - Qloss - Qcomp;
+
+  uiDiag.text.html(
+    `FO (gpm): ${residual.toFixed(1)}<br/>` +
+    `ΣLoss (gpm): ${Qloss.toFixed(1)}<br/>` +
+    `Q_CML_eff (gpm): ${Qcml.toFixed(1)}<br/>` +
+    `Q_comp (gpm): ${Qcomp.toFixed(1)}<br/>` +
+    `Riser Top (m): ${ANN_TOP_DEPTH_m.toFixed(1)}<br/>` +
+    `MassBal Resid (gpm): ${residual.toFixed(1)}`
+  );
+}
+
+// Main Controls UI (sliders, buttons, etc.)
+function buildMainControlsUI() {
+  // DS MW
+  dsMWSlider = createSlider(MW_MIN, MW_MAX, MW_DS, MW_STEP).position(100, 50);
+  dsMWInput = createInput(nf(MW_DS, 1, 1)).position(250, 50);
+  dsMWInput.input(() => setDSMW(dsMWInput.value()));
+  dsMWSlider.input(() => setDSMW(dsMWSlider.value()));
+
+  // DS Q
+  dsQSlider = createSlider(Q_MIN, Q_MAX, Q_DS, Q_STEP).position(100, 80);
+  dsQInput = createInput(nf(Q_DS, 1, 0)).position(250, 80);
+  dsQInput.input(() => setDSQ(dsQInput.value()));
+  dsQSlider.input(() => setDSQ(dsQSlider.value()));
+
+  // Similar for BO MW, BO Q, K_FAC, RPM
+
+  // MPD Button
+  mpdBtn = createButton(MPD_ON ? 'MPD: ON' : 'MPD: OFF').position(100, 200);
+  mpdBtn.mousePressed(() => {
+    MPD_ON = !MPD_ON;
+    mpdBtn.html(MPD_ON ? 'MPD: ON' : 'MPD: OFF');
+  });
+
+  // SBP Mode Button
+  sbpModeBtn = createButton(SBP_MODE === "manual" ? 'SBP: Manual' : 'SBP: Anchor').position(100, 230);
+  sbpModeBtn.mousePressed(() => {
+    SBP_MODE = SBP_MODE === "manual" ? "anchor" : "manual";
+    sbpModeBtn.html(SBP_MODE === "manual" ? 'SBP: Manual' : 'SBP: Anchor');
+  });
+
+  // Capture Button
+  captureBtn = createButton('Capture State').position(100, 260);
+  captureBtn.mousePressed(captureState);
+
+  // Display Captured
+  displayBtn = createButton(showCaptured ? 'Hide Captured' : 'Show Captured').position(100, 290);
+  displayBtn.mousePressed(() => {
+    showCaptured = !showCaptured;
+    displayBtn.html(showCaptured ? 'Hide Captured' : 'Show Captured');
+  });
+
+  // CML Controls
+  cmlBtn = createButton(CML_ON ? 'CML: ON' : 'CML: OFF').position(100, 320);
+  cmlBtn.mousePressed(() => {
+    CML_ON = !CML_ON;
+    cmlBtn.html(CML_ON ? 'CML: ON' : 'CML: OFF');
+  });
+  cmlAutoBtn = createButton(AUTO_CML_ON ? 'Auto CML: ON' : 'Auto CML: OFF').position(100, 350);
+  cmlAutoBtn.mousePressed(() => {
+    AUTO_CML_ON = !AUTO_CML_ON;
+    cmlAutoBtn.html(AUTO_CML_ON ? 'Auto CML: ON' : 'Auto CML: OFF');
+  });
+  cmlQSlider = createSlider(0, 2000, Q_CML, 10).position(100, 380);
+  cmlQInput = createInput(nf(Q_CML, 1, 0)).position(250, 380);
+  cmlQInput.input(() => { Q_CML = Number(cmlQInput.value()) || 0; });
+  cmlQSlider.input(() => { Q_CML = cmlQSlider.value(); });
+  cmlDepthInput = createInput(nf(CML_DEPTH, 1, 0)).position(100, 410);
+  cmlDepthInput.input(() => { CML_DEPTH = Number(cmlDepthInput.value()) || 0; });
+
+  // Add labels for all (createDiv('DS MW (ppg)', 10, 50); etc.)
+}
+
+// State Setters
+function setDSMW(v) {
+  MW_DS = clamp(Number(v) || 0, MW_MIN, MW_MAX);
+  if (dsMWSlider) dsMWSlider.value(MW_DS);
+  if (dsMWInput) dsMWInput.value(nf(MW_DS, 1, 1));
+  if (dsGrid && dsGrid.length) dsGrid[0] = MW_DS;
+}
+
+function setBOMW(v) {
+  MW_BO = clamp(Number(v) || 0, MW_MIN, MW_MAX);
+  if (boMWSlider) boMWSlider.value(MW_BO);
+  if (boMWInput) boMWInput.value(nf(MW_BO, 1, 1));
+  if (boosterGrid && boosterGrid.length) boosterGrid[0] = MW_BO;
+}
+
+function setDSQ(v) {
+  Q_DS = clamp(Number(v) || 0, Q_MIN, Q_MAX);
+  if (dsQSlider) dsQSlider.value(Q_DS);
+  if (dsQInput) dsQInput.value(nf(Q_DS, 1, 0));
+}
+
+function setBOQ(v) {
+  Q_BO = clamp(Number(v) || 0, Q_MIN, Q_MAX);
+  if (boQSlider) boQSlider.value(Q_BO);
+  if (boQInput) boQInput.value(nf(Q_BO, 1, 0));
+}
+
+function setK(v) {
+  K_FAC = clamp(Number(v) || 0, 0.0, 0.0002);
+  if (kSlider) kSlider.value(K_FAC);
+  if (kInput) kInput.value(nf(K_FAC, 1, 6));
+}
+
+function setRPM(v) {
+  RPM = clamp(Number(v) || 0, 0, 220);
+  if (rpmSlider) rpmSlider.value(RPM);
+  if (rpmInput) rpmInput.value(String(RPM));
+}
+
+function setFrictionMode(mode) {
+  FRICTION_MODE = (mode === 'generic') ? 'generic' : 'hydraulics';
+}
+
+// Export for other modules
+window.buildRheologyUI = buildRheologyUI;
+window.buildEnhancedHydraulicsUI = buildEnhancedHydraulicsUI;
+window.buildLossesUI = buildLossesUI;
+window.buildDiagnosticsUI = buildDiagnosticsUI;
+window.buildMainControlsUI = buildMainControlsUI;
+window.refreshLossesUIFromModel = refreshLossesUIFromModel;
+window.updateDiagnosticsUI = updateDiagnosticsUI;
+// Add exports for state setters if needed

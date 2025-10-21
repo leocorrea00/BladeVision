@@ -1,0 +1,34 @@
+function zoneLoss_gpm(z){
+  if (!z.enabled || z.depth_m < annulusTopDepthGlobal()) return 0;
+
+  // Annulus pressure at zone (includes friction + SBP)
+  const Pzone = pressureAtDepth(z.depth_m);
+  const dP = Math.max(0, Pzone - z.fracPressure_psi);
+
+  // Geometry of the leak path
+  const D = z.lossDiameter_m ?? 0.01;  // e.g. 1 cm fracture aperture
+  const L = z.lossLength_m   ?? 0.5;   // flow path length
+
+  // Rheology model selected by user
+  const model = (window.ACTIVE_RHEO_MODEL || 'HB').toUpperCase();
+
+  let Q_m3s = 0;
+  if (model === 'BINGHAM') {
+    const tauY = window.TAUY_Pa ?? 5;
+    const muP  = window.MUP_PaS ?? 0.1;
+    Q_m3s = binghamFlow(dP, D, L, tauY, muP);
+  }
+  else if (model === 'PL') {
+    const K = window.K_PaSn ?? 0.2;
+    const n = window.N_dim  ?? 0.7;
+    Q_m3s = powerLawFlow(dP, D, L, K, n);
+  }
+  else { // Herschel–Bulkley
+    const tauY = window.TAUY_Pa ?? 5;
+    const K    = window.K_PaSn  ?? 0.2;
+    const n    = window.N_dim   ?? 0.6;
+    Q_m3s = herschelBulkleyFlow(dP, D, L, tauY, K, n);
+  }
+
+  return Q_m3s * 15850.323; // → gpm
+}
