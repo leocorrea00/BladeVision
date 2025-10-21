@@ -995,25 +995,37 @@ function stepAdvection(){
   // ===============================================
   // 4) ANNULUS BELOW THE BOP: DOWN + UP PROCESSING
   // ===============================================
+
+  // Calculate active loss rate (fluid exiting at loss zones)
+  const qLoss_m3s = (LOSSES_ON && totalLossRate_gpm) ? totalLossRate_gpm() / 15850.323 : 0;
+
   // (A) DOWNWARD advection (booster/topfill routed toward zone)
+  // CRITICAL: Fluid going DOWN exits at loss zone, doesn't continue to bottom!
   if (qDown_m3s > FLOW_THRESHOLD) {
-    const v_down = qDown_m3s / Math.max(A_below, 1e-12);
-    const step_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_down / vref);
+    // Net downward flow AFTER losses exit
+    const qDownNet_m3s = Math.max(0, qDown_m3s - qLoss_m3s);
 
-    accBelow += step_m;
-    while (accBelow >= CELL_M){
-      // Shift DOWN from BOP to deeper cells
-      for (let i = annBelowGrid.length - 1; i > 0; i--) {
-        annBelowGrid[i] = annBelowGrid[i - 1];
+    if (qDownNet_m3s > FLOW_THRESHOLD) {
+      // Some fluid continues past loss zone to bottom
+      const v_down = qDownNet_m3s / Math.max(A_below, 1e-12);
+      const step_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_down / vref);
+
+      accBelow += step_m;
+      while (accBelow >= CELL_M){
+        // Shift DOWN from BOP to deeper cells
+        for (let i = annBelowGrid.length - 1; i > 0; i--) {
+          annBelowGrid[i] = annBelowGrid[i - 1];
+        }
+        // New fluid (mixture of booster + topfill routed down) enters at BOP index 0
+        const qBO_down = qDown_m3s; // router made this booster-first
+        const qTF_down = Math.max(0, ((TOPFILL_ON ? (Q_TOPFILL||0) : 0)/15850.323));
+        const qTot = Math.max(qBO_down + qTF_down, 1e-12);
+        annBelowGrid[0] = (qBO_down * boosterMW + qTF_down * MW_TOPFILL) / qTot;
+
+        accBelow -= CELL_M;
       }
-      // New fluid (mixture of booster + topfill routed down) enters at BOP index 0
-      const qBO_down = qDown_m3s; // router made this booster-first
-      const qTF_down = Math.max(0, ((TOPFILL_ON ? (Q_TOPFILL||0) : 0)/15850.323));
-      const qTot = Math.max(qBO_down + qTF_down, 1e-12);
-      annBelowGrid[0] = (qBO_down * boosterMW + qTF_down * MW_TOPFILL) / qTot;
-
-      accBelow -= CELL_M;
     }
+    // Else: All downward flow exits at loss zone, no advection past it
   }
 
   // (B) UPWARD advection (leftover DS above zone)
@@ -2236,6 +2248,14 @@ function computeFlowOut_gpm(dt_s) {
   const top = annulusTopDepthGlobal();
   const riserAtSurface = (top <= 0.5);
   const riserAboveBOP = (top < BOP_DEPTH);
+  const lossesActive = LOSSES_ON && totalLossRate_gpm() > 1.0;
+
+  // CRITICAL: During losses, level drops - FO must be ZERO until level is truly at surface
+  if (lossesActive && !riserAtSurface) {
+    FLOW_OUT_gpm = 0;
+    FLOWOUT_VELOCITY_gpm_s = 0;
+    return 0;
+  }
 
   if (!riserAboveBOP) {
     // Riser not above BOP - decay to zero (level too low for returns)
@@ -2832,18 +2852,20 @@ function computeImbalanceFlows(){
   const dP_ds_ann = smoothDeadbandPsi(P_ds_TD - P_ann_TD, IMB_DEADBAND_PSI);
   const dP_bo_ris = smoothDeadbandPsi(P_bo_BOP - P_ris_BOP, IMB_DEADBAND_PSI);
 
-  // Calculate resistances at reference flow
-  const qRef = (Q_REF / 15850.323);
-  
+  // Calculate resistances at ADAPTIVE reference flow (prevents oscillation with high Q_REF)
+  // Use actual flow rates to improve linearization accuracy
+  const qActual = Math.max((Q_DS + Q_BO) / 15850.323, 1e-6);
+  const qRef_adaptive = Math.min(qActual * 1.2, Q_REF / 15850.323); // Use 120% of actual or Q_REF, whichever is lower
+
   // DS loop resistance (DS + annulus + bit)
-  const R_ds = drillstringLegResistancePsiPer_m3s();
-  const R_ann_below = belowBOPResistancePsiPer_m3s();
-  const R_ann_riser = riserResistancePsiPer_m3s();
-  const R_bit = 1000 / Math.max(qRef, 1e-9); // ~1000 psi @ Qref
+  const R_ds = drillstringLegResistancePsiPer_m3s(qRef_adaptive);
+  const R_ann_below = belowBOPResistancePsiPer_m3s(qRef_adaptive);
+  const R_ann_riser = riserResistancePsiPer_m3s(qRef_adaptive);
+  const R_bit = 1000 / Math.max(qRef_adaptive, 1e-9); // ~1000 psi @ qRef
   const R_loop_DS = R_ds + R_ann_below + R_ann_riser + R_bit;
 
   // Booster loop resistance
-  const R_bo = boosterResistancePsiPer_m3s();
+  const R_bo = boosterResistancePsiPer_m3s(qRef_adaptive);
   const R_loop_BO = R_bo + R_ann_riser;
 
   // Raw imbalance flows
@@ -2860,41 +2882,37 @@ function computeImbalanceFlows(){
 }
 
 // Helper: Riser resistance
-function riserResistancePsiPer_m3s() {
+function riserResistancePsiPer_m3s(qRef = Q_REF / 15850.323) {
   const L = Math.max(BOP_DEPTH - annulusTopDepthGlobal(), 0);
   if (L <= 0) return 1e9;
-  const qRef = (Q_REF / 15850.323);
   const dpdl_Pa = dPperM_riserAnnulus(qRef);
   return (dpdl_Pa * L * PSI_PER_PASCAL) / Math.max(qRef, 1e-9);
 }
 
 // Helper: Below BOP resistance
-function belowBOPResistancePsiPer_m3s() {
+function belowBOPResistancePsiPer_m3s(qRef = Q_REF / 15850.323) {
   const top = Math.max(BOP_DEPTH, annulusTopDepthGlobal());
   const L_csg = Math.max(0, SHOE_DEPTH - top);
   const L_oh = Math.max(0, TD_DEPTH - Math.max(SHOE_DEPTH, top));
-  
+
   if (L_csg + L_oh <= 0) return 1e9;
-  
-  const qRef = (Q_REF / 15850.323);
+
   const dp_csg_Pa = dPperM_casingAnnulus(qRef) * L_csg;
   const dp_oh_Pa = dPperM_openholeAnnulus(qRef) * L_oh;
-  
+
   return ((dp_csg_Pa + dp_oh_Pa) * PSI_PER_PASCAL) / Math.max(qRef, 1e-9);
 }
 
 // Helper: DS resistance
-function drillstringLegResistancePsiPer_m3s() {
+function drillstringLegResistancePsiPer_m3s(qRef = Q_REF / 15850.323) {
   const L = TD_DEPTH;
-  const qRef = (Q_REF / 15850.323);
   const dpdl_Pa = dPperM_drillstring(qRef);
   return (dpdl_Pa * L * PSI_PER_PASCAL) / Math.max(qRef, 1e-9);
 }
 
 // Helper: Booster resistance
-function boosterResistancePsiPer_m3s() {
+function boosterResistancePsiPer_m3s(qRef = Q_REF / 15850.323) {
   const L = BOP_DEPTH;
-  const qRef = (Q_REF / 15850.323);
   const dpdl_Pa = dPperM_booster(qRef);
   return (dpdl_Pa * L * PSI_PER_PASCAL) / Math.max(qRef, 1e-9);
 }
