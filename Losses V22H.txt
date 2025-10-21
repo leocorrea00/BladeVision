@@ -927,8 +927,8 @@ function stepAdvection(){
   const FLOW_THRESHOLD = 1e-8;
 
   // Routed internal section flows (magnitudes, in m^3/s) from the router:
-  const qUp_m3s   = (typeof __qAnnUp_m3s   === 'number') ? __qAnnUp_m3s   : 0;  // upward above loss zone
-  const qDown_m3s = (typeof __qAnnDown_m3s === 'number') ? __qAnnDown_m3s : 0;  // downward toward loss zone
+  const qUp_m3s   = (typeof __qAnnAbove_m3s === 'number') ? __qAnnAbove_m3s : 0;  // upward above loss zone
+  const qDown_m3s = (typeof __qAnnBelow_m3s === 'number') ? __qAnnBelow_m3s : 0;  // downward toward loss zone
 
   // Grids & geometry helpers you already have:
   const A_riser = area_annulus(riser_ID_m,   ds_OD_m);
@@ -974,9 +974,9 @@ function stepAdvection(){
 
       accBo += boStep_m;
       while (accBo >= CELL_M){
-        // Always inject at pipe-inlet end; router decides where it goes in annulus
-        boosterGrid.shift();         // move down the pipe
-        boosterGrid.push(MW_BO);     // newest fluid at bottom end of pipe
+        // Booster flows TOP→DOWN: new fluid enters at top (surface), exits at bottom (riser)
+        boosterGrid.pop();           // remove old fluid from bottom (exits to riser)
+        boosterGrid.unshift(MW_BO);  // add new fluid at top (from surface pump)
         accBo -= CELL_M;
       }
     }
@@ -1045,13 +1045,19 @@ function stepAdvection(){
 
     accAbove += aboveStep_m;
     while (accAbove >= CELL_M){
-      // Remove from surface, add mixture at BOP (from below + any booster that was NOT routed down)
+      // Remove from surface, add mixture at BOP (from below + booster entering riser)
       annAboveGrid.shift();
 
-      const qFromBelow = qUp_m3s;  // all upward routed volume
-      const qTotal = Math.max(qFromBelow, 1e-12);
+      // Calculate booster contribution to riser (when riser is full, booster enters here)
+      const riserFull = (typeof annulusTopDepthGlobal === 'function' ? annulusTopDepthGlobal() : 0) <= 0.5;
+      const qBO_m3s = (Q_BO || 0) / 15850.323;
+      const qDS_m3s = (Q_DS || 0) / 15850.323;
+      const qBoosterToRiser = riserFull ? qBO_m3s : 0;  // Booster only enters riser when full
+
+      const qFromBelow = Math.max(0, qUp_m3s - qBoosterToRiser);  // DS + TF flow from below
+      const qTotal = Math.max(qFromBelow + qBoosterToRiser, 1e-12);
       const fromBelowMW = annBelowGrid[0] || dsEffluentMW; // incoming upward fluid at BOP
-      const mixMW = (qFromBelow * fromBelowMW) / qTotal;
+      const mixMW = (qFromBelow * fromBelowMW + qBoosterToRiser * boosterMW) / qTotal;
 
       annAboveGrid.push(mixMW);
       accAbove -= CELL_M;
@@ -1059,10 +1065,15 @@ function stepAdvection(){
 
     if (annAboveGrid.length){
       const k = annAboveGrid.length - 1;
-      const qFromBelow = qUp_m3s;
-      const qTotal = Math.max(qFromBelow, 1e-12);
-      const fromBelowMW = annAboveGrid[0] || dsEffluentMW;
-      const mixMW = (qFromBelow * fromBelowMW) / qTotal;
+      // Calculate booster contribution for partial cell mixing
+      const riserFull = (typeof annulusTopDepthGlobal === 'function' ? annulusTopDepthGlobal() : 0) <= 0.5;
+      const qBO_m3s = (Q_BO || 0) / 15850.323;
+      const qBoosterToRiser = riserFull ? qBO_m3s : 0;
+
+      const qFromBelow = Math.max(0, qUp_m3s - qBoosterToRiser);
+      const qTotal = Math.max(qFromBelow + qBoosterToRiser, 1e-12);
+      const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
+      const mixMW = (qFromBelow * fromBelowMW + qBoosterToRiser * boosterMW) / qTotal;
       annAboveGrid[k] = (1 - accAbove/CELL_M) * annAboveGrid[k] + (accAbove/CELL_M) * mixMW;
     }
   }
@@ -1771,10 +1782,13 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // Downward annulus flow contributor (Booster that is taken by zone travels downward)
   const qAnnDown = takeBO; // this is *downward* internal flow to the zone
 
-  // Publish clean section “signals” (magnitudes, signless)
+  // Publish clean section "signals" (magnitudes, signless)
   window.__qToLoss_m3s   = qToLoss;
   window.__qAnnUp_m3s    = qAnnUp;
   window.__qAnnDown_m3s  = qAnnDown;
+  // Also publish to new variable names for compatibility
+  window.__qAnnAbove_m3s = qAnnUp;
+  window.__qAnnBelow_m3s = qAnnDown;
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
   const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
@@ -2337,7 +2351,7 @@ function slewLimit(prev, target, maxPerSec, dt){
 // Publishes: window.__qAnnAbove_m3s, window.__qAnnBelow_m3s, window.__qBelowIsDownward
 //            and updates FLOW_OUT_gpm via low-pass + slew.
 // ---------------------------------------------------------------------------
-function recomputeAnnulusSectionFlowsForLosses(dt_s){
+function recomputeAnnulusSectionFlowsForLosses(dt_s = 1/60){
   const M3_PER_GPM = 1/15850.323;
 
   // Inflows that truly enter annulus "bucket"
@@ -2354,8 +2368,12 @@ function recomputeAnnulusSectionFlowsForLosses(dt_s){
 
   // Split into sections: below BOP consumes losses first (dominant sink)
   // Whatever demand can't be met (deficit) will pull the level down.
-  const qBelow_m3s = Math.min(qDem_m3s, qAvail_m3s);         // what actually goes down to loss zone
-  const qAbove_m3s = (qIn_m3s + qTopFill_m3s - qCML_m3s) - qBelow_m3s; // remainder goes up the riser
+  let qBelow_m3s = Math.min(qDem_m3s, qAvail_m3s);         // what actually goes down to loss zone
+  let qAbove_m3s = (qIn_m3s + qTopFill_m3s - qCML_m3s) - qBelow_m3s; // remainder goes up the riser
+
+  // Add imbalances to section flows (important for accurate flow tracking)
+  qBelow_m3s += QIMB_DS2ANN_m3s;  // DS→Ann imbalance (can be negative)
+  qAbove_m3s += QIMB_BO2RIS_m3s;  // Booster→Riser imbalance (can be negative)
 
   // Publish section flows
   window.__qAnnBelow_m3s   = qBelow_m3s;
@@ -2537,54 +2555,6 @@ function equilibrateFluidLevel(dt_s, maxIterations = 5) {
 }
 
 
-
-// ---------------------------------------------------------------------------
-// Recompute effective annulus section flows (above-BOP and below-BOP) 
-// given current losses, CML intake, and whether the riser is dry.
-// Publishes window.__qAnnAbove_m3s and window.__qAnnBelow_m3s for friction.
-// Requires: M3_PER_GPM, lossZones, riserTopDepth(), annulusTopDepthGlobal(), effective_Q_CML_gpm()
-// ---------------------------------------------------------------------------
-
-function recomputeAnnulusSectionFlowsForLosses() {
-  // Existing loss calculations...
-  const lossAbove_gpm = (lossZones || [])
-    .filter(z => z && z.enabled && z.depth_m <= BOP_DEPTH)
-    .reduce((s,z)=> s + (z.Qloss_gpm || 0), 0);
-
-  const lossBelow_gpm = (lossZones || [])
-    .filter(z => z && z.enabled && z.depth_m > BOP_DEPTH)
-    .reduce((s,z)=> s + (z.Qloss_gpm || 0), 0);
-
-  const qDS_m3s  = (Q_DS || 0) * M3_PER_GPM;
-  const qBO_m3s  = (Q_BO || 0) * M3_PER_GPM;
-  const qCML_m3s = (effective_Q_CML_gpm() || 0) * M3_PER_GPM;
-  
-  const fluidTop = annulusTopDepthGlobal();
-  const belowBOP = fluidTop > BOP_DEPTH;
-
-  let qAbove_m3s = 0;
-  let qBelow_m3s = 0;
-
-  if (belowBOP) {
-    // Riser dry → all flow goes down
-    qAbove_m3s = 0;
-    qBelow_m3s = qDS_m3s + qBO_m3s - qCML_m3s - (lossBelow_gpm * M3_PER_GPM);
-  } else {
-    // Normal: riser full
-    qAbove_m3s = Math.max(0, qDS_m3s + qBO_m3s - qCML_m3s - (lossAbove_gpm * M3_PER_GPM));
-    qBelow_m3s = Math.max(0, qDS_m3s - (lossBelow_gpm * M3_PER_GPM));
-  }
-  
-  // ✅ ADD IMBALANCES TO SECTION FLOWS
-  // This makes friction calculation automatically include them
-  qBelow_m3s += QIMB_DS2ANN_m3s;  // DS→Ann imbalance (can be negative)
-  qAbove_m3s += QIMB_BO2RIS_m3s;  // Booster→Riser imbalance (can be negative)
-
-  // Publish (friction will use these)
-  window.__qAnnAbove_m3s = qAbove_m3s;
-  window.__qAnnBelow_m3s = qBelow_m3s;
-  window.__qBelowIsDownward = belowBOP;
-}
 
 function safeRheoVal(key, def){
   const el = rheoPanel && rheoPanel[key];
@@ -3538,7 +3508,7 @@ computeImbalanceFlows();
 equilibrateFluidLevel(dt_frame, 3); // 3 iterations per frame
 
 // 6. Recompute section flows with final loss rates
-recomputeAnnulusSectionFlowsForLosses();
+recomputeAnnulusSectionFlowsForLosses(dt_frame);
 
 // 7. Update CML controller
 // (already called earlier - skip if done)
