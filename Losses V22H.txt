@@ -1891,9 +1891,20 @@ function calculateFractureFriction_psi(qFrac_m3s, zone) {
     return dP_frac;
   }
 
-  // Simplified model: fracture has ~10% of annulus resistance
-  // (Fractures are easier path than annulus)
-  return 0; // Conservative: no back-pressure from fracture
+  // Fallback: Estimate fracture friction as percentage of annulus friction
+  // Fractures are easier path but NOT frictionless
+  // Assume fracture has ~20% of annulus resistance (can be tuned)
+  const qEquiv_m3s = qFrac_m3s;
+  const depth_m = zone.depth_m;
+
+  // Calculate what annulus friction would be for this flow
+  const qAbove_save = window.__qAnnAbove_m3s;
+  window.__qAnnAbove_m3s = qEquiv_m3s;
+  const P_fric_ann_equiv = frictionPsi_withCML_rheo(depth_m);
+  window.__qAnnAbove_m3s = qAbove_save;
+
+  // Fracture friction is ~20% of annulus friction (easier path but not zero)
+  return P_fric_ann_equiv * 0.2;
 }
 
 // Calculate BHP at zone with flow split between annulus and fracture
@@ -1910,17 +1921,23 @@ function calculateBHPWithLossSplit(zone, qLoss_m3s, qIn_m3s) {
   const P_hydro = PSI_COEF * ecd_ppg * depth_wet;
 
   // Split flow
+  // qIn_m3s = total flow arriving at loss zone (DS + BO during losses, or just DS + BO - losses_above)
+  // At the loss zone:
+  //   - qLoss_m3s exits to fracture
+  //   - qUp_m3s continues up to surface
   const qUp_m3s = Math.max(0, qIn_m3s - qLoss_m3s);
   const qFrac_m3s = Math.max(0, qLoss_m3s);
 
-  // CRITICAL: Calculate annulus friction based on UPWARD flow only
+  // CRITICAL: Calculate annulus friction correctly
+  // - Above zone: friction from upward flow (qUp_m3s)
+  // - Below zone: friction from downward flow (qIn_m3s, which becomes qDown before reaching zone)
   // Save current section flows
   const qAbove_save = window.__qAnnAbove_m3s;
   const qBelow_save = window.__qAnnBelow_m3s;
 
   // Temporarily set section flows for friction calculation
-  window.__qAnnAbove_m3s = qUp_m3s;
-  window.__qAnnBelow_m3s = qFrac_m3s; // flow going to loss zone
+  window.__qAnnAbove_m3s = qUp_m3s;     // Flow going UP above zone
+  window.__qAnnBelow_m3s = qIn_m3s;     // Flow going DOWN below zone (before losses exit)
 
   const P_fric_ann = frictionPsi_withCML_rheo(depth_m);
 
@@ -1958,19 +1975,39 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
   // OPTIMIZATION 1: Early exit if far below fracture pressure
   if (BHP_static < Pfrac - LOSS_DEADBAND_PSI) return 0;
 
-  // SPECIAL CASE: Static overbalance (Hyd + SBP > Pfrac even with no flow)
+  // SPECIAL CASE: Static overbalance
+  // User physics: Level only drops if Hyd + ΔP_frac + Friction_going_down > Pfrac
+  // Check if we're in static overbalance case (no flow, but pressure > Pfrac)
   if (BHP_static > Pfrac && qIn_m3s < 1e-6) {
-    // Enter "Anchor Mode" - override SBP to balance at fracture pressure
+    // This means Hyd + SBP > Pfrac with no flow
+    // This would cause level to drop, which removes SBP, causing oscillation
+    //
+    // SOLUTION: Override SBP to anchor at fracture pressure
+    // This prevents the drop-lose-SBP-rise-gain-SBP oscillation cycle
     const depth_wet = Math.max(0, zone.depth_m - wetTop);
     const ecd_ppg = ecdAtDepth(zone.depth_m);
     const P_hydro = PSI_COEF * ecd_ppg * depth_wet;
-    const SBP_override = Math.max(0, Pfrac - P_hydro - 50); // 50 psi safety margin
+
+    // Calculate friction of any flow going down (booster during losses)
+    // If booster is pumping down, include its friction
+    const qDown_m3s = window.__qAnnBelow_m3s || 0;
+
+    // Calculate friction for downward flow
+    const qBelow_save = window.__qAnnBelow_m3s;
+    window.__qAnnBelow_m3s = qDown_m3s;
+    const P_fric_down = qDown_m3s > 1e-6 ? frictionPsi_withCML_rheo(zone.depth_m) : 0;
+    window.__qAnnBelow_m3s = qBelow_save;
+
+    // SBP override: balance at Pfrac considering hydrostatic and friction going down
+    // Pfrac = P_hydro + P_fric_down + P_sbp
+    // P_sbp = Pfrac - P_hydro - P_fric_down - margin
+    const SBP_override = Math.max(0, Pfrac - P_hydro - P_fric_down - 50); // 50 psi safety margin
 
     if (MPD_ON && wetTop <= 0.5) {
       CURRENT_SBP = SBP_override;
-      console.log(`ANCHOR MODE: Zone ${zone.depth_m}m, SBP→${SBP_override.toFixed(0)} psi to prevent oscillation`);
+      console.log(`ANCHOR MODE: Zone ${zone.depth_m}m, SBP→${SBP_override.toFixed(0)} psi (Hyd=${P_hydro.toFixed(0)}, FricDown=${P_fric_down.toFixed(1)}) to prevent oscillation`);
     }
-    return 0; // No flow losses, just static balance
+    return 0; // No losses needed, system balanced
   }
 
   // OPTIMIZATION 2: Feedforward - start search near previous result
