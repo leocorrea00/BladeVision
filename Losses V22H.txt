@@ -3770,15 +3770,62 @@ gravityDensitySwap();
 refreshLossesUIFromModel();
 updateDiagnosticsUI(dt_frame);
 
-  // In draw(), after equilibrateFluidLevel:
-if (frameCount % 30 === 0) {
-  console.log('=== LEVEL DEBUG ===');
-  console.log('  Fluid Level:', LOSS_TOP_DEPTH_m.toFixed(1), 'm');
-  console.log('  Q_in:', (Q_DS + Q_BO).toFixed(1), 'gpm');
-  console.log('  Q_loss:', totalLossRate_gpm().toFixed(1), 'gpm');
-  console.log('  Net flow:', ((Q_DS + Q_BO) - totalLossRate_gpm()).toFixed(1), 'gpm');
-  
-  for (const z of lossZones.filter(z => z && z.enabled && z.Qloss_gpm > 0)) {
+  // ============================================================================
+  // COMPREHENSIVE DEBUG LOGGING (every 0.5 seconds at 60fps)
+  // ============================================================================
+  if (frameCount % 30 === 0) {
+    console.log('=== COMPREHENSIVE FLOW DEBUG (Frame ' + frameCount + ') ===');
+
+    // Level & Position
+    const levelDepth = LOSS_TOP_DEPTH_m || 0;
+    const levelStatus = levelDepth <= 0.5 ? 'AT SURFACE' :
+                        levelDepth < BOP_DEPTH ? `${levelDepth.toFixed(1)}m below surface (ABOVE BOP)` :
+                        `${levelDepth.toFixed(1)}m below surface (BELOW BOP)`;
+    console.log('  Level Status:', levelStatus);
+
+    // Mud Weights
+    const MW_DS_current = dsAvgPPG ? dsAvgPPG() : (MW_DS || 0);
+    const MW_BO_current = boosterAvgPPG ? boosterAvgPPG() : (MW_BO || 0);
+    console.log('  MW_DS:', MW_DS_current.toFixed(2), 'ppg | MW_BO:', MW_BO_current.toFixed(2), 'ppg');
+
+    // Flow Rates
+    console.log('  Q_DS:', (Q_DS || 0).toFixed(1), 'gpm | Q_BO:', (Q_BO || 0).toFixed(1), 'gpm | Total In:', ((Q_DS || 0) + (Q_BO || 0)).toFixed(1), 'gpm');
+
+    // Section Flows
+    const qUp_m3s = window.__qAnnAbove_m3s || window.__qAnnUp_m3s || 0;
+    const qDown_m3s = window.__qAnnBelow_m3s || window.__qAnnDown_m3s || 0;
+    console.log('  Q_Up (above zone):', (qUp_m3s * 15850.323).toFixed(1), 'gpm | Q_Down (below zone):', (qDown_m3s * 15850.323).toFixed(1), 'gpm');
+
+    // Losses
+    const lossRate = totalLossRate_gpm ? totalLossRate_gpm() : 0;
+    const lossesActive = LOSSES_ON && lossRate > 1.0;
+    console.log('  Q_Exit (losses):', lossRate.toFixed(1), 'gpm | Losses Active:', lossesActive);
+
+    // Flow Out
+    console.log('  FO (surface returns):', (FLOW_OUT_gpm || 0).toFixed(1), 'gpm');
+
+    // Mass Balance
+    const qIn_total = ((Q_DS || 0) + (Q_BO || 0));
+    const qOut_total = (FLOW_OUT_gpm || 0) + lossRate;
+    const massBal = qIn_total - qOut_total;
+    console.log('  Mass Balance Residual:', massBal.toFixed(1), 'gpm (In - Out - Losses)');
+
+    // Booster Routing
+    const levelAboveBOP = levelDepth < BOP_DEPTH;
+    const boosterRoute = levelAboveBOP && !lossesActive ? 'TO_RISER' : 'DOWN';
+    console.log('  Booster Route:', boosterRoute);
+
+    // Active Loss Zones
+    if (lossesActive && lossZones) {
+      console.log('  Active Loss Zones:');
+      for (const z of lossZones.filter(z => z && z.enabled && z.Qloss_gpm > 0)) {
+        const BHP = pressureAtDepth ? pressureAtDepth(z.depth_m) : 0;
+        console.log('    Zone @ ' + z.depth_m + 'm: Q_loss=' + z.Qloss_gpm.toFixed(1) + ' gpm, BHP=' + BHP.toFixed(0) + ' psi, Pfrac=' + z.fracPressure_psi + ' psi');
+      }
+    }
+
+    console.log('========================================');
+  }
     const P = pressureAtDepth(z.depth_m);
     console.log(`  Zone ${z.depth_m}m: P=${P.toFixed(0)} psi, Pfrac=${z.fracPressure_psi} psi, Q=${z.Qloss_gpm.toFixed(0)} gpm`);
   }
