@@ -197,48 +197,8 @@ let frictionCache = {};
 let frictionCacheFrame = -1;
 
 // Replace frictionPsi_withCML_rheo with cached version:
-// Replace frictionPsi_withCML_rheo with this corrected version:
-
-function frictionPsi_withCML_rheo(d){
-  const depth = Math.max(0, d);
-  
-  // Ensure section flows are fresh
-  if (typeof window.__qAnnAbove_m3s !== 'number' || typeof window.__qAnnBelow_m3s !== 'number'){
-    if (typeof recomputeAnnulusSectionFlowsForLosses === 'function') {
-      recomputeAnnulusSectionFlowsForLosses();
-    }
-  }
-
-  const qAbove = window.__qAnnAbove_m3s || 0;
-  const qBelow = window.__qAnnBelow_m3s || 0;
-  
-  // ✅ CRITICAL: Use actual wet top
-  const topGlobal = annulusTopDepthGlobal();
-  const topRiser  = Math.min(topGlobal, BOP_DEPTH);
-  const topBelow  = Math.max(BOP_DEPTH, topGlobal);
-
-  // ✅ WET LENGTHS ONLY (friction can't exist through air)
-  const L_riser = Math.max(0, Math.min(BOP_DEPTH, depth) - topRiser);
-  const L_csg   = (depth <= BOP_DEPTH) ? 0 : Math.max(0, Math.min(depth, SHOE_DEPTH) - topBelow);
-  const L_oh    = (depth <= SHOE_DEPTH) ? 0 : Math.max(0, depth - Math.max(topBelow, SHOE_DEPTH));
-
-  // Zero flow = zero friction
-  if (Math.abs(qAbove) < 1e-6 && Math.abs(qBelow) < 1e-6) return 0;
-
-  const ID_ris = riser_ID_m;
-  const ID_csg = casing_ID_m;
-  const ID_oh  = openhole_ODm;
-  const OD_ds  = ds_OD_m;
-
-  const mName = ACTIVE_RHEO_MODEL;
-  
-  // Calculate dP/dL (handles flow direction internally)
-  const dpdm_riser = (L_riser > 0) ? __dpPerM_annulus_GNF_fromQ(Math.abs(qAbove), ID_ris, OD_ds, mName) * Math.sign(qAbove) : 0;
-  const dpdm_csg   = (L_csg > 0)   ? __dpPerM_annulus_GNF_fromQ(Math.abs(qBelow), ID_csg, OD_ds, mName) * Math.sign(qBelow) : 0;
-  const dpdm_oh    = (L_oh > 0)    ? __dpPerM_annulus_GNF_fromQ(Math.abs(qBelow), ID_oh,  OD_ds, mName) * Math.sign(qBelow) : 0;
-
-  return dpdm_riser * L_riser + dpdm_csg * L_csg + dpdm_oh * L_oh;
-}
+// NOTE: frictionPsi_withCML_rheo() is defined later at line ~1477
+// (removed duplicate definition here)
 
 // --- Auto-CML control tunables (smooth tracking of inflow) ---
 //const CML_LPF_TAU_S = 5.0;          // low-pass time constant on inflow (s)
@@ -1276,62 +1236,8 @@ function dPperM_booster(Q) {
 }
 // =========================== FRICTION SUMS (RHEOLOGY-AWARE) =============================
 
-// Preferred: rheology-aware friction with CML & losses
-// Replace the entire frictionPsi_withCML_rheo function (around line 1244)
-function frictionPsi_withCML_rheo(d){
-  const depth = Math.max(0, d);
-
-  // Ensure section flows are present (loss-coupled)
-  if (typeof window.__qAnnAbove_m3s !== 'number' || typeof window.__qAnnBelow_m3s !== 'number'){
-    if (typeof recomputeAnnulusSectionFlowsForLosses === 'function') {
-      recomputeAnnulusSectionFlowsForLosses();
-    }
-  }
-
-  const qAbove = Math.max(0, window.__qAnnAbove_m3s || 0);
-  const qBelow = Math.max(0, window.__qAnnBelow_m3s || 0);
-  
-    // ✅ ADD DEBUG LOGGING
-if (frameCount % 30 === 0) { // Log once per second
-    console.log('Annulus Friction Debug:');
-    console.log('  qAbove (m³/s):', qAbove, '(gpm:', qAbove * 15850.323, ')');
-    console.log('  qBelow (m³/s):', qBelow, '(gpm:', qBelow * 15850.323, ')');
-    console.log('  Q_DS:', Q_DS, 'Q_BO:', Q_BO);
-    console.log('  ACTIVE_RHEO_MODEL:', ACTIVE_RHEO_MODEL);
-    console.log('  window.TAUY_Pa:', window.TAUY_Pa);
-    console.log('  window.K_PaSn:', window.K_PaSn);
-    console.log('  window.N_dim:', window.N_dim);
-  }
-  // Wet spans
-  const topGlobal = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal()
-                   : (typeof riserTopDepth==='function' ? riserTopDepth() : 0);
-  const topRiser  = Math.min(topGlobal, BOP_DEPTH);
-  const topBelow  = Math.max(BOP_DEPTH, topGlobal);
-
-  const L_riser = Math.max(0, Math.min(BOP_DEPTH, depth) - topRiser);
-  const L_csg   = (depth <= BOP_DEPTH) ? 0 : Math.max(0, Math.min(depth, SHOE_DEPTH) - topBelow);
-  const L_oh    = (depth <= SHOE_DEPTH) ? 0 : Math.max(0, depth - Math.max(topBelow, SHOE_DEPTH));
-
-  
-    // ✅ MORE DEBUG
-  if (frameCount % 30 === 0) {
-    console.log('  Lengths: riser=', L_riser, 'csg=', L_csg, 'oh=', L_oh);
-  }
-  
-  // Geometries (outer = section ID, inner = DS OD)
-  const ID_ris = (typeof riser_ID_m   !== 'undefined') ? riser_ID_m   : 0.482;
-  const ID_csg = (typeof casing_ID_m  !== 'undefined') ? casing_ID_m  : 0.216;
-  const ID_oh  = (typeof openhole_ODm !== 'undefined') ? openhole_ODm : 0.216;
-  const OD_ds  = (typeof ds_OD_m      !== 'undefined') ? ds_OD_m      : 0.127;
-
-  // ✅ Use GNF functions directly!
-  const mName = ACTIVE_RHEO_MODEL;
-  const dpdm_riser = (L_riser>0) ? __dpPerM_annulus_GNF_fromQ(qAbove, ID_ris, OD_ds, mName) : 0;
-  const dpdm_csg   = (L_csg  >0) ? __dpPerM_annulus_GNF_fromQ(qBelow, ID_csg, OD_ds, mName) : 0;
-  const dpdm_oh    = (L_oh   >0) ? __dpPerM_annulus_GNF_fromQ(qBelow, ID_oh,  OD_ds, mName) : 0;
-
-  return dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
-}
+// NOTE: frictionPsi_withCML_rheo() is defined later at line ~1437
+// (removed duplicate definition here to avoid conflicts)
 
 // Legacy name kept for backward compatibility; prefer rheology-aware when available
 function frictionPsi_withCML(depth_m){
@@ -1477,15 +1383,16 @@ function __dpPerM_pipe_GNF_fromQ(Q_m3s, D_m, tauToShearRateFn){
 function frictionPsi_withCML_rheo(d){
   const depth = Math.max(0, d);
 
-  // Ensure section flows are present (loss-coupled)
-  if (typeof window.__qAnnAbove_m3s !== 'number' || typeof window.__qAnnBelow_m3s !== 'number'){
-    if (typeof recomputeAnnulusSectionFlowsForLosses === 'function') {
-      recomputeAnnulusSectionFlowsForLosses();
-    }
-  }
+  // Read section flows published by routeAnnulusFlowsWithLosses()
+  // DO NOT call recomputeAnnulusSectionFlowsForLosses() - it uses old routing logic!
+  const qAbove = Math.max(0, window.__qAnnAbove_m3s || window.__qAnnUp_m3s || 0);
+  const qBelow = Math.max(0, window.__qAnnBelow_m3s || window.__qAnnDown_m3s || 0);
 
-  const qAbove = Math.max(0, window.__qAnnAbove_m3s || 0);
-  const qBelow = Math.max(0, window.__qAnnBelow_m3s || 0);
+  // Debug logging every 30 frames
+  if (frameCount % 30 === 0 && depth === TD_DEPTH) {
+    console.log(`[FRICTION_DEBUG] Reading flows: qAbove=${(qAbove*15850.323).toFixed(1)} gpm, qBelow=${(qBelow*15850.323).toFixed(1)} gpm`);
+    console.log(`[FRICTION_DEBUG] __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323 || 0).toFixed(1)} gpm, __qAnnUp_m3s=${((window.__qAnnUp_m3s||0)*15850.323).toFixed(1)} gpm`);
+  }
 
   // Wet spans
   const topGlobal = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal()
@@ -1508,6 +1415,14 @@ function frictionPsi_withCML_rheo(d){
   const dpdm_riser = (L_riser>0) ? __dpPerM_annulus_GNF_fromQ(qAbove, ID_ris, OD_ds, mName) : 0;
   const dpdm_csg   = (L_csg  >0) ? __dpPerM_annulus_GNF_fromQ(qBelow, ID_csg, OD_ds, mName) : 0;
   const dpdm_oh    = (L_oh   >0) ? __dpPerM_annulus_GNF_fromQ(qBelow, ID_oh,  OD_ds, mName) : 0;
+
+  // Debug dP/L values
+  if (frameCount % 30 === 0 && depth === TD_DEPTH) {
+    console.log(`[FRICTION_DEBUG] dpdm_riser=${dpdm_riser.toFixed(3)} psi/m, dpdm_csg=${dpdm_csg.toFixed(3)} psi/m, dpdm_oh=${dpdm_oh.toFixed(3)} psi/m`);
+    console.log(`[FRICTION_DEBUG] L_riser=${L_riser.toFixed(1)}m, L_csg=${L_csg.toFixed(1)}m, L_oh=${L_oh.toFixed(1)}m`);
+    const total = dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
+    console.log(`[FRICTION_DEBUG] Total friction=${total.toFixed(1)} psi`);
+  }
 
   return dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
 }
