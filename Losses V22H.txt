@@ -965,6 +965,7 @@ function stepAdvection(){
   // ===============================
   // 2) BOOSTER PIPE (TOP → DOWN)
   // ===============================
+  let boosterEffluentMW = MW_BO;  // Track what exits booster pipe at BOP
   {
     const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
     if (qBO_m3s > FLOW_THRESHOLD) {
@@ -974,14 +975,16 @@ function stepAdvection(){
 
       accBo += boStep_m;
       while (accBo >= CELL_M){
-        // Always inject at pipe-inlet end; router decides where it goes in annulus
-        boosterGrid.shift();         // move down the pipe
-        boosterGrid.push(MW_BO);     // newest fluid at bottom end of pipe
+        // Fluid enters at TOP (surface/inlet), exits at BOTTOM (BOP)
+        boosterEffluentMW = boosterGrid.pop(); // Remove from bottom (exits at BOP)
+        boosterGrid.unshift(MW_BO);  // Add new fluid at top (surface inlet)
         accBo -= CELL_M;
       }
     }
+    // Always use bottom of grid as current effluent
+    boosterEffluentMW = boosterGrid[boosterGrid.length - 1] || MW_BO;
   }
-  const boosterMW = boosterGrid[boosterGrid.length - 1] || MW_BO;
+  const boosterMW = boosterEffluentMW;  // Compatibility
 
   // ===============================
   // 3) EXTRACT LOSSES FROM GRIDS
@@ -1006,11 +1009,10 @@ function stepAdvection(){
       for (let i = annBelowGrid.length - 1; i > 0; i--) {
         annBelowGrid[i] = annBelowGrid[i - 1];
       }
-      // New fluid (mixture of booster + topfill routed down) enters at BOP index 0
-      const qBO_down = qDown_m3s; // router made this booster-first
-      const qTF_down = Math.max(0, ((TOPFILL_ON ? (Q_TOPFILL||0) : 0)/15850.323));
-      const qTot = Math.max(qBO_down + qTF_down, 1e-12);
-      annBelowGrid[0] = (qBO_down * boosterMW + qTF_down * MW_TOPFILL) / qTot;
+      // New fluid from booster exits at BOP and flows DOWN to losses
+      // Note: qDown_m3s = takeBO (only booster goes down from BOP)
+      // Topfill is injected at surface level, not at BOP
+      annBelowGrid[0] = boosterEffluentMW;
 
       accBelow -= CELL_M;
     }
@@ -1043,15 +1045,19 @@ function stepAdvection(){
     const v_above = qUp_m3s / Math.max(A_riser, 1e-12);
     const aboveStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_above / vref);
 
+    // Calculate booster contribution going UP (not routed down to losses)
+    const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
+    const qBO_up = Math.max(0, qBO_m3s - qDown_m3s);  // Booster NOT going down = going UP
+    const qFromAnnBelow = Math.max(0, qUp_m3s - qBO_up);  // Flow from annulus below (DS + TF)
+
     accAbove += aboveStep_m;
     while (accAbove >= CELL_M){
-      // Remove from surface, add mixture at BOP (from below + any booster that was NOT routed down)
+      // Remove from surface, add mixture at BOP (from annulus below + booster going up)
       annAboveGrid.shift();
 
-      const qFromBelow = qUp_m3s;  // all upward routed volume
-      const qTotal = Math.max(qFromBelow, 1e-12);
-      const fromBelowMW = annBelowGrid[0] || dsEffluentMW; // incoming upward fluid at BOP
-      const mixMW = (qFromBelow * fromBelowMW) / qTotal;
+      const fromBelowMW = annBelowGrid[0] || dsEffluentMW; // incoming upward fluid from annulus
+      const qTotal = Math.max(qFromAnnBelow + qBO_up, 1e-12);
+      const mixMW = (qFromAnnBelow * fromBelowMW + qBO_up * boosterEffluentMW) / qTotal;
 
       annAboveGrid.push(mixMW);
       accAbove -= CELL_M;
@@ -1059,10 +1065,9 @@ function stepAdvection(){
 
     if (annAboveGrid.length){
       const k = annAboveGrid.length - 1;
-      const qFromBelow = qUp_m3s;
-      const qTotal = Math.max(qFromBelow, 1e-12);
-      const fromBelowMW = annAboveGrid[0] || dsEffluentMW;
-      const mixMW = (qFromBelow * fromBelowMW) / qTotal;
+      const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
+      const qTotal = Math.max(qFromAnnBelow + qBO_up, 1e-12);
+      const mixMW = (qFromAnnBelow * fromBelowMW + qBO_up * boosterEffluentMW) / qTotal;
       annAboveGrid[k] = (1 - accAbove/CELL_M) * annAboveGrid[k] + (accAbove/CELL_M) * mixMW;
     }
   }
@@ -3751,16 +3756,18 @@ const dt_frame = frameSeconds();
 computeImbalanceFlows();
 
 // 2-5: Equilibrate losses and level together (iterative)
+// NOTE: This calls routeAnnulusFlowsWithLosses() internally which sets:
+//   - window.__qAnnUp_m3s, window.__qAnnDown_m3s (section flows)
+//   - FLOW_OUT_gpm (with proper hysteresis and smoothing)
 equilibrateFluidLevel(dt_frame, 3); // 3 iterations per frame
 
-// 6. Recompute section flows with final loss rates
-recomputeAnnulusSectionFlowsForLosses();
+// 6. Section flows already computed by routeAnnulusFlowsWithLosses() inside equilibrateFluidLevel()
+// DO NOT call recomputeAnnulusSectionFlowsForLosses() here - it uses old routing logic!
 
 // 7. Update CML controller
 // (already called earlier - skip if done)
 
-// 8. Calculate flow out and choke
-computeFlowOut_gpm(dt_frame);
+// 8. Choke update (FO already computed by routeAnnulusFlowsWithLosses)
 if (MPD_ON) updateChokeFromFO();
 
 // 9. Advect fluids
