@@ -2398,7 +2398,8 @@ function computeFlowOut_gpm(dt_s) {
   }
 
   // Riser above BOP and no significant losses - calculate target
-  const qAnnUp_m3s = window.__qAnnUp_m3s || 0;
+  // FIX: Use correct variable name - recomputeAnnulusSectionFlowsForLosses publishes to __qAnnAbove_m3s
+  const qAnnUp_m3s = window.__qAnnAbove_m3s || 0;
 
   // Check 4: Sanity check on qAnnUp itself
   if (qAnnUp_m3s < 1e-9) {
@@ -2527,9 +2528,11 @@ function recomputeAnnulusSectionFlowsForLosses(dt_s){
   const qBelow_m3s = Math.min(qDem_m3s, qAvail_m3s);         // what actually goes down to loss zone
   const qAbove_m3s = (qIn_m3s + qTopFill_m3s - qCML_m3s) - qBelow_m3s; // remainder goes up the riser
 
-  // Publish section flows
+  // Publish section flows (using both new and old variable names for compatibility)
   window.__qAnnBelow_m3s   = qBelow_m3s;
   window.__qAnnAbove_m3s   = qAbove_m3s;
+  window.__qAnnDown_m3s    = qBelow_m3s;  // Compatibility alias for advection code
+  window.__qAnnUp_m3s      = qAbove_m3s;  // Compatibility alias for advection code
   window.__qBelowIsDownward = true; // sign convention handled in friction function
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
