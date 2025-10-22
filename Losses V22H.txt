@@ -1797,6 +1797,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // If riser full, surface return equals upward annulus flow; otherwise zero
   const targetFO_gpm = nowFull ? Math.max(0, qAnnUp * 15850.323) : 0;
 
+  // Debug FO calculation every 30 frames
+  if (frameCount % 30 === 0) {
+    console.log(`[FO_DEBUG] top=${top.toFixed(2)}m, wasFull=${wasFull}, nowFull=${nowFull}, qAnnUp=${(qAnnUp*15850.323).toFixed(1)} gpm, targetFO=${targetFO_gpm.toFixed(1)} gpm, FLOW_OUT=${(FLOW_OUT_gpm||0).toFixed(1)} gpm`);
+  }
+
   // Fast response for conventional circulation (no losses)
   // Slow response during losses to avoid oscillations
   const lossesActive = LOSSES_ON && qToLoss > 1e-6;
@@ -1808,6 +1813,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
   const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
   FLOW_OUT_gpm = prev + step;
+
+  // Additional debug
+  if (frameCount % 30 === 0 && Math.abs(targetFO_gpm - FLOW_OUT_gpm) > 10) {
+    console.log(`[FO_DEBUG] Slewing: prev=${prev.toFixed(1)}, lp=${lp.toFixed(1)}, step=${step.toFixed(1)}, dt=${dt_s.toFixed(4)}s, maxStep=${maxStep.toFixed(1)}`);
+  }
 
   // Optional smoother you already have
   if (typeof FLOW_OUT_ALPHA==='number') {
@@ -2615,69 +2625,14 @@ function recomputeAnnulusSectionFlowsForLosses(dt_s){
   window.__qAnnUp_m3s      = qAbove_m3s;  // Compatibility alias for advection code
   window.__qBelowIsDownward = true; // sign convention handled in friction function
 
-  // ------------------- Stable FLOW_OUT with hysteresis -------------------
-  // Hysteresis on "riser is full" decision to avoid flip-flop
-  // When rising (toward surface), declare "full" once top < HYST_UP.
-  // When falling (away from surface), keep "full" until top > HYST_DN.
-  const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
-  const HYST_UP = 0.25;   // m (declare full when within 25 cm of surface)
-  const HYST_DN = 0.75;   // m (keep full until we drop below 75 cm)
-  if (typeof recomputeAnnulusSectionFlowsForLosses._full === 'undefined'){
-    recomputeAnnulusSectionFlowsForLosses._full = (top <= HYST_UP);
-  }
-  const wasFull = recomputeAnnulusSectionFlowsForLosses._full;
-  const nowFull = wasFull ? (top <= HYST_DN) : (top <= HYST_UP);
-  recomputeAnnulusSectionFlowsForLosses._full = nowFull;
-
-  // ============================================================================
-  // FO PROTECTION: Comprehensive checks to prevent explosions during losses
-  // ============================================================================
-  let targetFlowOut_gpm = 0;
-
-  if (nowFull) {
-    // Check 1: Ensure qAbove is actually positive and significant
-    if (qAbove_m3s >= 1e-6) {
-
-      // Check 2: If significant losses active (>50% of inflow), no FO
-      const qIn_total = qIn_m3s + qTopFill_m3s - qCML_m3s;
-      const lossRate_gpm = totalLossRate_gpm();
-      const lossRate_m3s = lossRate_gpm / 15850.323;
-      const lossesActive = lossRate_gpm > 1;
-
-      if (lossesActive && lossRate_m3s > qIn_total * 0.5) {
-        targetFlowOut_gpm = 0;
-        console.log('FO Protection: Losses > 50% of inflow, FO=0');
-      } else {
-        // Check 3: Clamp to reasonable range (max 120% of total inflow)
-        const maxFO_gpm = qIn_total * 15850.323 * 1.2;
-        const raw_FO_gpm = qAbove_m3s * 15850.323;
-        targetFlowOut_gpm = Math.min(raw_FO_gpm, maxFO_gpm);
-
-        // Check 4: If FO exploding compared to inflow, clamp it
-        if (targetFlowOut_gpm > maxFO_gpm * 0.9) {
-          console.log(`FO Protection: Clamping ${raw_FO_gpm.toFixed(0)} → ${targetFlowOut_gpm.toFixed(0)} gpm`);
-        }
-      }
-    } else {
-      targetFlowOut_gpm = 0;
-    }
-  } else {
-    targetFlowOut_gpm = 0;
-  }
-
-  // Smooth & slew FLOW_OUT to avoid frame-to-frame jumps
-  const ALPHA = 0.25;          // low-pass (0..1)
-  const DQDT_MAX = 800;        // gpm/s cap on change
-  const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
-  const lp   = prev + ALPHA*(targetFlowOut_gpm - prev);
-  const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
-  const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
-  FLOW_OUT_gpm = prev + step;
-
-  // Optional historical smoother you already had (harmless to keep)
-  if (typeof FLOW_OUT_ALPHA==='number'){
-    FLOW_OUT_smooth = FLOW_OUT_smooth + FLOW_OUT_ALPHA*(FLOW_OUT_gpm - FLOW_OUT_smooth);
-  }
+  // NOTE: FLOW_OUT_gpm calculation REMOVED from this function!
+  // FO is now calculated ONLY in routeAnnulusFlowsWithLosses() which has:
+  //   - Adaptive filter (fast when no losses)
+  //   - Adaptive slew rate (5000 gpm/s when no losses)
+  //   - Proper booster routing logic
+  //
+  // This function should ONLY publish section flows for friction calculations.
+  // DO NOT add FLOW_OUT_gpm calculation here - it causes conflicts and slow response!
 }
 
 
@@ -3659,7 +3614,6 @@ function draw(){
   // Bottom frames (visual only; your UI inputs sit on top of these)
   drawBottomFrames();
   drawEnhancedHydraulicsFrame();
-    recomputeAnnulusSectionFlowsForLosses();
   // SBP logic
   if (MPD_ON){
     // Rule #8: SBP can only be applied if riser is full (CML_TOP_DEPTH must be 0)
