@@ -2951,10 +2951,24 @@ function doRheologyFit(){
     rheoPanel.statusDiv.html("No rheology points provided.");
     return;
   }
+
+  // Debug: show input rheology points
+  console.log(`[RHEO_FIT_DEBUG] ===== Rheology Fit Started =====`);
+  console.log(`[RHEO_FIT_DEBUG] Model: ${ACTIVE_RHEO_MODEL}`);
+  console.log(`[RHEO_FIT_DEBUG] Input points (${pts.length}):`);
+  pts.forEach(p => {
+    console.log(`[RHEO_FIT_DEBUG]   RPM=${p.rpm}, Dial=${p.dial.toFixed(1)}, γ̇=${p.gdot.toFixed(1)} 1/s, τ=${p.tauPa.toFixed(2)} Pa`);
+  });
+
   // Direct Bingham if PV/YP are provided and Bingham is selected
  const PVcp = safeRheoVal('PV', 0); // cP
  const YPlbf = safeRheoVal('YP', 0); // lbf/100ft²
   const usePVYP = (ACTIVE_RHEO_MODEL === "Bingham") && (PVcp > 0 || YPlbf > 0);
+
+  if (usePVYP) {
+    console.log(`[RHEO_FIT_DEBUG] Using direct PV/YP: PV=${PVcp} cP, YP=${YPlbf} lbf/100ft²`);
+  }
+
   let b, p, h;
   if (usePVYP){
     b = { mu_p: PVcp * 1e-3, // Pa·s
@@ -2965,6 +2979,13 @@ function doRheologyFit(){
   }
   p = fitPowerLaw(pts);
   h = fitHB(pts);
+
+  // Debug: show fit results
+  console.log(`[RHEO_FIT_DEBUG] Fit results:`);
+  console.log(`[RHEO_FIT_DEBUG]   Bingham: μp=${(b.mu_p??0).toFixed(4)} Pa·s, τy=${(b.tau_y??0).toFixed(2)} Pa, SSE=${(b.sse??0).toFixed(3)}`);
+  console.log(`[RHEO_FIT_DEBUG]   PowerLaw: K=${(p.K??0).toFixed(4)} Pa·s^n, n=${(p.n??0).toFixed(3)}, SSE=${(p.sse??0).toFixed(3)}`);
+  console.log(`[RHEO_FIT_DEBUG]   HB: K=${(h.K??0).toFixed(4)} Pa·s^n, n=${(h.n??0).toFixed(3)}, τy=${(h.tau_y??0).toFixed(2)} Pa, SSE=${(h.sse??0).toFixed(3)}`);
+
   fitParams.mu_p_Pa_s = b.mu_p ?? fitParams.mu_p_Pa_s;
   fitParams.tau_y_Pa = b.tau_y ?? fitParams.tau_y_Pa;
   fitParams.K_PL_Pa_s_n = p.K;
@@ -2972,8 +2993,12 @@ function doRheologyFit(){
   fitParams.K_HB_Pa_s_n = h.K;
   fitParams.n_HB = h.n;
   fitParams.tau_y_HB_Pa = h.tau_y;
-  
+
   publishRheoToGlobals()
+
+  console.log(`[RHEO_FIT_DEBUG] Published to globals: K_PaSn=${window.K_PaSn}, N_dim=${window.N_dim}, TAUY_Pa=${window.TAUY_Pa}`);
+  console.log(`[RHEO_FIT_DEBUG] ===== Rheology Fit Complete =====`);
+
   // gel from 10s if provided
 const g10s = safeRheoVal('G10s', rheoDefaults.G10s ?? 0);
 if (g10s > 0) gel_Pa = g10s * LBF100FT2_to_Pa;
