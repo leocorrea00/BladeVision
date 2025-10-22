@@ -1875,16 +1875,155 @@ function herschelBulkleyFlow(dP_psi, D_m, L_m, tauY_Pa, K_Pa_s_n, n_dim) {
   return laminarPipeFlow_GNF(dP_psi, D_m, L_m, tauToShear);
 }
 
+/* ===================== NEW PHYSICS: BHP-BASED WITH FRICTION REDISTRIBUTION ===================== */
+
+// Calculate fracture friction: ΔP caused by flow through fracture
+function calculateFractureFriction_psi(qFrac_m3s, zone) {
+  if (!zone || qFrac_m3s <= 0) return 0;
+
+  const qFrac_gpm = qFrac_m3s * 15850.323;
+  const n = zone.n || 1.0;
+
+  // Use zone's reference calibration if available
+  if (zone.Qref_gpm > 0 && zone.DPref_psi > 0) {
+    const C_frac = zone.Qref_gpm / Math.pow(zone.DPref_psi, n);
+    const dP_frac = Math.pow(qFrac_gpm / Math.max(C_frac, 1e-6), 1/n);
+    return dP_frac;
+  }
+
+  // Simplified model: fracture has ~10% of annulus resistance
+  // (Fractures are easier path than annulus)
+  return 0; // Conservative: no back-pressure from fracture
+}
+
+// Calculate BHP at zone with flow split between annulus and fracture
+// This is the CORE of the new physics model
+function calculateBHPWithLossSplit(zone, qLoss_m3s, qIn_m3s) {
+  if (!zone) return 0;
+
+  const depth_m = zone.depth_m;
+  const wetTop = annulusTopDepthGlobal();
+
+  // Hydrostatic (only below fluid level)
+  const depth_wet = Math.max(0, depth_m - wetTop);
+  const ecd_ppg = ecdAtDepth(depth_m);
+  const P_hydro = PSI_COEF * ecd_ppg * depth_wet;
+
+  // Split flow
+  const qUp_m3s = Math.max(0, qIn_m3s - qLoss_m3s);
+  const qFrac_m3s = Math.max(0, qLoss_m3s);
+
+  // CRITICAL: Calculate annulus friction based on UPWARD flow only
+  // Save current section flows
+  const qAbove_save = window.__qAnnAbove_m3s;
+  const qBelow_save = window.__qAnnBelow_m3s;
+
+  // Temporarily set section flows for friction calculation
+  window.__qAnnAbove_m3s = qUp_m3s;
+  window.__qAnnBelow_m3s = qFrac_m3s; // flow going to loss zone
+
+  const P_fric_ann = frictionPsi_withCML_rheo(depth_m);
+
+  // Restore section flows
+  window.__qAnnAbove_m3s = qAbove_save;
+  window.__qAnnBelow_m3s = qBelow_save;
+
+  // Fracture friction
+  const P_fric_frac = calculateFractureFriction_psi(qFrac_m3s, zone);
+
+  // SBP (only when riser full)
+  const riserFull = (wetTop <= 0.5);
+  const P_sbp = (MPD_ON && riserFull) ? (CURRENT_SBP || 0) : 0;
+
+  // BHP = Hydrostatic + Annulus Friction (for qUp only) + Fracture Friction + SBP
+  const BHP = P_hydro + P_fric_ann + P_fric_frac + P_sbp;
+
+  return BHP;
+}
+
+// Iteratively solve for loss rate where BHP balances at fracture pressure
+function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
+  if (!zone || !zone.enabled) return 0;
+
+  const Pfrac = zone.fracPressure_psi || 0;
+  const wetTop = annulusTopDepthGlobal();
+
+  // Zone must be below fluid level
+  if (zone.depth_m <= wetTop) return 0;
+
+  // Check static condition (no flow)
+  const BHP_static = calculateBHPWithLossSplit(zone, 0, 0);
+
+  // If pressure already below fracture, no losses
+  if (BHP_static < Pfrac - LOSS_DEADBAND_PSI) return 0;
+
+  // SPECIAL CASE: Static overbalance (Hyd + SBP > Pfrac even with no flow)
+  if (BHP_static > Pfrac && qIn_m3s < 1e-6) {
+    // Enter "Anchor Mode" - override SBP to balance at fracture pressure
+    const depth_wet = Math.max(0, zone.depth_m - wetTop);
+    const ecd_ppg = ecdAtDepth(zone.depth_m);
+    const P_hydro = PSI_COEF * ecd_ppg * depth_wet;
+    const SBP_override = Math.max(0, Pfrac - P_hydro - 50); // 50 psi safety margin
+
+    if (MPD_ON && wetTop <= 0.5) {
+      CURRENT_SBP = SBP_override;
+      console.log(`ANCHOR MODE: Zone ${zone.depth_m}m, SBP→${SBP_override.toFixed(0)} psi to prevent oscillation`);
+    }
+    return 0; // No flow losses, just static balance
+  }
+
+  // Binary search for qLoss where BHP ≈ Pfrac (equilibrium)
+  let qLoss_min = 0;
+  let qLoss_max = qIn_m3s * 10; // Allow demand > supply (causes level drop)
+
+  let qLoss_result = 0;
+
+  for (let iter = 0; iter < 20; iter++) {
+    const qLoss_trial = (qLoss_min + qLoss_max) / 2;
+    const BHP = calculateBHPWithLossSplit(zone, qLoss_trial, qIn_m3s);
+
+    const tolerance = 10; // psi
+
+    if (Math.abs(BHP - Pfrac) < tolerance) {
+      qLoss_result = qLoss_trial;
+      break;
+    }
+
+    if (BHP > Pfrac) {
+      // Pressure too high → need MORE losses to reduce annulus friction
+      qLoss_min = qLoss_trial;
+    } else {
+      // Pressure too low → reduce losses
+      qLoss_max = qLoss_trial;
+    }
+
+    qLoss_result = (qLoss_min + qLoss_max) / 2;
+  }
+
+  // Apply zone capacity limit if calibrated
+  if (zone.Qref_gpm > 0 && zone.DPref_psi > 0) {
+    const n = zone.n || 1.0;
+    const dP_available = Math.max(0, BHP_static - Pfrac);
+    const C_L = zone.Qref_gpm / Math.pow(zone.DPref_psi, n);
+    const Q_capacity_gpm = C_L * Math.pow(dP_available, n);
+    const Q_capacity_m3s = Q_capacity_gpm / 15850.323;
+
+    qLoss_result = Math.min(qLoss_result, Q_capacity_m3s);
+  }
+
+  return qLoss_result; // m3/s
+}
+
 /* ===================== PER-ZONE LOSS (ATTENUATED) ===================== */
-// Uses hydro + annulus friction + SBP via pressureAtDepth().
-// Adds ΔP deadband, ΔP low-pass, Q low-pass, and per-zone dQ/dt limiter.
+// UPDATED: Now uses BHP-based physics with friction redistribution
+// Uses iterative solver to find equilibrium where BHP ≈ Pfrac
 // Returns gpm.
 
 function zoneLoss_gpm(z, dt_s = 0.1){
   if (!z || !z.enabled || !(z.depth_m > 0)) return 0;
 
   const wetTop = annulusTopDepthGlobal();
-  
+
   // Zone must be BELOW fluid level to be active
   if (z.depth_m <= wetTop) {
     z._Q_filt = 0;
@@ -1892,50 +2031,30 @@ function zoneLoss_gpm(z, dt_s = 0.1){
     return 0;
   }
 
-  const Pzone_psi = pressureAtDepth(z.depth_m);
-  const Pfrac_psi = z.fracPressure_psi || 0;
-  
+  // ============================================================================
+  // NEW PHYSICS: Use iterative equilibrium solver
+  // ============================================================================
+  const qIn_m3s = ((Q_DS || 0) + (Q_BO || 0) - (Q_CML || 0)) / 15850.323;
+  const qLoss_equilibrium_m3s = solveZoneLossEquilibrium(z, qIn_m3s, dt_s);
+  const Q_target_gpm = qLoss_equilibrium_m3s * 15850.323;
+
+  // ============================================================================
+  // Apply filtering and slew limiting for stability
+  // ============================================================================
   z._P_filt = (typeof z._P_filt === 'number') ? z._P_filt : 0;
   z._Q_filt = (typeof z._Q_filt === 'number') ? z._Q_filt : (z.Qloss_gpm || 0);
 
   const dt = Math.max(1e-3, dt_s);
-  const dP_raw = Pzone_psi - Pfrac_psi;
 
-  if (dP_raw > LOSS_DEADBAND_PSI) {
-    const Q_in_total = (Q_DS || 0) + (Q_BO || 0) - (Q_CML || 0);
-    const n = (z.n || 1.0);
-    const dP_eff = Math.max(0, dP_raw - LOSS_DEADBAND_PSI);
-    
-    // ✅ Calculate zone CAPACITY (what it WANTS to take)
-    let Q_capacity_gpm = 0;
-    
-    if (z.Qref_gpm > 0 && z.DPref_psi > 0) {
-      const C_L = z.Qref_gpm / Math.pow(z.DPref_psi, n);
-      Q_capacity_gpm = C_L * Math.pow(dP_eff, n);
-    } else {
-      Q_capacity_gpm = Q_in_total * 10; // Karstic
-    }
-    
-    // ✅ CRITICAL: Don't limit to available flow - let it exceed!
-    // The zone "wants" to take Q_capacity_gpm
-    // If this exceeds what's flowing past, it will manifest as level drop
-    
-    // Only apply physical limit: can't take more than 10x total inflow
-    const Q_target = Math.min(Q_capacity_gpm, Q_in_total * 10);
-    
-    const Q_lpf = __lp(z._Q_filt, Q_target, dt, LOSS_Q_TAU_S);
-    const Q_slew = __slew(z._Q_filt, Q_lpf, LOSS_DQDT_MAX_GPM_S, dt);
-    z._Q_filt = Math.max(0, Q_slew);
-    z.Qloss_gpm = z._Q_filt;
-    
-    return z._Q_filt;
-  }
-  
-  // Decay when below fracture pressure
-  const qDecay = __lp(z._Q_filt, 0, dt, LOSS_Q_TAU_S);
-  const qSlew  = __slew(z._Q_filt, qDecay, LOSS_DQDT_MAX_GPM_S, dt);
-  z._Q_filt = Math.max(0, qSlew);
+  // Low-pass filter
+  const Q_lpf = __lp(z._Q_filt, Q_target_gpm, dt, LOSS_Q_TAU_S);
+
+  // Slew rate limiter
+  const Q_slew = __slew(z._Q_filt, Q_lpf, LOSS_DQDT_MAX_GPM_S, dt);
+
+  z._Q_filt = Math.max(0, Q_slew);
   z.Qloss_gpm = z._Q_filt;
+
   return z._Q_filt;
 }
 
@@ -2376,8 +2495,41 @@ function recomputeAnnulusSectionFlowsForLosses(dt_s){
   const nowFull = wasFull ? (top <= HYST_DN) : (top <= HYST_UP);
   recomputeAnnulusSectionFlowsForLosses._full = nowFull;
 
-  // If riser "full", returns equal the upward section flow; else zero.
-  const targetFlowOut_gpm = nowFull ? Math.max(0, qAbove_m3s * 15850.323) : 0;
+  // ============================================================================
+  // FO PROTECTION: Comprehensive checks to prevent explosions during losses
+  // ============================================================================
+  let targetFlowOut_gpm = 0;
+
+  if (nowFull) {
+    // Check 1: Ensure qAbove is actually positive and significant
+    if (qAbove_m3s >= 1e-6) {
+
+      // Check 2: If significant losses active (>50% of inflow), no FO
+      const qIn_total = qIn_m3s + qTopFill_m3s - qCML_m3s;
+      const lossRate_gpm = totalLossRate_gpm();
+      const lossRate_m3s = lossRate_gpm / 15850.323;
+      const lossesActive = lossRate_gpm > 1;
+
+      if (lossesActive && lossRate_m3s > qIn_total * 0.5) {
+        targetFlowOut_gpm = 0;
+        console.log('FO Protection: Losses > 50% of inflow, FO=0');
+      } else {
+        // Check 3: Clamp to reasonable range (max 120% of total inflow)
+        const maxFO_gpm = qIn_total * 15850.323 * 1.2;
+        const raw_FO_gpm = qAbove_m3s * 15850.323;
+        targetFlowOut_gpm = Math.min(raw_FO_gpm, maxFO_gpm);
+
+        // Check 4: If FO exploding compared to inflow, clamp it
+        if (targetFlowOut_gpm > maxFO_gpm * 0.9) {
+          console.log(`FO Protection: Clamping ${raw_FO_gpm.toFixed(0)} → ${targetFlowOut_gpm.toFixed(0)} gpm`);
+        }
+      }
+    } else {
+      targetFlowOut_gpm = 0;
+    }
+  } else {
+    targetFlowOut_gpm = 0;
+  }
 
   // Smooth & slew FLOW_OUT to avoid frame-to-frame jumps
   const ALPHA = 0.25;          // low-pass (0..1)
