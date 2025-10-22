@@ -5292,6 +5292,29 @@ function buildRheologyUI(x0, y0){
     ACTIVE_RHEO_MODEL = rheoPanel.modelSel.value();
     doRheologyFit(); // ensure PV/YP-direct or R-points apply immediately
   });
+
+  // --- Friction Mode selector ---
+  label("Friction Mode", x0+150, y0-30);
+  rheoPanel.frictionSel = createSelect();
+  rheoPanel.frictionSel.position(x0+150, y0-14).size(110, 24);
+  ["hydraulics","generic"].forEach(o => rheoPanel.frictionSel.option(o));
+  rheoPanel.frictionSel.selected(FRICTION_MODE || "hydraulics");
+  rheoPanel.frictionSel.changed(() => {
+    FRICTION_MODE = rheoPanel.frictionSel.value();
+    console.log(`Friction mode changed to: ${FRICTION_MODE}`);
+  });
+
+  // --- Hydraulics Model selector ---
+  label("Hydraulics Model", x0+280, y0-30);
+  rheoPanel.hydraulicsSel = createSelect();
+  rheoPanel.hydraulicsSel.position(x0+280, y0-14).size(110, 24);
+  ["Refined","API"].forEach(o => rheoPanel.hydraulicsSel.option(o));
+  rheoPanel.hydraulicsSel.selected(HYDRAULICS_MODEL || "Refined");
+  rheoPanel.hydraulicsSel.changed(() => {
+    HYDRAULICS_MODEL = rheoPanel.hydraulicsSel.value();
+    console.log(`Hydraulics model changed to: ${HYDRAULICS_MODEL}`);
+  });
+
   // --- Inputs ---
   let y = y0 + 90;
   label("Funnel (s/qt)", xs(0), y-18); rheoPanel.fv = box(rheoDefaults.fv, xs(0), y);
