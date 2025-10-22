@@ -2366,19 +2366,56 @@ function effective_Q_CML_gpm(){
 
 function computeFlowOut_gpm(dt_s) {
   const top = annulusTopDepthGlobal();
-  const riserFull = (top <= 0.5);
-  
-  if (!riserFull) {
-    // Riser not full - decay to zero
-    const decay = Math.exp(-dt_s / 0.5);
-    FLOW_OUT_gpm *= decay;
-    FLOWOUT_VELOCITY_gpm_s *= decay;
-    return FLOW_OUT_gpm;
+  const riserAtSurface = (top <= 0.5);
+  const riserAboveBOP = (top < BOP_DEPTH);
+  const lossesActive = LOSSES_ON && totalLossRate_gpm() > 1.0;
+
+  // ============================================================================
+  // CRITICAL: 4-Layer FO Protection (from commit 19d8516)
+  // ============================================================================
+
+  // Check 1: Active losses and level not at surface → FO must be zero
+  if (lossesActive && !riserAtSurface) {
+    FLOW_OUT_gpm = 0;
+    FLOWOUT_VELOCITY_gpm_s = 0;
+    return 0;
   }
-  
-  // Riser full - calculate target
+
+  // Check 2: Level below BOP → no returns possible
+  if (!riserAboveBOP) {
+    FLOW_OUT_gpm = 0;
+    FLOWOUT_VELOCITY_gpm_s = 0;
+    return 0;
+  }
+
+  // Check 3: If losses consuming >50% of flow → FO must be zero
+  const totalIn_gpm = (Q_DS || 0) + (Q_BO || 0);
+  const lossRate_gpm = totalLossRate_gpm();
+  if (lossRate_gpm > totalIn_gpm * 0.5) {
+    FLOW_OUT_gpm = 0;
+    FLOWOUT_VELOCITY_gpm_s = 0;
+    return 0;
+  }
+
+  // Riser above BOP and no significant losses - calculate target
   const qAnnUp_m3s = window.__qAnnUp_m3s || 0;
-  const targetFO_gpm = qAnnUp_m3s * 15850.323;
+
+  // Check 4: Sanity check on qAnnUp itself
+  if (qAnnUp_m3s < 1e-9) {
+    FLOW_OUT_gpm = 0;
+    FLOWOUT_VELOCITY_gpm_s = 0;
+    return 0;
+  }
+
+  let targetFO_gpm = qAnnUp_m3s * 15850.323;
+
+  // CRITICAL SANITY CHECK: FO cannot exceed total inflow (reduced from 1.5x to 1.2x)
+  const totalInflow_gpm = totalIn_gpm;
+  const maxReasonableFO_gpm = totalInflow_gpm * 1.2;
+  if (targetFO_gpm > maxReasonableFO_gpm) {
+    console.warn(`FO explosion detected! targetFO=${targetFO_gpm.toFixed(0)} gpm, clamping to ${maxReasonableFO_gpm.toFixed(0)} gpm. qAnnUp=${qAnnUp_m3s.toFixed(4)}, loss=${lossRate_gpm.toFixed(0)}`);
+    targetFO_gpm = maxReasonableFO_gpm;
+  }
   
   // Current state
   const FO_current = FLOW_OUT_gpm || 0;
@@ -2708,49 +2745,8 @@ function equilibrateFluidLevel(dt_s, maxIterations = 5) {
 // Recompute effective annulus section flows (above-BOP and below-BOP) 
 // given current losses, CML intake, and whether the riser is dry.
 // Publishes window.__qAnnAbove_m3s and window.__qAnnBelow_m3s for friction.
-// Requires: M3_PER_GPM, lossZones, riserTopDepth(), annulusTopDepthGlobal(), effective_Q_CML_gpm()
-// ---------------------------------------------------------------------------
-
-function recomputeAnnulusSectionFlowsForLosses() {
-  // Existing loss calculations...
-  const lossAbove_gpm = (lossZones || [])
-    .filter(z => z && z.enabled && z.depth_m <= BOP_DEPTH)
-    .reduce((s,z)=> s + (z.Qloss_gpm || 0), 0);
-
-  const lossBelow_gpm = (lossZones || [])
-    .filter(z => z && z.enabled && z.depth_m > BOP_DEPTH)
-    .reduce((s,z)=> s + (z.Qloss_gpm || 0), 0);
-
-  const qDS_m3s  = (Q_DS || 0) * M3_PER_GPM;
-  const qBO_m3s  = (Q_BO || 0) * M3_PER_GPM;
-  const qCML_m3s = (effective_Q_CML_gpm() || 0) * M3_PER_GPM;
-  
-  const fluidTop = annulusTopDepthGlobal();
-  const belowBOP = fluidTop > BOP_DEPTH;
-
-  let qAbove_m3s = 0;
-  let qBelow_m3s = 0;
-
-  if (belowBOP) {
-    // Riser dry → all flow goes down
-    qAbove_m3s = 0;
-    qBelow_m3s = qDS_m3s + qBO_m3s - qCML_m3s - (lossBelow_gpm * M3_PER_GPM);
-  } else {
-    // Normal: riser full
-    qAbove_m3s = Math.max(0, qDS_m3s + qBO_m3s - qCML_m3s - (lossAbove_gpm * M3_PER_GPM));
-    qBelow_m3s = Math.max(0, qDS_m3s - (lossBelow_gpm * M3_PER_GPM));
-  }
-  
-  // ✅ ADD IMBALANCES TO SECTION FLOWS
-  // This makes friction calculation automatically include them
-  qBelow_m3s += QIMB_DS2ANN_m3s;  // DS→Ann imbalance (can be negative)
-  qAbove_m3s += QIMB_BO2RIS_m3s;  // Booster→Riser imbalance (can be negative)
-
-  // Publish (friction will use these)
-  window.__qAnnAbove_m3s = qAbove_m3s;
-  window.__qAnnBelow_m3s = qBelow_m3s;
-  window.__qBelowIsDownward = belowBOP;
-}
+// NOTE: Duplicate function definition removed - using comprehensive version at line ~2510
+// with FO protection and friction redistribution for losses physics
 
 function safeRheoVal(key, def){
   const el = rheoPanel && rheoPanel[key];
