@@ -1155,22 +1155,22 @@ function flows_m3s(){
 // Add this function near getRheoForCalc (around line 820)
 function publishRheoToGlobals(){
   const { K, n, tauY } = getRheoForCalc();
-  
+
   if (ACTIVE_RHEO_MODEL === "Bingham"){
-    TAUY_Pa = tauY;
-    MUP_PaS = K;
-    K_PaSn = K;
-    N_dim = 1.0;
+    window.TAUY_Pa = tauY;
+    window.MUP_PaS = K;
+    window.K_PaSn = K;
+    window.N_dim = 1.0;
   } else if (ACTIVE_RHEO_MODEL === "PowerLaw"){
-    TAUY_Pa = 0;
-    MUP_PaS = 0.001; // nominal for PL
-    K_PaSn = K;
-    N_dim = n;
+    window.TAUY_Pa = 0;
+    window.MUP_PaS = 0.001; // nominal for PL
+    window.K_PaSn = K;
+    window.N_dim = n;
   } else { // HB
-    TAUY_Pa = tauY;
-    MUP_PaS = K; // approximate
-    K_PaSn = K;
-    N_dim = n;
+    window.TAUY_Pa = tauY;
+    window.MUP_PaS = K; // approximate
+    window.K_PaSn = K;
+    window.N_dim = n;
   }
 }
 
@@ -1339,22 +1339,41 @@ function __dpPerM_annulus_GNF_fromQ(Q_m3s, ID_m, OD_m, modelName){
   const Dh = 4 * A / P;
 
   const m = String(modelName || window.ACTIVE_RHEO_MODEL || 'HB').toUpperCase();
+
+  // Debug logging every 30 frames
+  const shouldLog = (frameCount % 30 === 0);
+
   if (m === 'BINGHAM'){
     const tauY = (window.TAUY_Pa ?? 5);
     const muP  = (window.MUP_PaS ?? 0.1);
+    if (shouldLog) {
+      console.log(`[RHEO_DEBUG] BINGHAM: tauY=${tauY} Pa, muP=${muP} Pa·s, Q=${(Q_m3s*15850.323).toFixed(1)} gpm, Dh=${Dh.toFixed(3)} m`);
+    }
     const tauToShear = (tau) => (tau <= tauY) ? 0 : (tau - tauY)/Math.max(muP,1e-12);
-    return __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
+    const result = __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
+    if (shouldLog) console.log(`[RHEO_DEBUG] BINGHAM result: ${result.toFixed(3)} psi/m`);
+    return result;
   } else if (m === 'PL' || m === 'POWERLAW' || m === 'POWER-LAW'){
     const K = (window.K_PaSn ?? 0.2);
     const n = Math.max(1e-6, (window.N_dim ?? 0.7));
+    if (shouldLog) {
+      console.log(`[RHEO_DEBUG] POWERLAW: K=${K} Pa·s^n, n=${n}, Q=${(Q_m3s*15850.323).toFixed(1)} gpm, Dh=${Dh.toFixed(3)} m`);
+    }
     const tauToShear = (tau) => Math.pow(Math.max(tau,0)/Math.max(K,1e-12), 1/n);
-    return __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
+    const result = __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
+    if (shouldLog) console.log(`[RHEO_DEBUG] POWERLAW result: ${result.toFixed(3)} psi/m`);
+    return result;
   } else { // HB default
     const tauY = (window.TAUY_Pa ?? 5);
     const K    = (window.K_PaSn  ?? 0.2);
     const n    = Math.max(1e-6, (window.N_dim ?? 0.6));
+    if (shouldLog) {
+      console.log(`[RHEO_DEBUG] HB: tauY=${tauY} Pa, K=${K} Pa·s^n, n=${n}, Q=${(Q_m3s*15850.323).toFixed(1)} gpm, Dh=${Dh.toFixed(3)} m`);
+    }
     const tauToShear = (tau) => (tau <= tauY) ? 0 : Math.pow((tau - tauY)/Math.max(K,1e-12), 1/n);
-    return __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
+    const result = __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
+    if (shouldLog) console.log(`[RHEO_DEBUG] HB result: ${result.toFixed(3)} psi/m`);
+    return result;
   }
 }
 
@@ -1412,6 +1431,14 @@ function frictionPsi_withCML_rheo(d){
 
   // ΔP/L (psi/m)
   const mName = ACTIVE_RHEO_MODEL;
+
+  // Debug rheology model and window variables
+  if (frameCount % 30 === 0 && depth === TD_DEPTH) {
+    console.log(`[FRICTION_DEBUG] ACTIVE_RHEO_MODEL="${mName}"`);
+    console.log(`[FRICTION_DEBUG] Window vars: K_PaSn=${window.K_PaSn}, N_dim=${window.N_dim}, TAUY_Pa=${window.TAUY_Pa}, MUP_PaS=${window.MUP_PaS}`);
+    console.log(`[FRICTION_DEBUG] Geometries: ID_ris=${ID_ris.toFixed(3)}m, ID_csg=${ID_csg.toFixed(3)}m, OD_ds=${OD_ds.toFixed(3)}m`);
+  }
+
   const dpdm_riser = (L_riser>0) ? __dpPerM_annulus_GNF_fromQ(qAbove, ID_ris, OD_ds, mName) : 0;
   const dpdm_csg   = (L_csg  >0) ? __dpPerM_annulus_GNF_fromQ(qBelow, ID_csg, OD_ds, mName) : 0;
   const dpdm_oh    = (L_oh   >0) ? __dpPerM_annulus_GNF_fromQ(qBelow, ID_oh,  OD_ds, mName) : 0;
