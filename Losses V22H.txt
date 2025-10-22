@@ -1942,6 +1942,7 @@ function calculateBHPWithLossSplit(zone, qLoss_m3s, qIn_m3s) {
 }
 
 // Iteratively solve for loss rate where BHP balances at fracture pressure
+// OPTIMIZED: Feedforward + reduced iterations + relaxed tolerance
 function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
   if (!zone || !zone.enabled) return 0;
 
@@ -1954,7 +1955,7 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
   // Check static condition (no flow)
   const BHP_static = calculateBHPWithLossSplit(zone, 0, 0);
 
-  // If pressure already below fracture, no losses
+  // OPTIMIZATION 1: Early exit if far below fracture pressure
   if (BHP_static < Pfrac - LOSS_DEADBAND_PSI) return 0;
 
   // SPECIAL CASE: Static overbalance (Hyd + SBP > Pfrac even with no flow)
@@ -1972,21 +1973,34 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
     return 0; // No flow losses, just static balance
   }
 
-  // Binary search for qLoss where BHP ≈ Pfrac (equilibrium)
-  let qLoss_min = 0;
-  let qLoss_max = qIn_m3s * 10; // Allow demand > supply (causes level drop)
+  // OPTIMIZATION 2: Feedforward - start search near previous result
+  const qLoss_prev_m3s = (typeof zone._Q_filt === 'number') ? zone._Q_filt / 15850.323 : 0;
 
-  let qLoss_result = 0;
+  let qLoss_min, qLoss_max;
+  if (qLoss_prev_m3s > 1e-6) {
+    // Use previous result as starting point (bracket around it)
+    qLoss_min = Math.max(0, qLoss_prev_m3s * 0.3);
+    qLoss_max = Math.min(qIn_m3s * 10, qLoss_prev_m3s * 3.0);
+  } else {
+    // First time or was zero - use wide bracket
+    qLoss_min = 0;
+    qLoss_max = qIn_m3s * 10;
+  }
 
-  for (let iter = 0; iter < 20; iter++) {
+  let qLoss_result = (qLoss_min + qLoss_max) / 2;
+
+  // OPTIMIZATION 3: Reduced iterations (10 instead of 20)
+  // Binary search converges exponentially: 10 iterations = 2^10 = 1024x resolution
+  const MAX_ITERATIONS = 10;
+  const TOLERANCE_PSI = 15; // OPTIMIZATION 4: Relaxed tolerance (15 psi instead of 10)
+
+  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const qLoss_trial = (qLoss_min + qLoss_max) / 2;
     const BHP = calculateBHPWithLossSplit(zone, qLoss_trial, qIn_m3s);
 
-    const tolerance = 10; // psi
-
-    if (Math.abs(BHP - Pfrac) < tolerance) {
+    if (Math.abs(BHP - Pfrac) < TOLERANCE_PSI) {
       qLoss_result = qLoss_trial;
-      break;
+      break; // OPTIMIZATION 5: Early exit on convergence
     }
 
     if (BHP > Pfrac) {
