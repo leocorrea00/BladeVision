@@ -41,8 +41,8 @@ const PSI_PER_PASCAL = 1 / 6894.757;      // psi per Pa
 // ============================================================================
 
 // === Loss Zone Stabilization Constants ===
-const LOSS_ACTIVATION_HYST_PSI = 50;    // Pressure must exceed Pfrac by this to START
-const LOSS_DEACTIVATION_HYST_PSI = 25;  // Pressure must fall below Pfrac by this to STOP
+const LOSS_ACTIVATION_HYST_PSI = 10;    // Pressure must exceed Pfrac by this to START (reduced from 50)
+const LOSS_DEACTIVATION_HYST_PSI = 5;   // Pressure must fall below Pfrac by this to STOP (reduced from 25)
 const LOSS_MAX_ACCEL_GPM_S2 = 200;      // Max acceleration (gpm/s²) - prevents spikes
 const LOSS_GLOBAL_RATE_LIMIT = 400;     // Max TOTAL loss change (gpm/s)
 
