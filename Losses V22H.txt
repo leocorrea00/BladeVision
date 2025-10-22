@@ -1765,10 +1765,13 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const BO_left = Math.max(0, qBO - takeBO);
   const TF_left = Math.max(0, qTF - takeTF);
 
-  // Upward annulus flow contributor (ONLY leftover DS + TF; Booster leftover goes up only if riser is full)
-  const qAnnUp = DS_left + TF_left + (riserFull ? BO_left : 0);
+  // Upward annulus flow contributor
+  // - If riser full: everything goes up to surface
+  // - If riser NOT full but NO losses (takeBO=0): booster goes UP to fill riser
+  // - If riser NOT full AND losses active (takeBO>0): booster goes DOWN, rest goes UP
+  const qAnnUp = DS_left + TF_left + (riserFull || takeBO === 0 ? BO_left : 0);
 
-  // Downward annulus flow contributor (Booster that is taken by zone travels downward)
+  // Downward annulus flow contributor (Booster taken by losses travels downward)
   const qAnnDown = takeBO; // this is *downward* internal flow to the zone
 
   // Publish clean section “signals” (magnitudes, signless)
@@ -3774,62 +3777,91 @@ updateDiagnosticsUI(dt_frame);
   // COMPREHENSIVE DEBUG LOGGING (every 0.5 seconds at 60fps)
   // ============================================================================
   if (frameCount % 30 === 0) {
-    console.log('=== COMPREHENSIVE FLOW DEBUG (Frame ' + frameCount + ') ===');
-
-    // Level & Position
+    // Calculate all values
     const levelDepth = LOSS_TOP_DEPTH_m || 0;
-    const levelStatus = levelDepth <= 0.5 ? 'AT SURFACE' :
-                        levelDepth < BOP_DEPTH ? `${levelDepth.toFixed(1)}m below surface (ABOVE BOP)` :
-                        `${levelDepth.toFixed(1)}m below surface (BELOW BOP)`;
-    console.log('  Level Status:', levelStatus);
-
-    // Mud Weights
     const MW_DS_current = dsAvgPPG ? dsAvgPPG() : (MW_DS || 0);
     const MW_BO_current = boosterAvgPPG ? boosterAvgPPG() : (MW_BO || 0);
-    console.log('  MW_DS:', MW_DS_current.toFixed(2), 'ppg | MW_BO:', MW_BO_current.toFixed(2), 'ppg');
+    const qDS_gpm = Q_DS || 0;
+    const qBO_gpm = Q_BO || 0;
+    const qTF_gpm = TOPFILL_ON ? (Q_TOPFILL || 0) : 0;
+    const qCML_gpm = (typeof effective_Q_CML_gpm === 'function') ? (effective_Q_CML_gpm() || 0) : 0;
+    const qIn_total = qDS_gpm + qBO_gpm + qTF_gpm - qCML_gpm;
 
-    // Flow Rates
-    console.log('  Q_DS:', (Q_DS || 0).toFixed(1), 'gpm | Q_BO:', (Q_BO || 0).toFixed(1), 'gpm | Total In:', ((Q_DS || 0) + (Q_BO || 0)).toFixed(1), 'gpm');
-
-    // Section Flows
     const qUp_m3s = window.__qAnnAbove_m3s || window.__qAnnUp_m3s || 0;
     const qDown_m3s = window.__qAnnBelow_m3s || window.__qAnnDown_m3s || 0;
-    console.log('  Q_Up (above zone):', (qUp_m3s * 15850.323).toFixed(1), 'gpm | Q_Down (below zone):', (qDown_m3s * 15850.323).toFixed(1), 'gpm');
+    const qUp_gpm = qUp_m3s * 15850.323;
+    const qDown_gpm = qDown_m3s * 15850.323;
 
-    // Losses
-    const lossRate = totalLossRate_gpm ? totalLossRate_gpm() : 0;
-    const lossesActive = LOSSES_ON && lossRate > 1.0;
-    console.log('  Q_Exit (losses):', lossRate.toFixed(1), 'gpm | Losses Active:', lossesActive);
+    const FO_gpm = FLOW_OUT_gpm || 0;
+    const FO_smooth_gpm = window.FLOW_OUT_smooth || FO_gpm;
 
-    // Flow Out
-    console.log('  FO (surface returns):', (FLOW_OUT_gpm || 0).toFixed(1), 'gpm');
-
-    // Mass Balance
-    const qIn_total = ((Q_DS || 0) + (Q_BO || 0));
-    const qOut_total = (FLOW_OUT_gpm || 0) + lossRate;
-    const massBal = qIn_total - qOut_total;
-    console.log('  Mass Balance Residual:', massBal.toFixed(1), 'gpm (In - Out - Losses)');
-
-    // Booster Routing
-    const levelAboveBOP = levelDepth < BOP_DEPTH;
-    const boosterRoute = levelAboveBOP && !lossesActive ? 'TO_RISER' : 'DOWN';
-    console.log('  Booster Route:', boosterRoute);
-
-    // Active Loss Zones
-    if (lossesActive && lossZones) {
-      console.log('  Active Loss Zones:');
-      for (const z of lossZones.filter(z => z && z.enabled && z.Qloss_gpm > 0)) {
-        const BHP = pressureAtDepth ? pressureAtDepth(z.depth_m) : 0;
-        console.log('    Zone @ ' + z.depth_m + 'm: Q_loss=' + z.Qloss_gpm.toFixed(1) + ' gpm, BHP=' + BHP.toFixed(0) + ' psi, Pfrac=' + z.fracPressure_psi + ' psi');
+    // Per-zone losses
+    let lossesStr = '';
+    let qLoss_total_gpm = 0;
+    if (Array.isArray(lossZones) && lossZones.length > 0) {
+      const zoneParts = [];
+      for (let i = 0; i < lossZones.length; i++) {
+        const z = lossZones[i];
+        if (!z) continue;
+        const q = z.enabled ? Math.max(0, z.Qloss_gpm || 0) : 0;
+        qLoss_total_gpm += q;
+        const label = z.name ? `Q${i+1}(${z.name})` : `Q${i+1}`;
+        const status = z.enabled ? `${q.toFixed(0)}` : 'OFF';
+        zoneParts.push(`${label}=${status}`);
       }
+      lossesStr = zoneParts.join(' ');
+    } else {
+      lossesStr = 'Qloss=0';
+      qLoss_total_gpm = 0;
     }
 
-    console.log('========================================');
+    const qOut_total = FO_gpm + qLoss_total_gpm;
+    const massBal_gpm = qIn_total - qOut_total;
+
+    // Level status
+    const levelStatus = levelDepth <= 0.5 ? 'SURFACE' :
+                        levelDepth < BOP_DEPTH ? `${levelDepth.toFixed(1)}m(AboveBOP)` :
+                        `${levelDepth.toFixed(1)}m(BelowBOP)`;
+
+    // Booster routing
+    const takeBO_m3s = window.__qAnnDown_m3s || 0;
+    const boosterRoute = (levelDepth <= 0.5) ? 'TO_SURF' :
+                         (takeBO_m3s > 1e-6) ? 'DOWN' : 'UP';
+
+    // Single-line compact log
+    const timestamp = (frameCount / 60).toFixed(1) + 's';
+    console.log(
+      `[${timestamp}] ` +
+      `FO=${FO_gpm.toFixed(1)}(sm=${FO_smooth_gpm.toFixed(1)}) | ` +
+      `Level=${levelStatus} | ` +
+      `MW: DS=${MW_DS_current.toFixed(2)} BO=${MW_BO_current.toFixed(2)} ppg | ` +
+      `In: DS=${qDS_gpm.toFixed(0)} BO=${qBO_gpm.toFixed(0)} TF=${qTF_gpm.toFixed(0)} CML=${qCML_gpm.toFixed(0)} Tot=${qIn_total.toFixed(0)} gpm | ` +
+      `Sec: Qup=${qUp_gpm.toFixed(0)} Qdown=${qDown_gpm.toFixed(0)} gpm | ` +
+      `Losses: ${lossesStr} Tot=${qLoss_total_gpm.toFixed(0)} gpm | ` +
+      `Out: Surf=${FO_gpm.toFixed(0)} gpm | ` +
+      `MassBal=${massBal_gpm.toFixed(0)} gpm | ` +
+      `BO_Route=${boosterRoute}`
+    );
+
+    // Optional: Detailed per-zone info if losses are active
+    if (LOSSES_ON && qLoss_total_gpm > 1.0 && Array.isArray(lossZones)) {
+      for (let i = 0; i < lossZones.length; i++) {
+        const z = lossZones[i];
+        if (!z || !z.enabled || !z.Qloss_gpm || z.Qloss_gpm < 0.1) continue;
+        const BHP = pressureAtDepth ? pressureAtDepth(z.depth_m) : 0;
+        const margin = BHP - z.fracPressure_psi;
+        const label = z.name ? `Zone${i+1}(${z.name})` : `Zone${i+1}`;
+        console.log(
+          `  ${label} @ ${z.depth_m}m: ` +
+          `Qloss=${z.Qloss_gpm.toFixed(1)} gpm | ` +
+          `BHP=${BHP.toFixed(0)} psi | ` +
+          `Pfrac=${z.fracPressure_psi} psi | ` +
+          `Margin=${margin.toFixed(0)} psi`
+        );
+      }
+    }
   }
-    const P = pressureAtDepth(z.depth_m);
-    console.log(`  Zone ${z.depth_m}m: P=${P.toFixed(0)} psi, Pfrac=${z.fracPressure_psi} psi, Q=${z.Qloss_gpm.toFixed(0)} gpm`);
-  }
-}
+
   // Footer labels
   fill(0,0,95); textSize(12);
   text("Rheology/Hydraulics controls at bottom-left; SBP/MPD top-right.", width/2, height-16);
