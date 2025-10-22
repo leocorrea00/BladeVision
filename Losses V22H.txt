@@ -1779,10 +1779,20 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // Downward annulus flow contributor (Booster taken by losses travels downward)
   const qAnnDown = takeBO; // this is *downward* internal flow to the zone
 
-  // Publish clean section “signals” (magnitudes, signless)
+  // Publish clean section "signals" (magnitudes, signless)
   window.__qToLoss_m3s   = qToLoss;
   window.__qAnnUp_m3s    = qAnnUp;
   window.__qAnnDown_m3s  = qAnnDown;
+
+  // ALSO publish to compatibility aliases used by advection and friction
+  window.__qAnnAbove_m3s = qAnnUp;
+  window.__qAnnBelow_m3s = qAnnDown;
+
+  // Debug section flows every 30 frames
+  if (frameCount % 30 === 0) {
+    console.log(`[ROUTE_DEBUG] qDS=${qDS.toFixed(4)}, qBO=${qBO.toFixed(4)}, qTF=${qTF.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, qAnnUp=${qAnnUp.toFixed(4)} m3/s (${(qAnnUp*15850.323).toFixed(1)} gpm)`);
+    console.log(`[ROUTE_DEBUG] Published: __qAnnUp_m3s=${(window.__qAnnUp_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
+  }
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
   const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
