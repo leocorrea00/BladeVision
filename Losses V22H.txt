@@ -1921,23 +1921,28 @@ function calculateBHPWithLossSplit(zone, qLoss_m3s, qIn_m3s) {
   const P_hydro = PSI_COEF * ecd_ppg * depth_wet;
 
   // Split flow
-  // qIn_m3s = total flow arriving at loss zone (DS + BO during losses, or just DS + BO - losses_above)
-  // At the loss zone:
+  // PHYSICS: Fluid flows UP from TD (bottom) through annulus to loss zone
+  // At loss zone, flow splits:
   //   - qLoss_m3s exits to fracture
-  //   - qUp_m3s continues up to surface
+  //   - qUp_m3s continues UP to surface
+  //
+  // qIn_m3s = flow arriving at loss zone from below (flowing UP from TD)
   const qUp_m3s = Math.max(0, qIn_m3s - qLoss_m3s);
   const qFrac_m3s = Math.max(0, qLoss_m3s);
 
   // CRITICAL: Calculate annulus friction correctly
-  // - Above zone: friction from upward flow (qUp_m3s)
-  // - Below zone: friction from downward flow (qIn_m3s, which becomes qDown before reaching zone)
+  // - ABOVE zone: friction from qUp_m3s flowing up (after losses exit)
+  // - BELOW zone: friction from qIn_m3s flowing UP from TD (before losses exit)
+  //
+  // Friction from TD→zone increases BHP at zone
+  //
   // Save current section flows
   const qAbove_save = window.__qAnnAbove_m3s;
   const qBelow_save = window.__qAnnBelow_m3s;
 
   // Temporarily set section flows for friction calculation
-  window.__qAnnAbove_m3s = qUp_m3s;     // Flow going UP above zone
-  window.__qAnnBelow_m3s = qIn_m3s;     // Flow going DOWN below zone (before losses exit)
+  window.__qAnnAbove_m3s = qUp_m3s;     // Flow UP above zone (after split)
+  window.__qAnnBelow_m3s = qIn_m3s;     // Flow UP below zone (before split at loss zone)
 
   const P_fric_ann = frictionPsi_withCML_rheo(depth_m);
 
@@ -2045,6 +2050,10 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
       qLoss_min = qLoss_trial;
     } else {
       // Pressure too low → reduce losses
+      // NOTE: This allows RECOVERY from total losses:
+      //   - If MW changes (lighter) → BHP drops
+      //   - If flow reduces → friction drops → BHP drops
+      //   - Solver reduces qLoss → qUp increases → flow resumes to surface
       qLoss_max = qLoss_trial;
     }
 
@@ -2052,6 +2061,8 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
   }
 
   // Apply zone capacity limit if calibrated
+  // NOTE: dP_available uses BHP_static (no losses), so if BHP_static < Pfrac,
+  //       capacity = 0, which allows RECOVERY from total losses when BHP drops
   if (zone.Qref_gpm > 0 && zone.DPref_psi > 0) {
     const n = zone.n || 1.0;
     const dP_available = Math.max(0, BHP_static - Pfrac);
@@ -2062,7 +2073,7 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
     qLoss_result = Math.min(qLoss_result, Q_capacity_m3s);
   }
 
-  return qLoss_result; // m3/s
+  return qLoss_result; // m3/s (recalculated every frame, allows dynamic response)
 }
 
 /* ===================== PER-ZONE LOSS (ATTENUATED) ===================== */
