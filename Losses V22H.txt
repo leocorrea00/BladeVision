@@ -1429,19 +1429,28 @@ function frictionPsi_withCML_rheo(d){
   const ID_oh  = (typeof openhole_ODm !== 'undefined') ? openhole_ODm : 0.216;
   const OD_ds  = (typeof ds_OD_m      !== 'undefined') ? ds_OD_m      : 0.127;
 
-  // ΔP/L (psi/m)
+  // ΔP/L (psi/m) - use turbulent-capable friction function
   const mName = ACTIVE_RHEO_MODEL;
+  const { K, n, tauY } = getRheoForCalc();
+
+  // Convert MW to density (ppg to kg/m³)
+  const rho = ecdAtDepth(depth) * 119.826; // kg/m³
 
   // Debug rheology model and window variables
   if (frameCount % 30 === 0 && depth === TD_DEPTH) {
     console.log(`[FRICTION_DEBUG] ACTIVE_RHEO_MODEL="${mName}"`);
-    console.log(`[FRICTION_DEBUG] Window vars: K_PaSn=${window.K_PaSn}, N_dim=${window.N_dim}, TAUY_Pa=${window.TAUY_Pa}, MUP_PaS=${window.MUP_PaS}`);
+    console.log(`[FRICTION_DEBUG] Rheo params: K=${K.toFixed(4)} Pa·s^n, n=${n.toFixed(3)}, τy=${tauY.toFixed(2)} Pa`);
+    console.log(`[FRICTION_DEBUG] Density: ${rho.toFixed(1)} kg/m³ (MW=${ecdAtDepth(depth).toFixed(2)} ppg)`);
     console.log(`[FRICTION_DEBUG] Geometries: ID_ris=${ID_ris.toFixed(3)}m, ID_csg=${ID_csg.toFixed(3)}m, OD_ds=${OD_ds.toFixed(3)}m`);
+    console.log(`[FRICTION_DEBUG] RPM=${RPM}`);
   }
 
-  const dpdm_riser = (L_riser>0) ? __dpPerM_annulus_GNF_fromQ(qAbove, ID_ris, OD_ds, mName) : 0;
-  const dpdm_csg   = (L_csg  >0) ? __dpPerM_annulus_GNF_fromQ(qBelow, ID_csg, OD_ds, mName) : 0;
-  const dpdm_oh    = (L_oh   >0) ? __dpPerM_annulus_GNF_fromQ(qBelow, ID_oh,  OD_ds, mName) : 0;
+  // Use turbulent-capable friction (auto-switches laminar/turbulent based on Re)
+  // Returns Pa/m, convert to psi/m
+  const PA_TO_PSI = 1.0 / 6894.757;
+  const dpdm_riser = (L_riser>0) ? dP_per_m_annulus_withRPM(qAbove, rho, ID_ris, OD_ds, K, n, tauY, RPM) * PA_TO_PSI : 0;
+  const dpdm_csg   = (L_csg  >0) ? dP_per_m_annulus_withRPM(qBelow, rho, ID_csg, OD_ds, K, n, tauY, RPM) * PA_TO_PSI : 0;
+  const dpdm_oh    = (L_oh   >0) ? dP_per_m_annulus_withRPM(qBelow, rho, ID_oh,  OD_ds, K, n, tauY, RPM) * PA_TO_PSI : 0;
 
   // Debug dP/L values
   if (frameCount % 30 === 0 && depth === TD_DEPTH) {
