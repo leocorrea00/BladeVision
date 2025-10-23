@@ -3678,6 +3678,13 @@ function draw(){
   // Bottom frames (visual only; your UI inputs sit on top of these)
   drawBottomFrames();
   drawEnhancedHydraulicsFrame();
+
+  // ✅ CRITICAL FIX: Update annulus flows BEFORE any pressure/friction calculations
+  // The SBP logic below calls pressureAtDepth_noSBP() which needs friction which
+  // needs window.__qAnnBelow_m3s. Update flows first to avoid 1-frame lag!
+  // Call with dt_s=0 to just update flow variables without advancing simulation time
+  routeAnnulusFlowsWithLosses(0);
+
   // SBP logic
   if (MPD_ON){
     // Rule #8: SBP can only be applied if riser is full (CML_TOP_DEPTH must be 0)
