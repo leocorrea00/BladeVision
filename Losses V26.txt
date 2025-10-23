@@ -616,7 +616,17 @@ function dpPerM_API_withRot(rho, V, Dh, K, n, tauY, gdotExtra){
   const muApp = tauY/gdot + K*Math.pow(gdot, n-1);
   const Re = (rho * V * Dh) / Math.max(muApp, 1e-9);
   const f = (Re < 2100) ? 16/Math.max(Re,1e-6) : 0.079/Math.pow(Math.max(Re,1e-6),0.25);
-  return f * (rho*V*V/2) / Math.max(Dh,1e-6);
+  let dp = f * (rho*V*V/2) / Math.max(Dh,1e-6);
+
+  // ✅ FIX: Add yield stress contribution for turbulent flow
+  // For Herschel-Bulkley fluids, yield stress contributes to wall shear even in turbulent regime
+  // Add direct yield stress term: dp_yield = 2*tau_y / (Dh/2) for annulus geometry
+  if (Re >= 2100 && tauY > 0) {
+    const dp_yield = (4 * tauY) / Math.max(Dh, 1e-6);  // Yield stress pressure drop
+    dp += dp_yield;  // Add to turbulent friction
+  }
+
+  return dp;
 }
 function dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, gdotExtra){
   // Blended laminar/turbulent with mild non-Newtonian adjustments
@@ -629,7 +639,17 @@ function dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, gdotExtra){
   const blend = 1/(1+Math.exp(-(Re-2500)/400));
   let f = (1-blend)*fLam + blend*fTur;
   f *= (1 - 0.05*Math.max(0,1-n)); // slight shear-thinning easing
-  return f * (rho*V*V/2) / Math.max(Dh,1e-6);
+  let dp = f * (rho*V*V/2) / Math.max(Dh,1e-6);
+
+  // ✅ FIX: Add yield stress contribution for turbulent flow
+  // For Herschel-Bulkley fluids, yield stress contributes to wall shear even in turbulent regime
+  // Blend this contribution based on how turbulent we are (same blend as friction factor)
+  if (tauY > 0) {
+    const dp_yield = (4 * tauY) / Math.max(Dh, 1e-6);  // Yield stress pressure drop
+    dp += blend * dp_yield;  // Add proportionally to turbulent fraction
+  }
+
+  return dp;
 }
 // Yield thresholds to avoid crazy low-flow spikes
 function dpMin_pipe_per_m(tauY, Dh){ return 4*Math.max(tauY, use_gel ? gel_Pa : 0)/Math.max(Dh,1e-6); }
