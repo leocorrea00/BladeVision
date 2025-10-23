@@ -681,11 +681,17 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
     const blend = t * t * (3 - 2 * t);  // Smoothstep function
     const result = dp_lam * (1 - blend) + dp_turb * blend;
 
-    // ✅ DEBUG: Log transition zone details every 5 seconds
-    if (frameCount % 150 === 0 && Q > 0.03) {  // Only log for Q > ~475 gpm
-      console.log(`[TRANSITION] Re=${Re_g.toFixed(0)}, Q=${(Q*15850.323).toFixed(0)} gpm, Dh=${Dh.toFixed(3)}m`);
-      console.log(`[TRANSITION] dp_lam=${dp_lam.toFixed(1)} Pa/m, dp_turb=${dp_turb.toFixed(1)} Pa/m (base=${dp_base.toFixed(1)}, rough=${rough.toFixed(3)}, ecc=${ecc.toFixed(3)})`);
-      console.log(`[TRANSITION] blend=${blend.toFixed(3)} (t=${t.toFixed(3)}), result=${result.toFixed(1)} Pa/m`);
+    // ✅ TRANSITION DEBUG: Every 3 seconds (90 frames at 30fps)
+    if (frameCount % 90 === 0 && Q > 0.03) {  // Only log for Q > ~475 gpm
+      console.log('');
+      console.log('========== LAMINAR/TURBULENT TRANSITION DEBUG ==========');
+      console.log(`Reynolds = ${Re_g.toFixed(0)} | Flow = ${(Q*15850.323).toFixed(0)} gpm | Dh = ${Dh.toFixed(3)}m`);
+      console.log(`Laminar:   ${dp_lam.toFixed(1)} Pa/m`);
+      console.log(`Turbulent: ${dp_turb.toFixed(1)} Pa/m (base=${dp_base.toFixed(1)}, rough=${rough.toFixed(3)}, ecc=${ecc.toFixed(3)})`);
+      console.log(`Blend:     ${(blend*100).toFixed(1)}% turbulent (t=${t.toFixed(3)})`);
+      console.log(`RESULT:    ${result.toFixed(1)} Pa/m`);
+      console.log('========================================================');
+      console.log('');
     }
 
     return result;
@@ -1341,7 +1347,8 @@ function ecdAtDepth(d){
 
     // Debug logging reduced to every 5 seconds
     if (frameCount % 150 === 0 && (d === SHOE_DEPTH || d === TD_DEPTH)) {
-      console.log(`[ECD_DEBUG] ecdAtDepth(${d}m): sumAbove=${sumAbove.toFixed(2)}, sumBelow=${sumBelow.toFixed(2)}, nAbove=${nAbove}, nBelow=${numBelowCells}, total=${totalCells}, ECD=${result.toFixed(3)} ppg`);
+      // ✅ DISABLED: ECD debug
+      // console.log(`[ECD_DEBUG] ecdAtDepth(${d}m): sumAbove=${sumAbove.toFixed(2)}, sumBelow=${sumBelow.toFixed(2)}, nAbove=${nAbove}, nBelow=${numBelowCells}, total=${totalCells}, ECD=${result.toFixed(3)} ppg`);
     }
 
     return result;
@@ -1498,15 +1505,15 @@ function frictionPsi_withCML_rheo(d){
 
   const totalFriction = dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
 
-  // ✅ CONSOLIDATED DEBUG: Once every 5 seconds, only at TD
-  if (frameCount % 150 === 0 && depth === TD_DEPTH) {
-    console.log('[6] FRICTION CALC: qAbove=' + (qAbove*15850.323).toFixed(1) + ' gpm (riser), qBelow=' + (qBelow*15850.323).toFixed(1) + ' gpm (casing/OH)');
-    console.log('[7] RHEO: K=' + K.toFixed(4) + ' Pa·s^n, n=' + n.toFixed(3) + ', τy=' + tauY.toFixed(2) + ' Pa, ρ=' + rho.toFixed(1) + ' kg/m³ (' + ecdAtDepth(depth).toFixed(2) + ' ppg), RPM=' + RPM);
-    console.log('[8] LENGTHS: L_riser=' + L_riser.toFixed(1) + 'm, L_csg=' + L_csg.toFixed(1) + 'm, L_oh=' + L_oh.toFixed(1) + 'm');
-    console.log('[9] dP/m: riser=' + dpdm_riser.toFixed(4) + ' psi/m, casing=' + dpdm_csg.toFixed(4) + ' psi/m, OH=' + dpdm_oh.toFixed(4) + ' psi/m');
-    console.log('[10] TOTAL FRICTION = ' + totalFriction.toFixed(1) + ' psi');
-    console.log('===================================================');
-  }
+  // ✅ DISABLED: Friction calc debug
+  // if (frameCount % 150 === 0 && depth === TD_DEPTH) {
+  //   console.log('[6] FRICTION CALC: qAbove=' + (qAbove*15850.323).toFixed(1) + ' gpm (riser), qBelow=' + (qBelow*15850.323).toFixed(1) + ' gpm (casing/OH)');
+  //   console.log('[7] RHEO: K=' + K.toFixed(4) + ' Pa·s^n, n=' + n.toFixed(3) + ', τy=' + tauY.toFixed(2) + ' Pa, ρ=' + rho.toFixed(1) + ' kg/m³ (' + ecdAtDepth(depth).toFixed(2) + ' ppg), RPM=' + RPM);
+  //   console.log('[8] LENGTHS: L_riser=' + L_riser.toFixed(1) + 'm, L_csg=' + L_csg.toFixed(1) + 'm, L_oh=' + L_oh.toFixed(1) + 'm');
+  //   console.log('[9] dP/m: riser=' + dpdm_riser.toFixed(4) + ' psi/m, casing=' + dpdm_csg.toFixed(4) + ' psi/m, OH=' + dpdm_oh.toFixed(4) + ' psi/m');
+  //   console.log('[10] TOTAL FRICTION = ' + totalFriction.toFixed(1) + ' psi');
+  //   console.log('===================================================');
+  // }
 
   return totalFriction;
 }
@@ -1799,16 +1806,16 @@ function routeAnnulusFlowsWithLosses(dt_s){
   window.__qAnnAbove_m3s = qAnnAbove;  // DS+BO through riser
   window.__qAnnBelow_m3s = qAnnBelow;  // Only DS through casing/OH
 
-  // ✅ CONSOLIDATED DEBUG: Log everything once every 5 seconds (150 frames at 30fps)
-  if (frameCount % 150 === 0) {
-    console.log('========== FLOW ROUTING & FRICTION DEBUG ==========');
-    console.log(`[1] INPUTS: qDS=${qDS.toFixed(4)} m3/s (${(qDS*15850.323).toFixed(1)} gpm), qBO=${qBO.toFixed(4)} m3/s (${(qBO*15850.323).toFixed(1)} gpm), qTF=${qTF.toFixed(4)} m3/s`);
-    console.log(`[2] LOSSES: qToLoss=${qToLoss.toFixed(4)} m3/s (takeDS=${takeDS.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, takeTF=${takeTF.toFixed(4)})`);
-    console.log(`[3] FRICTION FLOWS: qAnnBelow=${qAnnBelow.toFixed(4)} m3/s (${(qAnnBelow*15850.323).toFixed(1)} gpm) [casing/OH: DS only]`);
-    console.log(`[4] FRICTION FLOWS: qAnnAbove=${qAnnAbove.toFixed(4)} m3/s (${(qAnnAbove*15850.323).toFixed(1)} gpm) [riser: DS+BO+TF]`);
-    console.log(`[5] PUBLISHED: __qAnnBelow_m3s=${(window.__qAnnBelow_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
-    console.log('===================================================');
-  }
+  // ✅ DISABLED: Flow routing debug
+  // if (frameCount % 150 === 0) {
+  //   console.log('========== FLOW ROUTING & FRICTION DEBUG ==========');
+  //   console.log(`[1] INPUTS: qDS=${qDS.toFixed(4)} m3/s (${(qDS*15850.323).toFixed(1)} gpm), qBO=${qBO.toFixed(4)} m3/s (${(qBO*15850.323).toFixed(1)} gpm), qTF=${qTF.toFixed(4)} m3/s`);
+  //   console.log(`[2] LOSSES: qToLoss=${qToLoss.toFixed(4)} m3/s (takeDS=${takeDS.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, takeTF=${takeTF.toFixed(4)})`);
+  //   console.log(`[3] FRICTION FLOWS: qAnnBelow=${qAnnBelow.toFixed(4)} m3/s (${(qAnnBelow*15850.323).toFixed(1)} gpm) [casing/OH: DS only]`);
+  //   console.log(`[4] FRICTION FLOWS: qAnnAbove=${qAnnAbove.toFixed(4)} m3/s (${(qAnnAbove*15850.323).toFixed(1)} gpm) [riser: DS+BO+TF]`);
+  //   console.log(`[5] PUBLISHED: __qAnnBelow_m3s=${(window.__qAnnBelow_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
+  //   console.log('===================================================');
+  // }
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
   const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
