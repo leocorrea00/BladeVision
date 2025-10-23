@@ -671,13 +671,24 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
       ? dpPerM_API_withRot(rho, V, Dh, K, n, tauY, g_rot)
       : dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, g_rot);
     let dp_turb = applyTaylorBoost(dp_base, rpm, Di, Do, muAw, rho, n);
-    dp_turb *= roughMultiplier(true);
-    dp_turb *= eccMultiplier(Do, Di);
+    const rough = roughMultiplier(true);
+    const ecc = eccMultiplier(Do, Di);
+    dp_turb *= rough;
+    dp_turb *= ecc;
 
     // Smooth cubic blend: f(Re) = 3t² - 2t³ where t = (Re - RE_LAM)/(RE_TURB - RE_LAM)
     const t = (Re_g - RE_LAM) / (RE_TURB - RE_LAM);
     const blend = t * t * (3 - 2 * t);  // Smoothstep function
-    return dp_lam * (1 - blend) + dp_turb * blend;
+    const result = dp_lam * (1 - blend) + dp_turb * blend;
+
+    // ✅ DEBUG: Log transition zone details every 5 seconds
+    if (frameCount % 150 === 0 && Q > 0.03) {  // Only log for Q > ~475 gpm
+      console.log(`[TRANSITION] Re=${Re_g.toFixed(0)}, Q=${(Q*15850.323).toFixed(0)} gpm, Dh=${Dh.toFixed(3)}m`);
+      console.log(`[TRANSITION] dp_lam=${dp_lam.toFixed(1)} Pa/m, dp_turb=${dp_turb.toFixed(1)} Pa/m (base=${dp_base.toFixed(1)}, rough=${rough.toFixed(3)}, ecc=${ecc.toFixed(3)})`);
+      console.log(`[TRANSITION] blend=${blend.toFixed(3)} (t=${t.toFixed(3)}), result=${result.toFixed(1)} Pa/m`);
+    }
+
+    return result;
   }
 }
 function dP_per_m_pipe_withRPM(Q, rho, ID, K, n, tauY, rpm){
