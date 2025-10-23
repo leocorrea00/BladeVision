@@ -683,9 +683,17 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
 
     // ✅ TRANSITION DEBUG: Every 3 seconds (90 frames at 30fps)
     if (frameCount % 90 === 0 && Q > 0.03) {  // Only log for Q > ~475 gpm
+      // Identify section by geometry
+      let section = 'UNKNOWN';
+      if (Do > 0.5) section = 'RISER';
+      else if (Do > 0.3) section = 'CASING';
+      else if (Do > 0.2) section = 'OPENHOLE';
+
       console.log('');
       console.log('========== LAMINAR/TURBULENT TRANSITION DEBUG ==========');
-      console.log(`Reynolds = ${Re_g.toFixed(0)} | Flow = ${(Q*15850.323).toFixed(0)} gpm | Dh = ${Dh.toFixed(3)}m`);
+      console.log(`SECTION:   ${section} (Do=${Do.toFixed(3)}m, Di=${Di.toFixed(3)}m, Dh=${Dh.toFixed(3)}m)`);
+      console.log(`FLOW:      Q=${Q.toFixed(5)} m³/s = ${(Q*15850.323).toFixed(1)} gpm`);
+      console.log(`Reynolds:  ${Re_g.toFixed(0)} (RE_LAM=${RE_LAM}, RE_TURB=${RE_TURB})`);
       console.log(`Laminar:   ${dp_lam.toFixed(1)} Pa/m`);
       console.log(`Turbulent: ${dp_turb.toFixed(1)} Pa/m (base=${dp_base.toFixed(1)}, rough=${rough.toFixed(3)}, ecc=${ecc.toFixed(3)})`);
       console.log(`Blend:     ${(blend*100).toFixed(1)}% turbulent (t=${t.toFixed(3)})`);
@@ -1806,16 +1814,14 @@ function routeAnnulusFlowsWithLosses(dt_s){
   window.__qAnnAbove_m3s = qAnnAbove;  // DS+BO through riser
   window.__qAnnBelow_m3s = qAnnBelow;  // Only DS through casing/OH
 
-  // ✅ DISABLED: Flow routing debug
-  // if (frameCount % 150 === 0) {
-  //   console.log('========== FLOW ROUTING & FRICTION DEBUG ==========');
-  //   console.log(`[1] INPUTS: qDS=${qDS.toFixed(4)} m3/s (${(qDS*15850.323).toFixed(1)} gpm), qBO=${qBO.toFixed(4)} m3/s (${(qBO*15850.323).toFixed(1)} gpm), qTF=${qTF.toFixed(4)} m3/s`);
-  //   console.log(`[2] LOSSES: qToLoss=${qToLoss.toFixed(4)} m3/s (takeDS=${takeDS.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, takeTF=${takeTF.toFixed(4)})`);
-  //   console.log(`[3] FRICTION FLOWS: qAnnBelow=${qAnnBelow.toFixed(4)} m3/s (${(qAnnBelow*15850.323).toFixed(1)} gpm) [casing/OH: DS only]`);
-  //   console.log(`[4] FRICTION FLOWS: qAnnAbove=${qAnnAbove.toFixed(4)} m3/s (${(qAnnAbove*15850.323).toFixed(1)} gpm) [riser: DS+BO+TF]`);
-  //   console.log(`[5] PUBLISHED: __qAnnBelow_m3s=${(window.__qAnnBelow_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
-  //   console.log('===================================================');
-  // }
+  // ✅ RE-ENABLED: Flow routing debug (every 3 sec to match transition debug)
+  if (frameCount % 90 === 0) {
+    console.log('========== FLOW ROUTING DEBUG ==========');
+    console.log(`INPUTS: qDS=${qDS.toFixed(4)} m³/s (${(qDS*15850.323).toFixed(1)} gpm), qBO=${qBO.toFixed(4)} m³/s, qTF=${qTF.toFixed(4)} m³/s`);
+    console.log(`LOSSES: qToLoss=${qToLoss.toFixed(4)} m³/s (takeDS=${takeDS.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, takeTF=${takeTF.toFixed(4)})`);
+    console.log(`PUBLISHED: __qAnnBelow_m3s=${(window.__qAnnBelow_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
+    console.log('========================================');
+  }
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
   const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
