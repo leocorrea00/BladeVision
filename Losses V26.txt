@@ -647,16 +647,38 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
   const g_w = ((2*n+1)/(3*n)) * Math.max(g_eff,1e-6);
   const muAw = mu_app_HB(g_w, K, n, tauY);
   const Re_g = (rho * Math.max(Math.abs(V),1e-12) * Dh) / Math.max(muAw,1e-9);
-  if (Re_g < 2100){
+
+  // ✅ SMOOTH TRANSITION: Blend laminar and turbulent between Re=2000-2300
+  const RE_LAM = 2000;   // Fully laminar below this
+  const RE_TURB = 2300;  // Fully turbulent above this
+
+  if (Re_g < RE_LAM){
+    // Fully laminar
     return dpPerM_annulusLaminar_HB(Q, rho, Do, Di, K, n, tauY, rpm);
+  } else if (Re_g > RE_TURB){
+    // Fully turbulent
+    const dp_base = (HYDRAULICS_MODEL==="API")
+      ? dpPerM_API_withRot(rho, V, Dh, K, n, tauY, g_rot)
+      : dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, g_rot);
+    let dp_turb = applyTaylorBoost(dp_base, rpm, Di, Do, muAw, rho, n);
+    dp_turb *= roughMultiplier(true);
+    dp_turb *= eccMultiplier(Do, Di);
+    return dp_turb;
+  } else {
+    // TRANSITION ZONE: Blend between laminar and turbulent
+    const dp_lam = dpPerM_annulusLaminar_HB(Q, rho, Do, Di, K, n, tauY, rpm);
+    const dp_base = (HYDRAULICS_MODEL==="API")
+      ? dpPerM_API_withRot(rho, V, Dh, K, n, tauY, g_rot)
+      : dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, g_rot);
+    let dp_turb = applyTaylorBoost(dp_base, rpm, Di, Do, muAw, rho, n);
+    dp_turb *= roughMultiplier(true);
+    dp_turb *= eccMultiplier(Do, Di);
+
+    // Smooth cubic blend: f(Re) = 3t² - 2t³ where t = (Re - RE_LAM)/(RE_TURB - RE_LAM)
+    const t = (Re_g - RE_LAM) / (RE_TURB - RE_LAM);
+    const blend = t * t * (3 - 2 * t);  // Smoothstep function
+    return dp_lam * (1 - blend) + dp_turb * blend;
   }
-  const dp_base = (HYDRAULICS_MODEL==="API")
-    ? dpPerM_API_withRot(rho, V, Dh, K, n, tauY, g_rot)
-    : dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, g_rot);
-  let dp_turb = applyTaylorBoost(dp_base, rpm, Di, Do, muAw, rho, n);
-  dp_turb *= roughMultiplier(true);
-  dp_turb *= eccMultiplier(Do, Di);
-  return dp_turb;
 }
 function dP_per_m_pipe_withRPM(Q, rho, ID, K, n, tauY, rpm){
   if (Q <= 0) return 0;
@@ -669,14 +691,31 @@ function dP_per_m_pipe_withRPM(Q, rho, ID, K, n, tauY, rpm){
   const g_w = ((3*n+1)/(4*n)) * Math.max(g_eff,1e-6);
   const muAw = mu_app_HB(g_w, K, n, tauY);
   const Re_g = (rho * Math.max(Math.abs(V),1e-12) * Dh) / Math.max(muAw,1e-9);
-  if (Re_g < 2100){
+
+  // ✅ SMOOTH TRANSITION: Blend laminar and turbulent between Re=2000-2300
+  const RE_LAM = 2000;
+  const RE_TURB = 2300;
+
+  if (Re_g < RE_LAM){
     return dpPerM_pipeLaminar_HB(Q, rho, ID, K, n, tauY, rpm);
+  } else if (Re_g > RE_TURB){
+    let dp_turb = (HYDRAULICS_MODEL==="API")
+      ? dpPerM_API_withRot(rho, V, Dh, K, n, tauY, g_rot)
+      : dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, g_rot);
+    dp_turb *= roughMultiplier(true);
+    return dp_turb;
+  } else {
+    // TRANSITION ZONE: Smooth blend
+    const dp_lam = dpPerM_pipeLaminar_HB(Q, rho, ID, K, n, tauY, rpm);
+    let dp_turb = (HYDRAULICS_MODEL==="API")
+      ? dpPerM_API_withRot(rho, V, Dh, K, n, tauY, g_rot)
+      : dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, g_rot);
+    dp_turb *= roughMultiplier(true);
+
+    const t = (Re_g - RE_LAM) / (RE_TURB - RE_LAM);
+    const blend = t * t * (3 - 2 * t);
+    return dp_lam * (1 - blend) + dp_turb * blend;
   }
-  let dp_turb = (HYDRAULICS_MODEL==="API")
-    ? dpPerM_API_withRot(rho, V, Dh, K, n, tauY, g_rot)
-    : dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, g_rot);
-  dp_turb *= roughMultiplier(true);
-  return dp_turb;
 }
 function eccMultiplier(Do, Di){
   // baseline: no change
@@ -1268,23 +1307,32 @@ function frictionPsi(depth_m){
 // ====================== PRESSURE / ECD PROFILES =======================
 // In ecdAtDepth function, add:
 function ecdAtDepth(d){
-  const i = Math.floor(d / CELL_M);
+  // ✅ FIXED: Correct averaging from surface to depth
+  // ECD = average mud weight from surface down to specified depth
+
   if (d <= BOP_DEPTH){
-    const result = average(annAboveGrid.slice(0, i + 1));
-    if (frameCount % 30 === 0 && d === 4500) {
-      console.log('ecdAtDepth(4500) in riser:', result, 'cells:', i+1);
-    }
+    // Above BOP: average cells from surface to depth in riser
+    const numCells = Math.floor(d / CELL_M) + 1;
+    const result = average(annAboveGrid.slice(0, numCells));
     return result;
   } else {
-    const iAbv = N_ABV - 1;
-    const iBlw = Math.floor((d - BOP_DEPTH) / CELL_M);
-    const sumAbv = sumCells(annAboveGrid, 0, iAbv);
-    const sumBlw = sumCells(annBelowGrid, 0, iBlw);
-    const n = iAbv + 1 + iBlw + 1;
-    const result = (sumAbv + sumBlw) / Math.max(n,1);
-    if (frameCount % 30 === 0 && d === 4500) {
-      console.log('ecdAtDepth(4500) below BOP:', result, 'sumAbv:', sumAbv, 'sumBlw:', sumBlw, 'n:', n);
+    // Below BOP: average ALL riser cells + cells from BOP to depth
+    const sumAbove = sumCells(annAboveGrid, 0, N_ABV - 1);  // Sum all riser cells
+    const nAbove = N_ABV;  // Total cells in riser
+
+    // Cells from BOP to depth in casing/OH
+    const depthBelowBOP = d - BOP_DEPTH;
+    const numBelowCells = Math.floor(depthBelowBOP / CELL_M) + 1;
+    const sumBelow = sumCells(annBelowGrid, 0, numBelowCells - 1);
+
+    const totalCells = nAbove + numBelowCells;
+    const result = (sumAbove + sumBelow) / Math.max(totalCells, 1);
+
+    // Debug logging
+    if (frameCount % 30 === 0 && (d === SHOE_DEPTH || d === TD_DEPTH)) {
+      console.log(`[ECD_DEBUG] ecdAtDepth(${d}m): sumAbove=${sumAbove.toFixed(2)}, sumBelow=${sumBelow.toFixed(2)}, nAbove=${nAbove}, nBelow=${numBelowCells}, total=${totalCells}, ECD=${result.toFixed(3)} ppg`);
     }
+
     return result;
   }
 }
