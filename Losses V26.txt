@@ -1328,8 +1328,8 @@ function ecdAtDepth(d){
     const totalCells = nAbove + numBelowCells;
     const result = (sumAbove + sumBelow) / Math.max(totalCells, 1);
 
-    // Debug logging
-    if (frameCount % 30 === 0 && (d === SHOE_DEPTH || d === TD_DEPTH)) {
+    // Debug logging reduced to every 5 seconds
+    if (frameCount % 150 === 0 && (d === SHOE_DEPTH || d === TD_DEPTH)) {
       console.log(`[ECD_DEBUG] ecdAtDepth(${d}m): sumAbove=${sumAbove.toFixed(2)}, sumBelow=${sumBelow.toFixed(2)}, nAbove=${nAbove}, nBelow=${numBelowCells}, total=${totalCells}, ECD=${result.toFixed(3)} ppg`);
     }
 
@@ -1455,12 +1455,6 @@ function frictionPsi_withCML_rheo(d){
   const qAbove = Math.max(0, window.__qAnnAbove_m3s || window.__qAnnUp_m3s || 0);
   const qBelow = Math.max(0, window.__qAnnBelow_m3s || window.__qAnnDown_m3s || 0);
 
-  // Debug logging every 30 frames
-  if (frameCount % 30 === 0 && depth === TD_DEPTH) {
-    console.log(`[FRICTION_DEBUG] Reading flows: qAbove=${(qAbove*15850.323).toFixed(1)} gpm, qBelow=${(qBelow*15850.323).toFixed(1)} gpm`);
-    console.log(`[FRICTION_DEBUG] __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323 || 0).toFixed(1)} gpm, __qAnnUp_m3s=${((window.__qAnnUp_m3s||0)*15850.323).toFixed(1)} gpm`);
-  }
-
   // Wet spans
   const topGlobal = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal()
                    : (typeof riserTopDepth==='function' ? riserTopDepth() : 0);
@@ -1484,15 +1478,6 @@ function frictionPsi_withCML_rheo(d){
   // Convert MW to density (ppg to kg/m³)
   const rho = ecdAtDepth(depth) * 119.826; // kg/m³
 
-  // Debug rheology model and window variables
-  if (frameCount % 30 === 0 && depth === TD_DEPTH) {
-    console.log(`[FRICTION_DEBUG] ACTIVE_RHEO_MODEL="${mName}"`);
-    console.log(`[FRICTION_DEBUG] Rheo params: K=${K.toFixed(4)} Pa·s^n, n=${n.toFixed(3)}, τy=${tauY.toFixed(2)} Pa`);
-    console.log(`[FRICTION_DEBUG] Density: ${rho.toFixed(1)} kg/m³ (MW=${ecdAtDepth(depth).toFixed(2)} ppg)`);
-    console.log(`[FRICTION_DEBUG] Geometries: ID_ris=${ID_ris.toFixed(3)}m, ID_csg=${ID_csg.toFixed(3)}m, OD_ds=${OD_ds.toFixed(3)}m`);
-    console.log(`[FRICTION_DEBUG] RPM=${RPM}`);
-  }
-
   // Use turbulent-capable friction (auto-switches laminar/turbulent based on Re)
   // Returns Pa/m, convert to psi/m
   const PA_TO_PSI = 1.0 / 6894.757;
@@ -1500,15 +1485,19 @@ function frictionPsi_withCML_rheo(d){
   const dpdm_csg   = (L_csg  >0) ? dP_per_m_annulus_withRPM(qBelow, rho, ID_csg, OD_ds, K, n, tauY, RPM) * PA_TO_PSI : 0;
   const dpdm_oh    = (L_oh   >0) ? dP_per_m_annulus_withRPM(qBelow, rho, ID_oh,  OD_ds, K, n, tauY, RPM) * PA_TO_PSI : 0;
 
-  // Debug dP/L values
-  if (frameCount % 30 === 0 && depth === TD_DEPTH) {
-    console.log(`[FRICTION_DEBUG] dpdm_riser=${dpdm_riser.toFixed(3)} psi/m, dpdm_csg=${dpdm_csg.toFixed(3)} psi/m, dpdm_oh=${dpdm_oh.toFixed(3)} psi/m`);
-    console.log(`[FRICTION_DEBUG] L_riser=${L_riser.toFixed(1)}m, L_csg=${L_csg.toFixed(1)}m, L_oh=${L_oh.toFixed(1)}m`);
-    const total = dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
-    console.log(`[FRICTION_DEBUG] Total friction=${total.toFixed(1)} psi`);
+  const totalFriction = dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
+
+  // ✅ CONSOLIDATED DEBUG: Once every 5 seconds, only at TD
+  if (frameCount % 150 === 0 && depth === TD_DEPTH) {
+    console.log('[6] FRICTION CALC: qAbove=' + (qAbove*15850.323).toFixed(1) + ' gpm (riser), qBelow=' + (qBelow*15850.323).toFixed(1) + ' gpm (casing/OH)');
+    console.log('[7] RHEO: K=' + K.toFixed(4) + ' Pa·s^n, n=' + n.toFixed(3) + ', τy=' + tauY.toFixed(2) + ' Pa, ρ=' + rho.toFixed(1) + ' kg/m³ (' + ecdAtDepth(depth).toFixed(2) + ' ppg), RPM=' + RPM);
+    console.log('[8] LENGTHS: L_riser=' + L_riser.toFixed(1) + 'm, L_csg=' + L_csg.toFixed(1) + 'm, L_oh=' + L_oh.toFixed(1) + 'm');
+    console.log('[9] dP/m: riser=' + dpdm_riser.toFixed(4) + ' psi/m, casing=' + dpdm_csg.toFixed(4) + ' psi/m, OH=' + dpdm_oh.toFixed(4) + ' psi/m');
+    console.log('[10] TOTAL FRICTION = ' + totalFriction.toFixed(1) + ' psi');
+    console.log('===================================================');
   }
 
-  return dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
+  return totalFriction;
 }
 
 // Back-compat entry point
@@ -1799,13 +1788,15 @@ function routeAnnulusFlowsWithLosses(dt_s){
   window.__qAnnAbove_m3s = qAnnAbove;  // DS+BO through riser
   window.__qAnnBelow_m3s = qAnnBelow;  // Only DS through casing/OH
 
-  // Debug section flows every 30 frames
-  if (frameCount % 30 === 0) {
-    console.log(`[ROUTE_DEBUG] Inputs: qDS=${qDS.toFixed(4)} m3/s (${(qDS*15850.323).toFixed(1)} gpm), qBO=${qBO.toFixed(4)} m3/s (${(qBO*15850.323).toFixed(1)} gpm)`);
-    console.log(`[ROUTE_DEBUG] Losses: qToLoss=${qToLoss.toFixed(4)} m3/s (takeDS=${takeDS.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, takeTF=${takeTF.toFixed(4)})`);
-    console.log(`[ROUTE_DEBUG] Friction flows: qAnnBelow=${qAnnBelow.toFixed(4)} m3/s (${(qAnnBelow*15850.323).toFixed(1)} gpm) [casing/OH only DS]`);
-    console.log(`[ROUTE_DEBUG]                qAnnAbove=${qAnnAbove.toFixed(4)} m3/s (${(qAnnAbove*15850.323).toFixed(1)} gpm) [riser DS+BO]`);
-    console.log(`[ROUTE_DEBUG] Published: __qAnnBelow_m3s=${(window.__qAnnBelow_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
+  // ✅ CONSOLIDATED DEBUG: Log everything once every 5 seconds (150 frames at 30fps)
+  if (frameCount % 150 === 0) {
+    console.log('========== FLOW ROUTING & FRICTION DEBUG ==========');
+    console.log(`[1] INPUTS: qDS=${qDS.toFixed(4)} m3/s (${(qDS*15850.323).toFixed(1)} gpm), qBO=${qBO.toFixed(4)} m3/s (${(qBO*15850.323).toFixed(1)} gpm), qTF=${qTF.toFixed(4)} m3/s`);
+    console.log(`[2] LOSSES: qToLoss=${qToLoss.toFixed(4)} m3/s (takeDS=${takeDS.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, takeTF=${takeTF.toFixed(4)})`);
+    console.log(`[3] FRICTION FLOWS: qAnnBelow=${qAnnBelow.toFixed(4)} m3/s (${(qAnnBelow*15850.323).toFixed(1)} gpm) [casing/OH: DS only]`);
+    console.log(`[4] FRICTION FLOWS: qAnnAbove=${qAnnAbove.toFixed(4)} m3/s (${(qAnnAbove*15850.323).toFixed(1)} gpm) [riser: DS+BO+TF]`);
+    console.log(`[5] PUBLISHED: __qAnnBelow_m3s=${(window.__qAnnBelow_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
+    console.log('===================================================');
   }
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
@@ -1821,10 +1812,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // If riser full, surface return equals upward annulus flow; otherwise zero
   const targetFO_gpm = nowFull ? Math.max(0, qAnnUp * 15850.323) : 0;
 
-  // Debug FO calculation every 30 frames
-  if (frameCount % 30 === 0) {
-    console.log(`[FO_DEBUG] top=${top.toFixed(2)}m, wasFull=${wasFull}, nowFull=${nowFull}, qAnnUp=${(qAnnUp*15850.323).toFixed(1)} gpm, targetFO=${targetFO_gpm.toFixed(1)} gpm, FLOW_OUT=${(FLOW_OUT_gpm||0).toFixed(1)} gpm`);
-  }
+  // Debug FO calculation disabled (too verbose)
+  // if (frameCount % 150 === 0) {
+  //   console.log(`[FO_DEBUG] top=${top.toFixed(2)}m, wasFull=${wasFull}, nowFull=${nowFull}, qAnnUp=${(qAnnUp*15850.323).toFixed(1)} gpm, targetFO=${targetFO_gpm.toFixed(1)} gpm, FLOW_OUT=${(FLOW_OUT_gpm||0).toFixed(1)} gpm`);
+  // }
 
   // Fast response for conventional circulation (no losses)
   // Slow response during losses to avoid oscillations
@@ -1838,10 +1829,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
   FLOW_OUT_gpm = prev + step;
 
-  // Additional debug
-  if (frameCount % 30 === 0 && Math.abs(targetFO_gpm - FLOW_OUT_gpm) > 10) {
-    console.log(`[FO_DEBUG] Slewing: prev=${prev.toFixed(1)}, lp=${lp.toFixed(1)}, step=${step.toFixed(1)}, dt=${dt_s.toFixed(4)}s, maxStep=${maxStep.toFixed(1)}`);
-  }
+  // Additional debug disabled (too verbose)
+  // if (frameCount % 150 === 0 && Math.abs(targetFO_gpm - FLOW_OUT_gpm) > 10) {
+  //   console.log(`[FO_DEBUG] Slewing: prev=${prev.toFixed(1)}, lp=${lp.toFixed(1)}, step=${step.toFixed(1)}, dt=${dt_s.toFixed(4)}s, maxStep=${maxStep.toFixed(1)}`);
+  // }
 
   // Optional smoother you already have
   if (typeof FLOW_OUT_ALPHA==='number') {
