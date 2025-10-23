@@ -1727,22 +1727,29 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // - If riser NOT full AND losses active (takeBO>0): booster goes DOWN, rest goes UP
   const qAnnUp = DS_left + TF_left + (riserFull || takeBO === 0 ? BO_left : 0);
 
-  // Downward annulus flow contributor (Booster taken by losses travels downward)
-  const qAnnDown = takeBO; // this is *downward* internal flow to the zone
+  // ✅ CRITICAL FIX: Total flow through annulus below BOP for friction calculation
+  // This should be the TOTAL annulus flow (drillstring return), NOT just loss flow!
+  // In normal circulation: qDS goes down DS, returns up annulus below BOP
+  const qAnnBelowTotal = qDS + qBO - qToLoss;  // Total upward flow in annulus below BOP
+
+  // Downward flow component (for advection direction tracking)
+  const qAnnDown = takeBO; // booster flow going DOWN to losses (for advection)
 
   // Publish clean section "signals" (magnitudes, signless)
   window.__qToLoss_m3s   = qToLoss;
   window.__qAnnUp_m3s    = qAnnUp;
   window.__qAnnDown_m3s  = qAnnDown;
 
-  // ALSO publish to compatibility aliases used by advection and friction
-  window.__qAnnAbove_m3s = qAnnUp;
-  window.__qAnnBelow_m3s = qAnnDown;
+  // ✅ CRITICAL: Publish TOTAL annulus flows for friction calculation
+  // These must represent the actual flow through each section for friction!
+  window.__qAnnAbove_m3s = qAnnUp;  // Total upward flow in riser (above BOP)
+  window.__qAnnBelow_m3s = qAnnBelowTotal;  // Total flow below BOP (DS+BO return minus losses)
 
   // Debug section flows every 30 frames
   if (frameCount % 30 === 0) {
-    console.log(`[ROUTE_DEBUG] qDS=${qDS.toFixed(4)}, qBO=${qBO.toFixed(4)}, qTF=${qTF.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, qAnnUp=${qAnnUp.toFixed(4)} m3/s (${(qAnnUp*15850.323).toFixed(1)} gpm)`);
-    console.log(`[ROUTE_DEBUG] Published: __qAnnUp_m3s=${(window.__qAnnUp_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
+    console.log(`[ROUTE_DEBUG] qDS=${qDS.toFixed(4)}, qBO=${qBO.toFixed(4)}, qTF=${qTF.toFixed(4)}, qToLoss=${qToLoss.toFixed(4)}, takeBO=${takeBO.toFixed(4)}`);
+    console.log(`[ROUTE_DEBUG] qAnnUp=${qAnnUp.toFixed(4)} m3/s (${(qAnnUp*15850.323).toFixed(1)} gpm), qAnnBelowTotal=${qAnnBelowTotal.toFixed(4)} m3/s (${(qAnnBelowTotal*15850.323).toFixed(1)} gpm)`);
+    console.log(`[ROUTE_DEBUG] Published: __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm, __qAnnBelow_m3s=${(window.__qAnnBelow_m3s*15850.323).toFixed(1)} gpm`);
   }
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
