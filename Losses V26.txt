@@ -652,17 +652,44 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
   const RE_LAM = 2000;   // Fully laminar below this
   const RE_TURB = 2300;  // Fully turbulent above this
 
+  // Helper function to identify section and log
+  const logFlowRegime = (regime, Re_g, dp_lam, dp_turb, dp_result, blend_pct, rough, ecc, dp_base) => {
+    if (frameCount % 90 === 0 && Q > 0.03) {  // Every 3 sec, flow > 475 gpm
+      let section = 'UNKNOWN';
+      if (Do > 0.5) section = 'RISER';
+      else if (Do > 0.3) section = 'CASING';
+      else if (Do > 0.2) section = 'OPENHOLE';
+
+      console.log('');
+      console.log('========== FRICTION DEBUG [' + regime + ' REGIME] ==========');
+      console.log(`SECTION:   ${section} (Do=${Do.toFixed(3)}m, Di=${Di.toFixed(3)}m, Dh=${Dh.toFixed(3)}m)`);
+      console.log(`FLOW:      Q=${Q.toFixed(5)} m³/s = ${(Q*15850.323).toFixed(1)} gpm`);
+      console.log(`Reynolds:  ${Re_g.toFixed(0)} (LAM<${RE_LAM}, TURB>${RE_TURB})`);
+      if (dp_lam !== null) console.log(`Laminar:   ${dp_lam.toFixed(1)} Pa/m`);
+      if (dp_turb !== null) console.log(`Turbulent: ${dp_turb.toFixed(1)} Pa/m (base=${dp_base.toFixed(1)}, rough=${rough.toFixed(3)}, ecc=${ecc.toFixed(3)})`);
+      if (blend_pct !== null) console.log(`Blend:     ${blend_pct.toFixed(1)}% turbulent`);
+      console.log(`RESULT:    ${dp_result.toFixed(1)} Pa/m`);
+      console.log('========================================================');
+      console.log('');
+    }
+  };
+
   if (Re_g < RE_LAM){
     // Fully laminar
-    return dpPerM_annulusLaminar_HB(Q, rho, Do, Di, K, n, tauY, rpm);
+    const dp_lam = dpPerM_annulusLaminar_HB(Q, rho, Do, Di, K, n, tauY, rpm);
+    logFlowRegime('LAMINAR', Re_g, dp_lam, null, dp_lam, null, null, null, null);
+    return dp_lam;
   } else if (Re_g > RE_TURB){
     // Fully turbulent
     const dp_base = (HYDRAULICS_MODEL==="API")
       ? dpPerM_API_withRot(rho, V, Dh, K, n, tauY, g_rot)
       : dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, g_rot);
     let dp_turb = applyTaylorBoost(dp_base, rpm, Di, Do, muAw, rho, n);
-    dp_turb *= roughMultiplier(true);
-    dp_turb *= eccMultiplier(Do, Di);
+    const rough = roughMultiplier(true);
+    const ecc = eccMultiplier(Do, Di);
+    dp_turb *= rough;
+    dp_turb *= ecc;
+    logFlowRegime('TURBULENT', Re_g, null, dp_turb, dp_turb, 100, rough, ecc, dp_base);
     return dp_turb;
   } else {
     // TRANSITION ZONE: Blend between laminar and turbulent
@@ -681,26 +708,7 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
     const blend = t * t * (3 - 2 * t);  // Smoothstep function
     const result = dp_lam * (1 - blend) + dp_turb * blend;
 
-    // ✅ TRANSITION DEBUG: Every 3 seconds (90 frames at 30fps)
-    if (frameCount % 90 === 0 && Q > 0.03) {  // Only log for Q > ~475 gpm
-      // Identify section by geometry
-      let section = 'UNKNOWN';
-      if (Do > 0.5) section = 'RISER';
-      else if (Do > 0.3) section = 'CASING';
-      else if (Do > 0.2) section = 'OPENHOLE';
-
-      console.log('');
-      console.log('========== LAMINAR/TURBULENT TRANSITION DEBUG ==========');
-      console.log(`SECTION:   ${section} (Do=${Do.toFixed(3)}m, Di=${Di.toFixed(3)}m, Dh=${Dh.toFixed(3)}m)`);
-      console.log(`FLOW:      Q=${Q.toFixed(5)} m³/s = ${(Q*15850.323).toFixed(1)} gpm`);
-      console.log(`Reynolds:  ${Re_g.toFixed(0)} (RE_LAM=${RE_LAM}, RE_TURB=${RE_TURB})`);
-      console.log(`Laminar:   ${dp_lam.toFixed(1)} Pa/m`);
-      console.log(`Turbulent: ${dp_turb.toFixed(1)} Pa/m (base=${dp_base.toFixed(1)}, rough=${rough.toFixed(3)}, ecc=${ecc.toFixed(3)})`);
-      console.log(`Blend:     ${(blend*100).toFixed(1)}% turbulent (t=${t.toFixed(3)})`);
-      console.log(`RESULT:    ${result.toFixed(1)} Pa/m`);
-      console.log('========================================================');
-      console.log('');
-    }
+    logFlowRegime('TRANSITION', Re_g, dp_lam, dp_turb, result, blend*100, rough, ecc, dp_base);
 
     return result;
   }
