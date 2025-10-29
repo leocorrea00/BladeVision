@@ -644,15 +644,20 @@ function dpPerM_Refined_withRot(rho, V, Dh, K, n, tauY, gdotExtra){
   // ✅ FIX: Add yield stress contribution for turbulent flow
   // For Herschel-Bulkley fluids, yield stress contributes to wall shear even in turbulent regime
   // Blend this contribution based on how turbulent we are (same blend as friction factor)
+  const dp_before = dp;  // Store before adding yield boost
   let dp_yield = 0;
   if (tauY > 0) {
     dp_yield = (4 * tauY) / Math.max(Dh, 1e-6);  // Yield stress pressure drop
     dp += blend * dp_yield;  // Add proportionally to turbulent fraction
   }
+  const dp_after = dp;  // Store after adding yield boost
 
   // Debug: Store yield stress boost for logging (attach to window for access)
   if (typeof window !== 'undefined') {
-    window.__lastYieldBoost = { tauY, dp_yield, blend, boost: blend * dp_yield };
+    window.__lastYieldBoost = {
+      tauY, dp_yield, blend, boost: blend * dp_yield, Dh, Re,
+      dp_before, dp_after, actual_boost: dp_after - dp_before
+    };
   }
 
   return dp;
@@ -695,7 +700,9 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
       // Show yield stress info for turbulent/transition regimes
       if (regime !== 'LAMINAR' && typeof window !== 'undefined' && window.__lastYieldBoost) {
         const yb = window.__lastYieldBoost;
-        console.log(`Yield:     τ_y=${yb.tauY.toFixed(2)} Pa, dp_yield=${yb.dp_yield.toFixed(1)} Pa/m, boost=${yb.boost.toFixed(1)} Pa/m`);
+        const match = Math.abs(yb.Dh - Dh) < 0.001 ? '✓' : `❌(Dh=${yb.Dh.toFixed(3)})`;
+        console.log(`Yield:     τ_y=${yb.tauY.toFixed(2)} Pa, dp_yield=${yb.dp_yield.toFixed(1)} Pa/m, boost=${yb.boost.toFixed(1)} Pa/m ${match}`);
+        console.log(`           dp_before=${yb.dp_before.toFixed(1)}, dp_after=${yb.dp_after.toFixed(1)}, actual_boost=${yb.actual_boost.toFixed(1)}`);
       }
 
       if (dp_lam !== null) console.log(`Laminar:   ${dp_lam.toFixed(1)} Pa/m`);
