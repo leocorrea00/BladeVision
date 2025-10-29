@@ -1693,6 +1693,52 @@ function pressureAtDepth(d){
       console.warn('     → Level should refill to surface when pumps are off!');
       console.warn('     → Check: CML_ON=' + CML_ON + ', LOSSES_ON=' + LOSSES_ON);
     }
+
+    // ✅ ADDED: Grid diagnostic to find ECD mismatch
+    console.log('');
+    console.log('━━━ ANNULUS GRID DIAGNOSTIC ━━━');
+    console.log('[INPUTS]');
+    console.log('  MW_DS (set):', (MW_DS||0).toFixed(3), 'ppg');
+    console.log('  MW_BO (set):', (MW_BO||0).toFixed(3), 'ppg');
+    console.log('[RISER GRID - annAboveGrid]');
+    const avgAbove = (typeof average === 'function' && typeof annAboveGrid !== 'undefined')
+                     ? average(annAboveGrid) : 'N/A';
+    if (typeof annAboveGrid !== 'undefined' && annAboveGrid.length > 0) {
+      console.log('  Average MW:', avgAbove.toFixed(3), 'ppg');
+      console.log('  First 5 cells:', annAboveGrid.slice(0, Math.min(5, annAboveGrid.length)).map(v => v.toFixed(2)).join(', '));
+      console.log('  Last 5 cells:', annAboveGrid.slice(Math.max(0, annAboveGrid.length-5)).map(v => v.toFixed(2)).join(', '));
+      console.log('  Total cells:', annAboveGrid.length);
+    } else {
+      console.log('  Grid not available');
+    }
+    console.log('[CASING/OH GRID - annBelowGrid]');
+    const avgBelow = (typeof average === 'function' && typeof annBelowGrid !== 'undefined')
+                     ? average(annBelowGrid) : 'N/A';
+    if (typeof annBelowGrid !== 'undefined' && annBelowGrid.length > 0) {
+      console.log('  Average MW:', avgBelow.toFixed(3), 'ppg');
+      console.log('  First 5 cells:', annBelowGrid.slice(0, Math.min(5, annBelowGrid.length)).map(v => v.toFixed(2)).join(', '));
+      console.log('  Last 5 cells:', annBelowGrid.slice(Math.max(0, annBelowGrid.length-5)).map(v => v.toFixed(2)).join(', '));
+      console.log('  Total cells:', annBelowGrid.length);
+    } else {
+      console.log('  Grid not available');
+    }
+    console.log('[ECD CALCULATION]');
+    console.log('  ECD at BOP (2000m):', (typeof ecdAtDepth === 'function' ? ecdAtDepth(BOP_DEPTH).toFixed(3) : 'N/A'), 'ppg');
+    console.log('  ECD at Shoe (4000m):', (typeof ecdAtDepth === 'function' ? ecdAtDepth(SHOE_DEPTH).toFixed(3) : 'N/A'), 'ppg');
+    console.log('  ECD at TD (5000m):', ecd_ppg.toFixed(3), 'ppg');
+    console.log('[EXPECTED vs ACTUAL]');
+    const expected_BHP = PSI_COEF * (MW_DS||9.5) * TD_DEPTH;
+    console.log('  Expected BHP (if ECD=' + (MW_DS||9.5).toFixed(1) + '):', expected_BHP.toFixed(1), 'psi');
+    console.log('  Actual BHP:', total.toFixed(1), 'psi');
+    console.log('  Deficit:', (expected_BHP - total).toFixed(1), 'psi');
+
+    // ⚠️ Physics check: ECD mismatch
+    if (totalFlow === 0 && Math.abs(ecd_ppg - (MW_DS||9.5)) > 0.01) {
+      console.warn('  ⚠️ ECD MISMATCH: ECD=' + ecd_ppg.toFixed(3) + ' but MW_DS=' + (MW_DS||9.5).toFixed(3));
+      console.warn('     → Annulus grids contain old/stale fluid!');
+      console.warn('     → Grid averages: Riser=' + (avgAbove !== 'N/A' ? avgAbove.toFixed(3) : 'N/A') +
+                   ', Below=' + (avgBelow !== 'N/A' ? avgBelow.toFixed(3) : 'N/A'));
+    }
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   }
 
