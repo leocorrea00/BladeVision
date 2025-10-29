@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>DS Flow Range Test - Physics Verification</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script>
+</head>
+<body>
+  <h1>DS Flow Rate Range Test (0-2000 gpm)</h1>
+  <div id="test-output" style="font-family: monospace; white-space: pre;"></div>
+
+  <script>
+    // Load the Losses V22H code
+    fetch('Losses V22H.txt')
+      .then(response => response.text())
+      .then(code => {
+        // Execute the code
+        eval(code);
+
+        // Override setup and draw to run our test
+        window.setup = function() {
+          noLoop(); // Don't run animation
+          runComprehensiveTest();
+        };
+
+        window.draw = function() {
+          // Do nothing
+        };
+
+        function runComprehensiveTest() {
+          const output = document.getElementById('test-output');
+          let report = '';
+
+          report += '='.repeat(80) + '\n';
+          report += 'DS FLOW RATE RANGE TEST - PHYSICS VERIFICATION\n';
+          report += '='.repeat(80) + '\n\n';
+
+          report += 'TEST CONFIGURATION:\n';
+          report += '  Booster MW = DS MW (to isolate DS flow effects)\n';
+          report += '  Booster Flow = 0 gpm (Booster pump OFF)\n';
+          report += '  DS Flow Range: 0 - 2000 gpm (50 gpm steps)\n';
+          report += '  Compressibility: OFF (P-Only Correction)\n';
+          report += '  RPM: ' + (window.RPM || 0) + '\n\n';
+
+          // Get rheology parameters
+          report += 'RHEOLOGY MODEL: ' + (window.ACTIVE_RHEO_MODEL || 'HB') + '\n';
+          if (window.ACTIVE_RHEO_MODEL === 'HB') {
+            report += '  Yield Stress (τ_y): ' + (window.TAUY_Pa || 'NOT SET') + ' Pa\n';
+            report += '  Consistency (K): ' + (window.K_PaSn || 'NOT SET') + ' Pa·s^n\n';
+            report += '  Flow Index (n): ' + (window.N_dim || 'NOT SET') + '\n';
+          } else if (window.ACTIVE_RHEO_MODEL === 'Bingham') {
+            report += '  Yield Stress (τ_y): ' + (window.TAUY_Pa || 'NOT SET') + ' Pa\n';
+            report += '  Plastic Viscosity (μ_p): ' + (window.MUP_PaS || 'NOT SET') + ' Pa·s\n';
+          } else if (window.ACTIVE_RHEO_MODEL === 'PowerLaw') {
+            report += '  Consistency (K): ' + (window.K_PaSn || 'NOT SET') + ' Pa·s^n\n';
+            report += '  Flow Index (n): ' + (window.N_dim || 'NOT SET') + '\n';
+          }
+          report += '\n';
+
+          // Set Booster MW = DS MW
+          const testMW = window.MW_DS || 9.5;
+          window.MW_BO = testMW;
+          window.Q_BO = 0; // Booster OFF
+
+          report += 'MW_DS = MW_BO = ' + testMW + ' ppg\n';
+          report += '='.repeat(80) + '\n\n';
+
+          // Test header
+          report += 'Q_DS    BHP_TD    ECD_TD    Friction  Hydro     ΔBHP    Status\n';
+          report += '(gpm)   (psi)     (ppg)     (psi)     (psi)     (psi)   \n';
+          report += '-'.repeat(80) + '\n';
+
+          let previousBHP = null;
+          let errors = [];
+          const results = [];
+
+          // Test from 0 to 2000 gpm in 50 gpm steps
+          for (let q = 0; q <= 2000; q += 50) {
+            window.Q_DS = q;
+
+            // Trigger recalculation
+            if (typeof recomputeAnnulusSectionFlowsForLosses === 'function') {
+              recomputeAnnulusSectionFlowsForLosses();
+            }
+
+            // Get pressure at TD
+            const BHP = (typeof pressureAtDepth === 'function')
+                        ? pressureAtDepth(window.TD_DEPTH || 5000)
+                        : 0;
+
+            const ECD = (typeof ecdWithSBPAtDepth === 'function')
+                        ? ecdWithSBPAtDepth(window.TD_DEPTH || 5000)
+                        : 0;
+
+            const friction = (typeof frictionPsi_withCML_rheo === 'function')
+                             ? frictionPsi_withCML_rheo(window.TD_DEPTH || 5000)
+                             : 0;
+
+            const hydro = BHP - friction;
+
+            const deltaBHP = previousBHP !== null ? (BHP - previousBHP) : 0;
+
+            // Check physics
+            let status = 'OK';
+
+            // Test 1: At Q=0, ECD should equal MW (no friction)
+            if (q === 0) {
+              const expectedECD = testMW;
+              const ecdError = Math.abs(ECD - expectedECD);
+              if (ecdError > 0.01) {
+                status = 'FAIL: ECD≠MW at Q=0';
+                errors.push(`At Q=0: ECD=${ECD.toFixed(3)} ppg, expected ${expectedECD} ppg (error=${ecdError.toFixed(3)})`);
+              }
+              if (friction > 0.1) {
+                status = 'FAIL: Friction>0 at Q=0';
+                errors.push(`At Q=0: Friction=${friction.toFixed(1)} psi, expected ~0 psi`);
+              }
+            }
+
+            // Test 2: BHP should increase monotonically with flow
+            if (previousBHP !== null && BHP < previousBHP - 1.0) {
+              status = 'FAIL: BHP decreased';
+              errors.push(`BHP decreased from ${previousBHP.toFixed(1)} to ${BHP.toFixed(1)} psi when Q increased from ${q-50} to ${q} gpm`);
+            }
+
+            // Test 3: Friction should increase with flow
+            if (q > 0 && friction < 0) {
+              status = 'FAIL: Negative friction';
+              errors.push(`Negative friction ${friction.toFixed(1)} psi at Q=${q} gpm`);
+            }
+
+            results.push({
+              q, BHP, ECD, friction, hydro, deltaBHP, status
+            });
+
+            report += q.toString().padStart(6) + '  ';
+            report += BHP.toFixed(1).padStart(8) + '  ';
+            report += ECD.toFixed(3).padStart(8) + '  ';
+            report += friction.toFixed(1).padStart(8) + '  ';
+            report += hydro.toFixed(1).padStart(8) + '  ';
+            report += deltaBHP.toFixed(1).padStart(7) + '  ';
+            report += status + '\n';
+
+            previousBHP = BHP;
+          }
+
+          report += '='.repeat(80) + '\n\n';
+
+          // Summary
+          report += 'TEST SUMMARY:\n';
+          report += '-'.repeat(80) + '\n';
+
+          const passedTests = results.filter(r => r.status === 'OK').length;
+          const totalTests = results.length;
+
+          report += `Total tests: ${totalTests}\n`;
+          report += `Passed: ${passedTests}\n`;
+          report += `Failed: ${totalTests - passedTests}\n\n`;
+
+          if (errors.length === 0) {
+            report += '✓ ALL TESTS PASSED - Physics is respected!\n';
+            report += '  - BHP increases monotonically with flow rate\n';
+            report += '  - At Q=0, ECD = MW (no friction)\n';
+            report += '  - No negative friction values\n';
+          } else {
+            report += '✗ ERRORS FOUND:\n';
+            errors.forEach((err, i) => {
+              report += `  ${i+1}. ${err}\n`;
+            });
+          }
+
+          report += '\n' + '='.repeat(80) + '\n';
+
+          // Key observations
+          report += '\nKEY OBSERVATIONS:\n';
+          report += '-'.repeat(80) + '\n';
+
+          const r0 = results[0];
+          const r500 = results.find(r => r.q === 500);
+          const r1000 = results.find(r => r.q === 1000);
+          const r2000 = results.find(r => r.q === 2000);
+
+          report += `At Q=0    gpm: BHP=${r0.BHP.toFixed(1)} psi, ECD=${r0.ECD.toFixed(3)} ppg, Friction=${r0.friction.toFixed(1)} psi\n`;
+          if (r500) report += `At Q=500  gpm: BHP=${r500.BHP.toFixed(1)} psi, ECD=${r500.ECD.toFixed(3)} ppg, Friction=${r500.friction.toFixed(1)} psi\n`;
+          if (r1000) report += `At Q=1000 gpm: BHP=${r1000.BHP.toFixed(1)} psi, ECD=${r1000.ECD.toFixed(3)} ppg, Friction=${r1000.friction.toFixed(1)} psi\n`;
+          if (r2000) report += `At Q=2000 gpm: BHP=${r2000.BHP.toFixed(1)} psi, ECD=${r2000.ECD.toFixed(3)} ppg, Friction=${r2000.friction.toFixed(1)} psi\n`;
+
+          report += '\n';
+
+          // Display
+          output.textContent = report;
+          console.log(report);
+        }
+      })
+      .catch(error => {
+        document.getElementById('test-output').textContent = 'Error loading Losses V22H.txt: ' + error;
+      });
+  </script>
+</body>
+</html>
