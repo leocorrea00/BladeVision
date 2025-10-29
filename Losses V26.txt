@@ -1561,15 +1561,33 @@ function frictionPsi_withCML_rheo(d){
 
   const totalFriction = dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
 
-  // ✅ DISABLED: Friction calc debug
-  // if (frameCount % 150 === 0 && depth === TD_DEPTH) {
-  //   console.log('[6] FRICTION CALC: qAbove=' + (qAbove*15850.323).toFixed(1) + ' gpm (riser), qBelow=' + (qBelow*15850.323).toFixed(1) + ' gpm (casing/OH)');
-  //   console.log('[7] RHEO: K=' + K.toFixed(4) + ' Pa·s^n, n=' + n.toFixed(3) + ', τy=' + tauY.toFixed(2) + ' Pa, ρ=' + rho.toFixed(1) + ' kg/m³ (' + ecdAtDepth(depth).toFixed(2) + ' ppg), RPM=' + RPM);
-  //   console.log('[8] LENGTHS: L_riser=' + L_riser.toFixed(1) + 'm, L_csg=' + L_csg.toFixed(1) + 'm, L_oh=' + L_oh.toFixed(1) + 'm');
-  //   console.log('[9] dP/m: riser=' + dpdm_riser.toFixed(4) + ' psi/m, casing=' + dpdm_csg.toFixed(4) + ' psi/m, OH=' + dpdm_oh.toFixed(4) + ' psi/m');
-  //   console.log('[10] TOTAL FRICTION = ' + totalFriction.toFixed(1) + ' psi');
-  //   console.log('===================================================');
-  // }
+  // ✅ ENABLED: Friction calc debug (every 60 frames, at TD only)
+  if (frameCount % 60 === 0 && depth === TD_DEPTH) {
+    console.log('━━━ FRICTION CALC AT TD ━━━');
+    console.log('[INPUT FLOWS]');
+    console.log('  Q_DS:', (Q_DS||0), 'gpm | Q_BO:', (Q_BO||0), 'gpm');
+    console.log('  Published section flows (from window):');
+    console.log('    __qAnnAbove_m3s =', (window.__qAnnAbove_m3s||0).toFixed(6), 'm³/s =', ((window.__qAnnAbove_m3s||0)*15850.323).toFixed(1), 'gpm');
+    console.log('    __qAnnBelow_m3s =', (window.__qAnnBelow_m3s||0).toFixed(6), 'm³/s =', ((window.__qAnnBelow_m3s||0)*15850.323).toFixed(1), 'gpm');
+    console.log('  Section flows USED in friction calc:');
+    console.log('    qAbove =', qAbove.toFixed(6), 'm³/s =', (qAbove*15850.323).toFixed(1), 'gpm (riser)');
+    console.log('    qBelow =', qBelow.toFixed(6), 'm³/s =', (qBelow*15850.323).toFixed(1), 'gpm (casing/OH)');
+    console.log('[RHEOLOGY]');
+    console.log('  K=' + K.toFixed(4) + ' Pa·s^n, n=' + n.toFixed(3) + ', τy=' + tauY.toFixed(2) + ' Pa, ρ=' + rho.toFixed(1) + ' kg/m³, RPM=' + RPM);
+    console.log('[LENGTHS]');
+    console.log('  L_riser=' + L_riser.toFixed(1) + 'm, L_csg=' + L_csg.toFixed(1) + 'm, L_oh=' + L_oh.toFixed(1) + 'm');
+    console.log('[FRICTION GRADIENTS]');
+    console.log('  dP/m: riser=' + dpdm_riser.toFixed(4) + ' psi/m, casing=' + dpdm_csg.toFixed(4) + ' psi/m, OH=' + dpdm_oh.toFixed(4) + ' psi/m');
+    console.log('[RESULT]');
+    console.log('  TOTAL FRICTION = ' + totalFriction.toFixed(1) + ' psi');
+
+    // ⚠️ Physics check: At Q=0, friction should be 0
+    if ((Q_DS||0) === 0 && (Q_BO||0) === 0 && totalFriction > 0.5) {
+      console.error('  ❌ PHYSICS VIOLATION: Friction =', totalFriction.toFixed(1), 'psi but Q_DS=0 and Q_BO=0!');
+      console.error('     → Check why section flows are non-zero or why friction is calculated');
+    }
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  }
 
   return totalFriction;
 }
@@ -1605,41 +1623,62 @@ function pressureAtDepth_noSBP_withCML(d){
 function pressureAtDepth(d){
   if (d < 0) return 0;
   if (d > TD_DEPTH) d = TD_DEPTH;
-  
+
   const fluidTop = annulusTopDepthGlobal();
-  
+
   // Above fluid level = atmospheric only
   if (d < fluidTop) {
     console.log('DEBUG: depth', d, 'is above fluid level', fluidTop);
     return 14.7;
   }
-  
+
   // Refresh section flows
   if (typeof window.__qAnnAbove_m3s !== 'number' || typeof window.__qAnnBelow_m3s !== 'number'){
     if (typeof recomputeAnnulusSectionFlowsForLosses === 'function') {
       recomputeAnnulusSectionFlowsForLosses();
     }
   }
-  
+
   // Hydrostatic (only below fluid level)
   const depth_wet = d - fluidTop;
   const ecd_ppg = ecdAtDepth(d);
   const P_hydro = PSI_COEF * ecd_ppg * depth_wet;
-  
+
   // Friction
   const P_fric = frictionPsi_withCML_rheo(d);
-  
+
   // SBP (only when riser is FULL)
   const riserFull = (fluidTop <= 0);
   const P_sbp = (MPD_ON && riserFull) ? (CURRENT_SBP || 0) : 0;
-  
+
   const total = P_hydro + P_fric + P_sbp;
-  
-  // Debug for loss zones
- // if (d === 4000 || d === 4500) {
-   // console.log(`DEBUG P@${d}m: hydro=${P_hydro.toFixed(0)}, fric=${P_fric.toFixed(1)}, sbp=${P_sbp}, TOTAL=${total.toFixed(0)}`);
- // }
-  
+
+  // ✅ DEBUG: Log level issues at TD (every 60 frames)
+  if (frameCount % 60 === 0 && d === TD_DEPTH) {
+    const P_hydro_full = PSI_COEF * ecd_ppg * TD_DEPTH; // What it SHOULD be if full
+    const deficit_psi = P_hydro_full - P_hydro;
+    console.log('━━━ PRESSURE AT TD DEBUG ━━━');
+    console.log('  Fluid Top:', fluidTop.toFixed(2), 'm (0 = riser full)');
+    console.log('  Depth Wet:', depth_wet.toFixed(2), 'm (vs full depth', TD_DEPTH, 'm)');
+    console.log('  ECD:', ecd_ppg.toFixed(3), 'ppg');
+    console.log('  P_hydro (actual):', P_hydro.toFixed(1), 'psi');
+    console.log('  P_hydro (if full):', P_hydro_full.toFixed(1), 'psi');
+    console.log('  Deficit from level:', deficit_psi.toFixed(1), 'psi');
+    console.log('  Friction:', P_fric.toFixed(1), 'psi');
+    console.log('  SBP:', P_sbp.toFixed(1), 'psi');
+    console.log('  TOTAL BHP:', total.toFixed(1), 'psi');
+    console.log('  Level Sources: CML_TOP=' + (CML_TOP_DEPTH||0).toFixed(1) + 'm, LOSS_TOP=' + (LOSS_TOP_DEPTH_m||0).toFixed(1) + 'm, levelDeficit=' + (levelDeficit_m||0).toFixed(1) + 'm');
+
+    // ⚠️ Physics check: At Q=0, level should be 0 (riser full)
+    const totalFlow = (Q_DS||0) + (Q_BO||0);
+    if (totalFlow === 0 && fluidTop > 0.5) {
+      console.warn('  ⚠️ PHYSICS VIOLATION: Fluid level dropped by', fluidTop.toFixed(1), 'm but flow is ZERO!');
+      console.warn('     → Level should refill to surface when pumps are off!');
+      console.warn('     → Check: CML_ON=' + CML_ON + ', LOSSES_ON=' + LOSSES_ON);
+    }
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  }
+
   return total;
 }
 
