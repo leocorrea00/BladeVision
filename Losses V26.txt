@@ -2278,64 +2278,70 @@ function refreshLossDemandFiltered(dt_s){
 
 function updateAllLossZones(dt_s) {
   if (!LOSSES_ON || !lossZones) return;
-  
-  // Sort zones from DEEPEST to SHALLOWEST
-  const sortedZones = lossZones
-    .filter(z => z && z.enabled && z.depth_m > 0)
-    .sort((a, b) => b.depth_m - a.depth_m);
-  
-  if (sortedZones.length === 0) return;
-  
+
+  // Get active wet zones
+  const fluidTop = annulusTopDepthGlobal();
+  const activeZones = lossZones
+    .filter(z => z && z.enabled && z.depth_m > 0 && z.depth_m > fluidTop)
+    .sort((a, b) => a.depth_m - b.depth_m); // SHALLOWEST to DEEPEST for spatial processing
+
+  if (activeZones.length === 0) {
+    // All zones dry - decay to zero
+    for (const z of lossZones.filter(z => z)) {
+      const decay = Math.exp(-dt_s / 2.0);
+      z._Q_filt = (z._Q_filt || 0) * decay;
+      z._Q_vel = (z._Q_vel || 0) * decay;
+      z.Qloss_gpm = z._Q_filt;
+    }
+    return;
+  }
+
   // Initialize zone states if needed
-  for (const z of sortedZones) {
+  for (const z of activeZones) {
     if (typeof z._active === 'undefined') z._active = false;
     if (typeof z._Q_filt === 'undefined') z._Q_filt = 0;
-    if (typeof z._Q_vel === 'undefined') z._Q_vel = 0;  // dQ/dt velocity
+    if (typeof z._Q_vel === 'undefined') z._Q_vel = 0;
   }
-  
-  const fluidTop = annulusTopDepthGlobal();
+
+  // ========================================================================
+  // SPATIAL FLOW ROUTING: Track DS (upward) and Booster (downward) separately
+  // ========================================================================
   const Q_DS_gpm = Q_DS || 0;
   const Q_BO_gpm = Q_BO || 0;
   const Q_TF_gpm = (TOPFILL_ON ? Q_TOPFILL : 0) || 0;
-  
   const boosterDown = (fluidTop > 0.5);
-  let qAvailable_gpm = Q_DS_gpm + (boosterDown ? (Q_BO_gpm + Q_TF_gpm) : 0);
-  
+
+  // DS flows UP from TD, so it's available to all zones (processed deepest to shallowest)
+  let qDS_remaining = Q_DS_gpm;
+
+  // Booster flows DOWN from BOP, so it's consumed by zones top-to-bottom
+  // Only zones BELOW BOP can receive booster flow
+  let qBO_remaining = boosterDown ? (Q_BO_gpm + Q_TF_gpm) : 0;
+
   // Track total loss change for global rate limit
   let totalLossChange_gpm = 0;
-  
-  // Process each zone from BOTTOM to TOP
-  for (const z of sortedZones) {
-    // Check if zone is WET
-    if (z.depth_m <= fluidTop) {
-      // DRY zone - decay to zero
-      const decay = Math.exp(-dt_s / 2.0);  // 2 second decay
-      z._Q_filt *= decay;
-      z._Q_vel *= decay;
-      z.Qloss_gpm = z._Q_filt;
-      continue;
-    }
-    
-    // Get pressure at this depth
+
+  // ========================================================================
+  // Process zones from SHALLOW to DEEP (spatial order for downward booster flow)
+  // ========================================================================
+  for (const z of activeZones) {
+    // Calculate zone capacity based on pressure
     const P_psi = pressureAtDepth(z.depth_m);
     const P_frac_psi = z.fracPressure_psi || 0;
     const dP = P_psi - P_frac_psi;
-    
+
     // === HYSTERESIS: Prevent chattering on/off ===
     if (!z._active) {
-      // Zone is OFF - need overpressure to activate
       if (dP < LOSS_ACTIVATION_HYST_PSI) {
         z.Qloss_gpm = 0;
         z._Q_filt = 0;
         z._Q_vel = 0;
         continue;
       }
-      z._active = true;  // Activate!
+      z._active = true;
     } else {
-      // Zone is ON - need underpressure to deactivate
       if (dP < -LOSS_DEACTIVATION_HYST_PSI) {
         z._active = false;
-        // Decay to zero over time
         const decay = Math.exp(-dt_s / 1.0);
         z._Q_filt *= decay;
         z._Q_vel *= decay;
@@ -2343,65 +2349,94 @@ function updateAllLossZones(dt_s) {
         continue;
       }
     }
-    
-    // === ACTIVE ZONE: Calculate capacity ===
+
+    // === Calculate zone capacity ===
     const n = z.n || 1.0;
     const dP_eff = Math.max(0, dP);
-    
+
     let Q_capacity_gpm = 0;
     if (z.Qref_gpm > 0 && z.DPref_psi > 0) {
       const C_L = z.Qref_gpm / Math.pow(z.DPref_psi, n);
       Q_capacity_gpm = C_L * Math.pow(dP_eff, n);
     } else {
-      Q_capacity_gpm = qAvailable_gpm * 100;  // Karstic
+      Q_capacity_gpm = 10000;  // Karstic (large capacity)
     }
-    
-    // Limit to available flow
+
+    // === SPATIAL FLOW AVAILABILITY ===
+    // Booster can only reach zones BELOW BOP_DEPTH (it flows downward from BOP)
+    const zoneCanSeeBooster = (z.depth_m >= BOP_DEPTH);
+    const qBoosterAvailable = zoneCanSeeBooster ? qBO_remaining : 0;
+
+    // DS return is available to all zones (flows upward from TD)
+    const qDSAvailable = qDS_remaining;
+
+    // Total available to this zone
+    const qAvailable_gpm = qBoosterAvailable + qDSAvailable;
+
+    // Target flow limited by capacity and availability
     const Q_target = Math.min(Q_capacity_gpm, qAvailable_gpm);
-    
+
     // === ACCELERATION LIMITING (prevents spikes) ===
     const Q_current = z._Q_filt || 0;
     const Q_vel_current = z._Q_vel || 0;
-    
-    // Desired velocity
     const Q_vel_desired = (Q_target - Q_current) / Math.max(dt_s, 0.01);
-    
-    // Limit acceleration
+
     const max_accel = LOSS_MAX_ACCEL_GPM_S2 * dt_s;
     const Q_vel_new = Math.max(
       Q_vel_current - max_accel,
       Math.min(Q_vel_current + max_accel, Q_vel_desired)
     );
-    
-    // Integrate velocity
+
     let Q_new = Q_current + Q_vel_new * dt_s;
-    Q_new = Math.max(0, Math.min(Q_new, qAvailable_gpm));  // Clamp
-    
-    // Track change for global limit
+    Q_new = Math.max(0, Math.min(Q_new, qAvailable_gpm));
+
+    // Track change
     const deltaQ = Math.abs(Q_new - z._Q_filt);
     totalLossChange_gpm += deltaQ;
-    
-    // Update state
+
+    // Update zone state
     z._Q_vel = Q_vel_new;
     z._Q_filt = Q_new;
     z.Qloss_gpm = Q_new;
-    
-    // Subtract from available flow
-    qAvailable_gpm = Math.max(0, qAvailable_gpm - Q_new);
-    
-    if (qAvailable_gpm < 0.1) break;  // No flow left
+
+    // === CONSUME FLOW SPATIALLY ===
+    // Preferentially consume booster first (if available), then DS
+    if (zoneCanSeeBooster && qBO_remaining > 0) {
+      const fromBooster = Math.min(Q_new, qBO_remaining);
+      qBO_remaining -= fromBooster;
+      const fromDS = Q_new - fromBooster;
+      qDS_remaining -= fromDS;
+    } else {
+      // Only DS available
+      qDS_remaining -= Q_new;
+    }
+
+    // Clamp to zero (avoid numerical errors)
+    qBO_remaining = Math.max(0, qBO_remaining);
+    qDS_remaining = Math.max(0, qDS_remaining);
+
+    // Early exit if no flow left
+    if (qBO_remaining < 0.1 && qDS_remaining < 0.1) break;
   }
-  
+
   // === GLOBAL RATE LIMIT (prevents total system shock) ===
   if (totalLossChange_gpm > LOSS_GLOBAL_RATE_LIMIT * dt_s) {
     const scale = (LOSS_GLOBAL_RATE_LIMIT * dt_s) / totalLossChange_gpm;
-    for (const z of sortedZones) {
+    for (const z of activeZones) {
       if (z.Qloss_gpm > 0) {
         const oldQ = z._Q_filt;
         z._Q_filt = oldQ * scale;
         z.Qloss_gpm = z._Q_filt;
       }
     }
+  }
+
+  // Dry zones (above fluid level) - decay to zero
+  for (const z of lossZones.filter(z => z && z.enabled && z.depth_m <= fluidTop)) {
+    const decay = Math.exp(-dt_s / 2.0);
+    z._Q_filt = (z._Q_filt || 0) * decay;
+    z._Q_vel = (z._Q_vel || 0) * decay;
+    z.Qloss_gpm = z._Q_filt;
   }
 }
 
