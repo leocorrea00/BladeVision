@@ -59,6 +59,18 @@ const FLOWOUT_MAX_ACCEL = 300;          // Max dQ/dt change (gpm/s²)
 let FLOWOUT_VELOCITY_gpm_s = 0;  // dFO/dt
 let cmlCtrl = { I_gpm: 0, P_lpf_psi: 0 };
 
+// ========================================================================
+// DIAGNOSTIC LOGGING SYSTEM
+// ========================================================================
+let diagnosticLog = {
+  recording: false,
+  data: [],
+  startTime: 0,
+  lastLogFrame: 0,
+  LOG_INTERVAL: 30  // Log every 30 frames (1 second at 30fps, 0.5s at 60fps)
+};
+let logStartBtn, logStopBtn, logDownloadBtn;
+
 // --- Safe, non-p5 helpers (no name collisions) ---
 function clamp(val, min, max){ return Math.max(min, Math.min(max, val)); }
 function remap(x, inMin, inMax, outMin, outMax, withinBounds=false){ if (inMax === inMin) return outMin; // avoid /0
@@ -3562,6 +3574,37 @@ topfillBtn.mousePressed(() => {
   TOPFILL_ON = !TOPFILL_ON;
   topfillBtn.html(TOPFILL_ON ? 'Top Fill: ON' : 'Top Fill: OFF');
 });
+xPos += 110;
+
+// ========== DIAGNOSTIC LOGGING BUTTONS ==========
+mkLabel("Diagnostic Log", xPos, rowY2 - 14);
+logStartBtn = createButton('START').size(70, 22).position(xPos, rowY2)
+  .style('background', '#4ade80').style('font-weight', 'bold');
+logStartBtn.mousePressed(() => {
+  diagnosticLog.recording = true;
+  diagnosticLog.data = [];
+  diagnosticLog.startTime = millis();
+  diagnosticLog.lastLogFrame = frameCount;
+  logStartBtn.attribute('disabled', '');
+  logStopBtn.removeAttribute('disabled');
+});
+
+logStopBtn = createButton('STOP').size(70, 22).position(xPos + 75, rowY2)
+  .style('background', '#f87171').style('font-weight', 'bold');
+logStopBtn.attribute('disabled', '');
+logStopBtn.mousePressed(() => {
+  diagnosticLog.recording = false;
+  logStopBtn.attribute('disabled', '');
+  logDownloadBtn.removeAttribute('disabled');
+  logStartBtn.removeAttribute('disabled');
+});
+
+logDownloadBtn = createButton('SAVE').size(70, 22).position(xPos + 150, rowY2)
+  .style('background', '#60a5fa').style('font-weight', 'bold');
+logDownloadBtn.attribute('disabled', '');
+logDownloadBtn.mousePressed(() => {
+  saveDiagnosticLog();
+});
 
     // small local helper (scoped to setup) to make 2-decimal number inputs
   function makeTwoDecimalInput(label, x, y, initial = 0) {
@@ -3681,6 +3724,120 @@ if (typeof window.__qAnnAbove_m3s !== 'number' || typeof window.__qAnnBelow_m3s 
   if (typeof recomputeAnnulusSectionFlowsForLosses === 'function') {
     recomputeAnnulusSectionFlowsForLosses();
   }
+}
+
+// ========================================================================
+// DIAGNOSTIC LOGGING FUNCTIONS
+// ========================================================================
+function captureDiagnosticData() {
+  const timestamp = ((millis() - diagnosticLog.startTime) / 1000).toFixed(2);
+  const fluidTop = annulusTopDepthGlobal();
+
+  // Get average MW values
+  const MW_DS_avg = dsAvgPPG ? dsAvgPPG() : (MW_DS || 0);
+  const MW_BO_avg = boosterAvgPPG ? boosterAvgPPG() : (MW_BO || 0);
+
+  // Flow routing values
+  const qDS_m3s = (Q_DS || 0) / 15850.323;
+  const qBO_m3s = (Q_BO || 0) / 15850.323;
+  const qAnnUp_m3s = window.__qAnnUp_m3s || window.__qAnnAbove_m3s || 0;
+  const qAnnDown_m3s = window.__qAnnDown_m3s || 0;
+  const qAnnBelow_m3s = window.__qAnnBelow_m3s || 0;
+  const qAnnAbove_m3s = window.__qAnnAbove_m3s || 0;
+
+  // Build row
+  const row = {
+    time_s: timestamp,
+    frameCount: frameCount,
+
+    // Fluid properties
+    MW_DS: MW_DS_avg.toFixed(2),
+    MW_BO: MW_BO_avg.toFixed(2),
+
+    // Flow rates
+    Q_DS_gpm: (Q_DS || 0).toFixed(1),
+    Q_BO_gpm: (Q_BO || 0).toFixed(1),
+    Q_TF_gpm: (TOPFILL_ON ? (Q_TOPFILL || 0) : 0).toFixed(1),
+    Q_CML_gpm: (Q_CML || 0).toFixed(1),
+    FLOW_OUT_gpm: (FLOW_OUT_gpm || 0).toFixed(1),
+
+    // Fluid level
+    fluidTop_m: fluidTop.toFixed(1),
+    riserFull: (fluidTop <= 0.5) ? 'YES' : 'NO',
+
+    // Flow routing (section flows)
+    qAnnUp_gpm: (qAnnUp_m3s * 15850.323).toFixed(1),
+    qAnnDown_gpm: (qAnnDown_m3s * 15850.323).toFixed(1),
+    qAnnBelow_gpm: (qAnnBelow_m3s * 15850.323).toFixed(1),
+    qAnnAbove_gpm: (qAnnAbove_m3s * 15850.323).toFixed(1),
+
+    // SBP
+    SBP_psi: (CURRENT_SBP || 0).toFixed(0),
+    MPD_ON: MPD_ON ? 'YES' : 'NO'
+  };
+
+  // Loss zones data
+  if (LOSSES_ON && Array.isArray(lossZones)) {
+    for (let i = 0; i < lossZones.length; i++) {
+      const z = lossZones[i];
+      if (!z || !z.enabled) continue;
+
+      const zoneNum = i + 1;
+      const P_calc = pressureAtDepth(z.depth_m);
+      const P_frac = z.fracPressure_psi || 0;
+      const dP = P_calc - P_frac;
+      const isWet = z.depth_m > fluidTop;
+      const isActive = z._active || false;
+
+      row[`Z${zoneNum}_depth_m`] = z.depth_m.toFixed(0);
+      row[`Z${zoneNum}_P_calc_psi`] = P_calc.toFixed(1);
+      row[`Z${zoneNum}_P_frac_psi`] = P_frac.toFixed(0);
+      row[`Z${zoneNum}_dP_psi`] = dP.toFixed(1);
+      row[`Z${zoneNum}_Qloss_gpm`] = (z.Qloss_gpm || 0).toFixed(1);
+      row[`Z${zoneNum}_wet`] = isWet ? 'YES' : 'NO';
+      row[`Z${zoneNum}_active`] = isActive ? 'YES' : 'NO';
+    }
+  }
+
+  // Advection parameters (example - add what's most relevant)
+  row.CELL_M = CELL_M;
+  row.N_ABV = N_ABV;
+  row.N_BELOW = N_BELOW;
+
+  diagnosticLog.data.push(row);
+}
+
+function saveDiagnosticLog() {
+  if (diagnosticLog.data.length === 0) {
+    alert('No data to save. Start recording first.');
+    return;
+  }
+
+  // Get all unique keys from all rows (for CSV header)
+  const allKeys = new Set();
+  diagnosticLog.data.forEach(row => {
+    Object.keys(row).forEach(key => allKeys.add(key));
+  });
+  const headers = Array.from(allKeys);
+
+  // Build CSV
+  let csv = headers.join(',') + '\n';
+  diagnosticLog.data.forEach(row => {
+    const values = headers.map(h => row[h] !== undefined ? row[h] : '');
+    csv += values.join(',') + '\n';
+  });
+
+  // Download
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+  a.download = `diagnostic_log_${timestamp}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+
+  console.log(`Saved ${diagnosticLog.data.length} data points to CSV`);
 }
 
 // ================================ DRAW =================================
@@ -3856,6 +4013,13 @@ gravityDensitySwap();
 // 11. UI updates
 refreshLossesUIFromModel();
 updateDiagnosticsUI(dt_frame);
+
+  // ========== DIAGNOSTIC LOGGING ==========
+  // Capture data at regular intervals when recording
+  if (diagnosticLog.recording && (frameCount - diagnosticLog.lastLogFrame) >= diagnosticLog.LOG_INTERVAL) {
+    captureDiagnosticData();
+    diagnosticLog.lastLogFrame = frameCount;
+  }
 
   // Footer labels
   fill(0,0,95); textSize(12);
