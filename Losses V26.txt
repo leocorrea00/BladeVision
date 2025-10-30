@@ -1688,10 +1688,10 @@ function pressureAtDepthTotal(d){
 }
 
 /* ===================== ATTENUATION CONSTANTS (tune as needed) ===================== */
-const LOSS_DEADBAND_PSI      = 15;   // ignore small ΔP wiggles (psi)
-const LOSS_P_TAU_S           = 0.50; // low-pass on zone ΔP (s)
-const LOSS_Q_TAU_S           = 0.80; // low-pass on zone Qloss (s)
-const LOSS_DQDT_MAX_GPM_S    = 400;  // max zone loss change rate (gpm/s)
+const LOSS_DEADBAND_PSI      = 30;   // ignore small ΔP wiggles (psi) - increased for stability
+const LOSS_P_TAU_S           = 0.80; // low-pass on zone ΔP (s)
+const LOSS_Q_TAU_S           = 1.8;  // low-pass on zone Qloss (s) - increased for smoother stabilization
+const LOSS_DQDT_MAX_GPM_S    = 200;  // max zone loss change rate (gpm/s) - reduced for smoother response
 const LOSS_RELAX_PER_ITER    = 0.50; // solver relaxation per iteration
 const LOSS_SOLVER_MAX_IT     = 8;    // max iterations
 const LOSS_SOLVER_TOL_GPM    = 0.05; // convergence tolerance (gpm)
@@ -2102,10 +2102,10 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
   let qLoss_result = (qLoss_min + qLoss_max) / 2;
 
   // OPTIMIZATION 3: Fast iterations with approximation friction
-  // Binary search with fast friction converges quickly: 6 iterations = 2^6 = 64x resolution
-  // With feedforward, typically converges in 2-4 iterations
+  // Binary search with fast friction converges quickly: 5 iterations = 2^5 = 32x resolution
+  // With feedforward and damping, typically converges in 2-3 iterations
   const MAX_ITERATIONS = 5; // Reduced from 6 for performance
-  const TOLERANCE_PSI = 25; // OPTIMIZATION 4: Relaxed tolerance for speed (25 psi is <1% error)
+  const TOLERANCE_PSI = 40; // Increased for stability - damping/filtering handle precision
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const qLoss_trial = (qLoss_min + qLoss_max) / 2;
@@ -2142,6 +2142,13 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
     const Q_capacity_m3s = Q_capacity_gpm / 15850.323;
 
     qLoss_result = Math.min(qLoss_result, Q_capacity_m3s);
+  }
+
+  // STABILITY: Blend with previous solution to reduce oscillation (0.7 = 70% new, 30% old)
+  // This provides additional damping on top of the filtering in zoneLoss_gpm
+  if (qLoss_prev_m3s > 1e-6) {
+    const SOLVER_DAMPING = 0.7; // Tune between 0.5 (heavy damping) and 1.0 (no damping)
+    qLoss_result = SOLVER_DAMPING * qLoss_result + (1 - SOLVER_DAMPING) * qLoss_prev_m3s;
   }
 
   return qLoss_result; // m3/s (recalculated every frame, allows dynamic response)
@@ -4318,21 +4325,21 @@ function drawStatusPanelRight(colRight){
   text(`Q_out: ${nf(Q_CML,1,0)} gpm | Riser top: ${nf(topDepth,1,1)} m${cmlExtra}`, x, y2);
   
   textAlign(CENTER, CENTER);
-  // Add to drawStatusPanelRight or near loss diagnostics:
-if (LOSSES_ON) {
-  for (const z of lossZones) {
-    if (!z || !z.enabled) continue;
-    const P = pressureAtDepth(z.depth_m);
-    if (P > z.fracPressure_psi + 50) { // 50 psi tolerance
-      push();
-      fill(0, 100, 100); // RED warning
-      textSize(12);
-      text(`⚠ OVERPRESSURE at ${z.depth_m}m: ${nf(P,1,0)} > ${nf(z.fracPressure_psi,1,0)} psi`, 
-           x, y + 100);
-      pop();
-    }
-  }
-}
+  // Overpressure warnings hidden for now
+  // if (LOSSES_ON) {
+  //   for (const z of lossZones) {
+  //     if (!z || !z.enabled) continue;
+  //     const P = pressureAtDepth(z.depth_m);
+  //     if (P > z.fracPressure_psi + 50) { // 50 psi tolerance
+  //       push();
+  //       fill(0, 100, 100); // RED warning
+  //       textSize(12);
+  //       text(`⚠ OVERPRESSURE at ${z.depth_m}m: ${nf(P,1,0)} > ${nf(z.fracPressure_psi,1,0)} psi`,
+  //            x, y + 100);
+  //       pop();
+  //     }
+  //   }
+  // }
 }
 
 
