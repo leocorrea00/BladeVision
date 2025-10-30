@@ -1788,6 +1788,12 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // - If riser full: everything goes up to surface
   // - If riser NOT full but NO losses (takeBO=0): booster goes UP to fill riser
   // - If riser NOT full AND losses active (takeBO>0): booster goes DOWN, rest goes UP
+  //
+  // ✅ AUTOMATIC BOOSTER REVERSAL:
+  // If pressure doesn't allow booster to go down (BHP < Pfrac at loss zone),
+  // the zone deactivates (dP < 0 triggers hysteresis), qToLoss → 0, takeBO → 0,
+  // and BO_left routes upward via this logic. Booster then increases riser
+  // hydrostatic until new equilibrium is found. No explicit reversal code needed!
   const qAnnUp = DS_left + TF_left + (riserFull || takeBO === 0 ? BO_left : 0);
 
   // ✅ CRITICAL FIX: Separate flows for friction calculation
