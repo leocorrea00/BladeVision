@@ -684,36 +684,8 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
   const RE_LAM = 2000;   // Fully laminar below this
   const RE_TURB = 4000;  // Fully turbulent above this (widened from 2300)
 
-  // Helper function to identify section and log
-  const logFlowRegime = (regime, Re_g, dp_lam, dp_turb, dp_result, blend_pct, rough, ecc, dp_base) => {
-    if (frameCount % 90 === 0 && Q > 0.03) {  // Every 3 sec, flow > 475 gpm
-      let section = 'UNKNOWN';
-      if (Do > 0.5) section = 'RISER';
-      else if (Do > 0.3) section = 'CASING';
-      else if (Do > 0.2) section = 'OPENHOLE';
-
-      console.log('');
-      console.log('========== FRICTION DEBUG [' + regime + ' REGIME] ==========');
-      console.log(`SECTION:   ${section} (Do=${Do.toFixed(3)}m, Di=${Di.toFixed(3)}m, Dh=${Dh.toFixed(3)}m)`);
-      console.log(`FLOW:      Q=${Q.toFixed(5)} m³/s = ${(Q*15850.323).toFixed(1)} gpm`);
-      console.log(`Reynolds:  ${Re_g.toFixed(0)} (LAM<${RE_LAM}, TURB>${RE_TURB})`);
-
-      // Show yield stress info for turbulent/transition regimes
-      if (regime !== 'LAMINAR' && typeof window !== 'undefined' && window.__lastYieldBoost) {
-        const yb = window.__lastYieldBoost;
-        const match = Math.abs(yb.Dh - Dh) < 0.001 ? '✓' : `❌(Dh=${yb.Dh.toFixed(3)})`;
-        console.log(`Yield:     τ_y=${yb.tauY.toFixed(2)} Pa, dp_yield=${yb.dp_yield.toFixed(1)} Pa/m, boost=${yb.boost.toFixed(1)} Pa/m ${match}`);
-        console.log(`           dp_before=${yb.dp_before.toFixed(1)}, dp_after=${yb.dp_after.toFixed(1)}, actual_boost=${yb.actual_boost.toFixed(1)}`);
-      }
-
-      if (dp_lam !== null) console.log(`Laminar:   ${dp_lam.toFixed(1)} Pa/m`);
-      if (dp_turb !== null) console.log(`Turbulent: ${dp_turb.toFixed(1)} Pa/m (base=${dp_base.toFixed(1)}, rough=${rough.toFixed(3)}, ecc=${ecc.toFixed(3)})`);
-      if (blend_pct !== null) console.log(`Blend:     ${blend_pct.toFixed(1)}% turbulent`);
-      console.log(`RESULT:    ${dp_result.toFixed(1)} Pa/m`);
-      console.log('========================================================');
-      console.log('');
-    }
-  };
+  // No-op function for production (debug removed)
+  const logFlowRegime = (regime, Re_g, dp_lam, dp_turb, dp_result, blend_pct, rough, ecc, dp_base) => {};
 
   if (Re_g < RE_LAM){
     // Fully laminar
@@ -1475,39 +1447,24 @@ function __dpPerM_annulus_GNF_fromQ(Q_m3s, ID_m, OD_m, modelName){
 
   const m = String(modelName || window.ACTIVE_RHEO_MODEL || 'HB').toUpperCase();
 
-  // Debug logging every 30 frames
-  const shouldLog = (frameCount % 30 === 0);
-
   if (m === 'BINGHAM'){
     const tauY = (window.TAUY_Pa ?? 5);
     const muP  = (window.MUP_PaS ?? 0.1);
-    if (shouldLog) {
-      console.log(`[RHEO_DEBUG] BINGHAM: tauY=${tauY} Pa, muP=${muP} Pa·s, Q=${(Q_m3s*15850.323).toFixed(1)} gpm, Dh=${Dh.toFixed(3)} m`);
-    }
     const tauToShear = (tau) => (tau <= tauY) ? 0 : (tau - tauY)/Math.max(muP,1e-12);
     const result = __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
-    if (shouldLog) console.log(`[RHEO_DEBUG] BINGHAM result: ${result.toFixed(3)} psi/m`);
     return result;
   } else if (m === 'PL' || m === 'POWERLAW' || m === 'POWER-LAW'){
     const K = (window.K_PaSn ?? 0.2);
     const n = Math.max(1e-6, (window.N_dim ?? 0.7));
-    if (shouldLog) {
-      console.log(`[RHEO_DEBUG] POWERLAW: K=${K} Pa·s^n, n=${n}, Q=${(Q_m3s*15850.323).toFixed(1)} gpm, Dh=${Dh.toFixed(3)} m`);
-    }
     const tauToShear = (tau) => Math.pow(Math.max(tau,0)/Math.max(K,1e-12), 1/n);
     const result = __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
-    if (shouldLog) console.log(`[RHEO_DEBUG] POWERLAW result: ${result.toFixed(3)} psi/m`);
     return result;
   } else { // HB default
     const tauY = (window.TAUY_Pa ?? 5);
     const K    = (window.K_PaSn  ?? 0.2);
     const n    = Math.max(1e-6, (window.N_dim ?? 0.6));
-    if (shouldLog) {
-      console.log(`[RHEO_DEBUG] HB: tauY=${tauY} Pa, K=${K} Pa·s^n, n=${n}, Q=${(Q_m3s*15850.323).toFixed(1)} gpm, Dh=${Dh.toFixed(3)} m`);
-    }
     const tauToShear = (tau) => (tau <= tauY) ? 0 : Math.pow((tau - tauY)/Math.max(K,1e-12), 1/n);
     const result = __dpPerM_pipe_GNF_fromQ(Q_m3s, Dh, tauToShear);
-    if (shouldLog) console.log(`[RHEO_DEBUG] HB result: ${result.toFixed(3)} psi/m`);
     return result;
   }
 }
@@ -1612,7 +1569,6 @@ function pressureAtDepth(d){
 
   // Above fluid level = atmospheric only
   if (d < fluidTop) {
-    console.log('DEBUG: depth', d, 'is above fluid level', fluidTop);
     return 14.7;
   }
 
@@ -1857,15 +1813,6 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // - Above BOP: DS + Booster combined (through riser geometry)
   window.__qAnnAbove_m3s = qAnnAbove;  // DS+BO through riser
   window.__qAnnBelow_m3s = qAnnBelow;  // Only DS through casing/OH
-
-  // ✅ RE-ENABLED: Flow routing debug (every 3 sec to match transition debug)
-  if (frameCount % 90 === 0) {
-    console.log('========== FLOW ROUTING DEBUG ==========');
-    console.log(`INPUTS: qDS=${qDS.toFixed(4)} m³/s (${(qDS*15850.323).toFixed(1)} gpm), qBO=${qBO.toFixed(4)} m³/s, qTF=${qTF.toFixed(4)} m³/s`);
-    console.log(`LOSSES: qToLoss=${qToLoss.toFixed(4)} m³/s (takeDS=${takeDS.toFixed(4)}, takeBO=${takeBO.toFixed(4)}, takeTF=${takeTF.toFixed(4)})`);
-    console.log(`PUBLISHED: __qAnnBelow_m3s=${(window.__qAnnBelow_m3s*15850.323).toFixed(1)} gpm, __qAnnAbove_m3s=${(window.__qAnnAbove_m3s*15850.323).toFixed(1)} gpm`);
-    console.log('========================================');
-  }
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
   const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
@@ -2134,7 +2081,6 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
 
     if (MPD_ON && wetTop <= 0.5) {
       CURRENT_SBP = SBP_override;
-      console.log(`ANCHOR MODE: Zone ${zone.depth_m}m, SBP→${SBP_override.toFixed(0)} psi (Hyd=${P_hydro.toFixed(0)}, FricDown=${P_fric_down.toFixed(1)}) to prevent oscillation`);
     }
     return 0; // No losses needed, system balanced
   }
@@ -2158,8 +2104,8 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
   // OPTIMIZATION 3: Fast iterations with approximation friction
   // Binary search with fast friction converges quickly: 6 iterations = 2^6 = 64x resolution
   // With feedforward, typically converges in 2-4 iterations
-  const MAX_ITERATIONS = 6;
-  const TOLERANCE_PSI = 20; // OPTIMIZATION 4: Relaxed tolerance for speed (20 psi is <1% error)
+  const MAX_ITERATIONS = 5; // Reduced from 6 for performance
+  const TOLERANCE_PSI = 25; // OPTIMIZATION 4: Relaxed tolerance for speed (25 psi is <1% error)
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const qLoss_trial = (qLoss_min + qLoss_max) / 2;
@@ -3083,22 +3029,12 @@ function doRheologyFit(){
     return;
   }
 
-  // Debug: show input rheology points
-  console.log(`[RHEO_FIT_DEBUG] ===== Rheology Fit Started =====`);
-  console.log(`[RHEO_FIT_DEBUG] Model: ${ACTIVE_RHEO_MODEL}`);
-  console.log(`[RHEO_FIT_DEBUG] Input points (${pts.length}):`);
-  pts.forEach(p => {
-    console.log(`[RHEO_FIT_DEBUG]   RPM=${p.rpm}, Dial=${p.dial.toFixed(1)}, γ̇=${p.gdot.toFixed(1)} 1/s, τ=${p.tauPa.toFixed(2)} Pa`);
-  });
 
   // Direct Bingham if PV/YP are provided and Bingham is selected
  const PVcp = safeRheoVal('PV', 0); // cP
  const YPlbf = safeRheoVal('YP', 0); // lbf/100ft²
   const usePVYP = (ACTIVE_RHEO_MODEL === "Bingham") && (PVcp > 0 || YPlbf > 0);
 
-  if (usePVYP) {
-    console.log(`[RHEO_FIT_DEBUG] Using direct PV/YP: PV=${PVcp} cP, YP=${YPlbf} lbf/100ft²`);
-  }
 
   let b, p, h;
   if (usePVYP){
@@ -3111,12 +3047,6 @@ function doRheologyFit(){
   p = fitPowerLaw(pts);
   h = fitHB(pts);
 
-  // Debug: show fit results
-  console.log(`[RHEO_FIT_DEBUG] Fit results:`);
-  console.log(`[RHEO_FIT_DEBUG]   Bingham: μp=${(b.mu_p??0).toFixed(4)} Pa·s, τy=${(b.tau_y??0).toFixed(2)} Pa, SSE=${(b.sse??0).toFixed(3)}`);
-  console.log(`[RHEO_FIT_DEBUG]   PowerLaw: K=${(p.K??0).toFixed(4)} Pa·s^n, n=${(p.n??0).toFixed(3)}, SSE=${(p.sse??0).toFixed(3)}`);
-  console.log(`[RHEO_FIT_DEBUG]   HB: K=${(h.K??0).toFixed(4)} Pa·s^n, n=${(h.n??0).toFixed(3)}, τy=${(h.tau_y??0).toFixed(2)} Pa, SSE=${(h.sse??0).toFixed(3)}`);
-
   fitParams.mu_p_Pa_s = b.mu_p ?? fitParams.mu_p_Pa_s;
   fitParams.tau_y_Pa = b.tau_y ?? fitParams.tau_y_Pa;
   fitParams.K_PL_Pa_s_n = p.K;
@@ -3126,9 +3056,6 @@ function doRheologyFit(){
   fitParams.tau_y_HB_Pa = h.tau_y;
 
   publishRheoToGlobals()
-
-  console.log(`[RHEO_FIT_DEBUG] Published to globals: K_PaSn=${window.K_PaSn}, N_dim=${window.N_dim}, TAUY_Pa=${window.TAUY_Pa}`);
-  console.log(`[RHEO_FIT_DEBUG] ===== Rheology Fit Complete =====`);
 
   // gel from 10s if provided
 const g10s = safeRheoVal('G10s', rheoDefaults.G10s ?? 0);
@@ -3852,7 +3779,16 @@ computeImbalanceFlows();
 // NOTE: This calls routeAnnulusFlowsWithLosses() internally which sets:
 //   - window.__qAnnUp_m3s, window.__qAnnDown_m3s (section flows)
 //   - FLOW_OUT_gpm (with proper hysteresis and smoothing)
-equilibrateFluidLevel(dt_frame, 3); // 3 iterations per frame
+// Adaptive iterations: fewer when stable, more when active losses
+const adaptiveIters = (() => {
+  if (!LOSSES_ON) return 1;
+  const totalLoss = (typeof totalLossRate_gpm === 'function') ? totalLossRate_gpm() : 0;
+  const totalFlow = (Q_DS || 0) + (Q_BO || 0);
+  const lossRatio = totalFlow > 10 ? totalLoss / totalFlow : 0;
+  // High loss activity → 3 iterations, low/stable → 2 iterations
+  return (lossRatio > 0.3 || totalLoss > 500) ? 3 : 2;
+})();
+equilibrateFluidLevel(dt_frame, adaptiveIters);
 
 // 6. Section flows already computed by routeAnnulusFlowsWithLosses() inside equilibrateFluidLevel()
 // DO NOT call recomputeAnnulusSectionFlowsForLosses() here - it uses old routing logic!
@@ -3872,95 +3808,6 @@ gravityDensitySwap();
 // 11. UI updates
 refreshLossesUIFromModel();
 updateDiagnosticsUI(dt_frame);
-
-  // ============================================================================
-  // COMPREHENSIVE DEBUG LOGGING (every 0.5 seconds at 60fps)
-  // ============================================================================
-  if (frameCount % 30 === 0) {
-    // Calculate all values
-    const levelDepth = LOSS_TOP_DEPTH_m || 0;
-    const MW_DS_current = dsAvgPPG ? dsAvgPPG() : (MW_DS || 0);
-    const MW_BO_current = boosterAvgPPG ? boosterAvgPPG() : (MW_BO || 0);
-    const qDS_gpm = Q_DS || 0;
-    const qBO_gpm = Q_BO || 0;
-    const qTF_gpm = TOPFILL_ON ? (Q_TOPFILL || 0) : 0;
-    const qCML_gpm = (typeof effective_Q_CML_gpm === 'function') ? (effective_Q_CML_gpm() || 0) : 0;
-    const qIn_total = qDS_gpm + qBO_gpm + qTF_gpm - qCML_gpm;
-
-    const qUp_m3s = window.__qAnnAbove_m3s || window.__qAnnUp_m3s || 0;
-    const qDown_m3s = window.__qAnnBelow_m3s || window.__qAnnDown_m3s || 0;
-    const qUp_gpm = qUp_m3s * 15850.323;
-    const qDown_gpm = qDown_m3s * 15850.323;
-
-    const FO_gpm = FLOW_OUT_gpm || 0;
-    const FO_smooth_gpm = window.FLOW_OUT_smooth || FO_gpm;
-
-    // Per-zone losses
-    let lossesStr = '';
-    let qLoss_total_gpm = 0;
-    if (Array.isArray(lossZones) && lossZones.length > 0) {
-      const zoneParts = [];
-      for (let i = 0; i < lossZones.length; i++) {
-        const z = lossZones[i];
-        if (!z) continue;
-        const q = z.enabled ? Math.max(0, z.Qloss_gpm || 0) : 0;
-        qLoss_total_gpm += q;
-        const label = z.name ? `Q${i+1}(${z.name})` : `Q${i+1}`;
-        const status = z.enabled ? `${q.toFixed(0)}` : 'OFF';
-        zoneParts.push(`${label}=${status}`);
-      }
-      lossesStr = zoneParts.join(' ');
-    } else {
-      lossesStr = 'Qloss=0';
-      qLoss_total_gpm = 0;
-    }
-
-    const qOut_total = FO_gpm + qLoss_total_gpm;
-    const massBal_gpm = qIn_total - qOut_total;
-
-    // Level status
-    const levelStatus = levelDepth <= 0.5 ? 'SURFACE' :
-                        levelDepth < BOP_DEPTH ? `${levelDepth.toFixed(1)}m(AboveBOP)` :
-                        `${levelDepth.toFixed(1)}m(BelowBOP)`;
-
-    // Booster routing
-    const takeBO_m3s = window.__qAnnDown_m3s || 0;
-    const boosterRoute = (levelDepth <= 0.5) ? 'TO_SURF' :
-                         (takeBO_m3s > 1e-6) ? 'DOWN' : 'UP';
-
-    // Single-line compact log
-    const timestamp = (frameCount / 60).toFixed(1) + 's';
-    console.log(
-      `[${timestamp}] ` +
-      `FO=${FO_gpm.toFixed(1)}(sm=${FO_smooth_gpm.toFixed(1)}) | ` +
-      `Level=${levelStatus} | ` +
-      `MW: DS=${MW_DS_current.toFixed(2)} BO=${MW_BO_current.toFixed(2)} ppg | ` +
-      `In: DS=${qDS_gpm.toFixed(0)} BO=${qBO_gpm.toFixed(0)} TF=${qTF_gpm.toFixed(0)} CML=${qCML_gpm.toFixed(0)} Tot=${qIn_total.toFixed(0)} gpm | ` +
-      `Sec: Qup=${qUp_gpm.toFixed(0)} Qdown=${qDown_gpm.toFixed(0)} gpm | ` +
-      `Losses: ${lossesStr} Tot=${qLoss_total_gpm.toFixed(0)} gpm | ` +
-      `Out: Surf=${FO_gpm.toFixed(0)} gpm | ` +
-      `MassBal=${massBal_gpm.toFixed(0)} gpm | ` +
-      `BO_Route=${boosterRoute}`
-    );
-
-    // Optional: Detailed per-zone info if losses are active
-    if (LOSSES_ON && qLoss_total_gpm > 1.0 && Array.isArray(lossZones)) {
-      for (let i = 0; i < lossZones.length; i++) {
-        const z = lossZones[i];
-        if (!z || !z.enabled || !z.Qloss_gpm || z.Qloss_gpm < 0.1) continue;
-        const BHP = pressureAtDepth ? pressureAtDepth(z.depth_m) : 0;
-        const margin = BHP - z.fracPressure_psi;
-        const label = z.name ? `Zone${i+1}(${z.name})` : `Zone${i+1}`;
-        console.log(
-          `  ${label} @ ${z.depth_m}m: ` +
-          `Qloss=${z.Qloss_gpm.toFixed(1)} gpm | ` +
-          `BHP=${BHP.toFixed(0)} psi | ` +
-          `Pfrac=${z.fracPressure_psi} psi | ` +
-          `Margin=${margin.toFixed(0)} psi`
-        );
-      }
-    }
-  }
 
   // Footer labels
   fill(0,0,95); textSize(12);
@@ -4157,21 +4004,6 @@ if (MPD_ON){
 }
 
 drawCMLVisual();
-
-// Add to draw() to monitor multi-zone behavior:
-if (frameCount % 60 === 0 && LOSSES_ON) {
-  console.log('=== MULTI-ZONE DEBUG ===');
-  console.log('Fluid level:', LOSS_TOP_DEPTH_m.toFixed(1), 'm');
-  console.log('Inflow:', ((Q_DS + Q_BO) / 15850.323).toFixed(4), 'm³/s');
-  
-  let qAcc = (Q_DS + Q_BO) / 15850.323;
-  for (const z of lossZones.filter(z => z && z.enabled && z.Qloss_gpm > 0).sort((a,b) => b.depth_m - a.depth_m)) {
-    const isWet = z.depth_m > LOSS_TOP_DEPTH_m;
-    console.log(`  Zone ${z.depth_m}m: ${z.Qloss_gpm.toFixed(1)} gpm, ${isWet ? 'WET' : 'DRY'}, qRemaining: ${(qAcc*15850.323).toFixed(1)} gpm`);
-    if (isWet) qAcc -= z.Qloss_gpm / 15850.323;
-  }
-  console.log('Net to surface:', (qAcc*15850.323).toFixed(1), 'gpm');
-}
 }
 
 function drawFractureSymbols(){
@@ -4367,19 +4199,6 @@ function drawGaugesAndCharts(){
   // Depth gauges — centers aligned UNDER the top gauges now
   const colLeft  = baseX;                       // under SPP
   const colRight = baseX + 2*R + colGap;        // under Booster
-  // ✅ ADD THIS DEBUG:
-  const P_TD_hydro = PSI_COEF * ecdAtDepth(TD_DEPTH) * TD_DEPTH;
-  const P_TD_fric = frictionPsi_withCML_rheo(TD_DEPTH);
-  const P_TD_total = pressureAtDepth(TD_DEPTH);
-  
-  if (frameCount % 30 === 0) {
-    console.log('=== TD PRESSURE BREAKDOWN ===');
-    console.log('  Hydrostatic:', P_TD_hydro.toFixed(1), 'psi');
-    console.log('  Friction:', P_TD_fric.toFixed(1), 'psi');
-    console.log('  SBP:', CURRENT_SBP, 'psi');
-    console.log('  TOTAL:', P_TD_total.toFixed(1), 'psi');
-  }
-  
   drawGauge(colLeft,  mapDepthToY(BOP_DEPTH),  pressureAtDepth(BOP_DEPTH),  16000, " ", "psi", R, "left");
   drawGauge(colLeft,  mapDepthToY(BOP_DEPTH),  pressureAtDepth(BOP_DEPTH),  16000, " ", "psi", R, "left");
   drawGauge(colLeft,  mapDepthToY(SHOE_DEPTH), pressureAtDepth(SHOE_DEPTH), 16000, " ", "psi", R, "left");
@@ -5406,7 +5225,6 @@ function buildRheologyUI(x0, y0){
   rheoPanel.frictionSel.selected(FRICTION_MODE || "hydraulics");
   rheoPanel.frictionSel.changed(() => {
     FRICTION_MODE = rheoPanel.frictionSel.value();
-    console.log(`Friction mode changed to: ${FRICTION_MODE}`);
   });
 
   // --- Hydraulics Model selector ---
@@ -5417,7 +5235,6 @@ function buildRheologyUI(x0, y0){
   rheoPanel.hydraulicsSel.selected(HYDRAULICS_MODEL || "Refined");
   rheoPanel.hydraulicsSel.changed(() => {
     HYDRAULICS_MODEL = rheoPanel.hydraulicsSel.value();
-    console.log(`Hydraulics model changed to: ${HYDRAULICS_MODEL}`);
   });
 
   // --- Inputs ---
