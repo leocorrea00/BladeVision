@@ -4252,6 +4252,7 @@ logDownloadBtn.mousePressed(() => {
   buildLossesUI();
 buildDiagnosticsUI();
 buildKicksUI();
+buildBOPWellControlUI();
 
   // Initialize formation fluid cells
   initializeFormationFluidCells();
@@ -6003,6 +6004,127 @@ hdr.html(`<div style="display:grid;grid-template-columns:80px 100px 90px 90px 70
     </div>`
   ).parent(uiLosses.root);
 }
+// ==================== BOP WELL CONTROL UI ====================
+let uiBOP = { root: null };
+
+function bopUIPosition() {
+  const lossPos = lossesUIPosition();
+  const x = lossPos.x;
+  const y = lossPos.y + 450; // Below losses UI
+  return { x, y };
+}
+
+function buildBOPWellControlUI() {
+  const pos = bopUIPosition();
+
+  uiBOP.root = createDiv('').position(pos.x, pos.y).style('padding', '8px')
+    .style('border', '1px solid rgba(100,200,255,0.3)')
+    .style('border-radius', '8px')
+    .style('background', 'rgba(0,40,60,0.25)')
+    .style('backdrop-filter', 'blur(6px)')
+    .style('color', '#EEE')
+    .style('width', '410px');
+
+  createDiv('BOP Well Control').parent(uiBOP.root)
+    .style('font-weight', 'bold').style('margin-bottom', '8px').style('color', '#66ccff');
+
+  // BOP State Toggle
+  uiBOP.bopBtn = createButton(BOP_CLOSED ? 'BOP: CLOSED' : 'BOP: OPEN')
+    .parent(uiBOP.root)
+    .style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80')
+    .style('font-weight', 'bold')
+    .style('width', '120px')
+    .mousePressed(() => {
+      BOP_CLOSED = !BOP_CLOSED;
+      uiBOP.bopBtn.html(BOP_CLOSED ? 'BOP: CLOSED' : 'BOP: OPEN');
+      uiBOP.bopBtn.style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80');
+    });
+
+  // === CHOKE LINE ===
+  createDiv('').parent(uiBOP.root).style('margin-top', '12px')
+    .html('<div style="font-size:12px;opacity:0.9;font-weight:bold">Choke Line</div>');
+
+  const chokeRow1 = createDiv('').parent(uiBOP.root)
+    .style('display', 'grid')
+    .style('grid-template-columns', '1fr 1fr')
+    .style('gap', '8px')
+    .style('margin-top', '6px');
+
+  const chokeFlowLabel = createDiv('').parent(chokeRow1).html('<label style="font-size:11px">Flow (gpm):</label>');
+  uiBOP.chokeFlowInput = createInput(String(Q_CHOKE), 'number').parent(chokeFlowLabel);
+  styleBOPInput(uiBOP.chokeFlowInput);
+  uiBOP.chokeFlowInput.input(() => { Q_CHOKE = Math.max(0, Number(uiBOP.chokeFlowInput.value()) || 0); });
+
+  const chokePressLabel = createDiv('').parent(chokeRow1).html('<label style="font-size:11px">Pressure (psi):</label>');
+  uiBOP.chokePressInput = createInput(String(CHOKE_PRESSURE_psi), 'number').parent(chokePressLabel);
+  styleBOPInput(uiBOP.chokePressInput);
+  uiBOP.chokePressInput.input(() => { CHOKE_PRESSURE_psi = Math.max(0, Number(uiBOP.chokePressInput.value()) || 0); });
+
+  const chokeRow2 = createDiv('').parent(uiBOP.root)
+    .style('margin-top', '6px');
+
+  uiBOP.chokeDirBtn = createButton(`Direction: ${CHOKE_DIRECTION}`)
+    .parent(chokeRow2)
+    .style('width', '140px')
+    .style('font-size', '11px')
+    .mousePressed(() => {
+      CHOKE_DIRECTION = (CHOKE_DIRECTION === 'UP') ? 'DOWN' : 'UP';
+      uiBOP.chokeDirBtn.html(`Direction: ${CHOKE_DIRECTION}`);
+    });
+
+  // === KILL LINE ===
+  createDiv('').parent(uiBOP.root).style('margin-top', '12px')
+    .html('<div style="font-size:12px;opacity:0.9;font-weight:bold">Kill Line</div>');
+
+  const killRow1 = createDiv('').parent(uiBOP.root)
+    .style('display', 'grid')
+    .style('grid-template-columns', '1fr 1fr')
+    .style('gap', '8px')
+    .style('margin-top', '6px');
+
+  const killFlowLabel = createDiv('').parent(killRow1).html('<label style="font-size:11px">Flow (gpm):</label>');
+  uiBOP.killFlowInput = createInput(String(Q_KILL), 'number').parent(killFlowLabel);
+  styleBOPInput(uiBOP.killFlowInput);
+  uiBOP.killFlowInput.input(() => { Q_KILL = Math.max(0, Number(uiBOP.killFlowInput.value()) || 0); });
+
+  const killPressLabel = createDiv('').parent(killRow1).html('<label style="font-size:11px">Pressure (psi):</label>');
+  uiBOP.killPressInput = createInput(String(KILL_PRESSURE_psi), 'number').parent(killPressLabel);
+  styleBOPInput(uiBOP.killPressInput);
+  uiBOP.killPressInput.input(() => { KILL_PRESSURE_psi = Math.max(0, Number(uiBOP.killPressInput.value()) || 0); });
+
+  const killRow2 = createDiv('').parent(uiBOP.root)
+    .style('margin-top', '6px');
+
+  uiBOP.killDirBtn = createButton(`Direction: ${KILL_DIRECTION}`)
+    .parent(killRow2)
+    .style('width', '140px')
+    .style('font-size', '11px')
+    .mousePressed(() => {
+      KILL_DIRECTION = (KILL_DIRECTION === 'UP') ? 'DOWN' : 'UP';
+      uiBOP.killDirBtn.html(`Direction: ${KILL_DIRECTION}`);
+    });
+
+  // Help text
+  createDiv(
+    `<div style="margin-top:10px;font-size:10px;opacity:.75;line-height:1.3">
+      <b>BOP CLOSED:</b> Riser isolated. Only Choke/Kill lines cross BOP.<br/>
+      <b>UP:</b> Friction + Line Pressure adds to BHP.<br/>
+      <b>DOWN:</b> Line Pressure acts as pump SPP.
+    </div>`
+  ).parent(uiBOP.root);
+}
+
+function styleBOPInput(inp) {
+  inp.style('background', 'rgba(255,255,255,0.07)')
+     .style('color', '#EEE')
+     .style('border', '1px solid rgba(100,200,255,0.2)')
+     .style('height', '22px')
+     .style('padding', '0 6px')
+     .style('border-radius', '4px')
+     .style('font-size', '11px')
+     .style('width', '100%');
+}
+
 function refreshLossesUIFromModel(){
   if (!uiLosses.root) return;
   for (let i=0;i<3;i++){
