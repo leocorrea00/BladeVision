@@ -2249,6 +2249,7 @@ function nextBoundaryAfter_(d, goingUp){ // goingUp = true if depth is decreasin
 // ---------------------------------------------------------------------------
 // Flow router: splits DS / Booster / TopFill toward losses first,
 // then leftover (if any) becomes upward annulus flow.
+// ✅ NOW HANDLES BOP CLOSED STATE: Riser isolated from below-BOP annulus
 // Publishes: __qToLoss_m3s, __qAnnUp_m3s, __qAnnDown_m3s (signless magnitudes)
 //            and a stable FLOW_OUT_gpm via hysteresis+smoothing.
 // Call once per substep BEFORE friction and level solver.
@@ -2256,16 +2257,131 @@ function nextBoundaryAfter_(d, goingUp){ // goingUp = true if depth is decreasin
 function routeAnnulusFlowsWithLosses(dt_s){
   const M3_PER_GPM = 1/15850.323;
 
-  // Inputs
+  // ============================================================================
+  // INPUTS
+  // ============================================================================
   const qDS  = (Q_DS || 0) * M3_PER_GPM;
   const qBO  = (Q_BO || 0) * M3_PER_GPM;
   const qTF  = (TOPFILL_ON ? (Q_TOPFILL||0) : 0) * M3_PER_GPM;
   const qCML = (typeof effective_Q_CML_gpm==='function' ? (effective_Q_CML_gpm()||0) : 0) * M3_PER_GPM;
+  const qInflux = (typeof current_influx_m3s === 'number') ? current_influx_m3s : 0;
+
+  // Choke and Kill line flows
+  const qChoke_m3s = (Q_CHOKE || 0) * M3_PER_GPM;
+  const qKill_m3s = (Q_KILL || 0) * M3_PER_GPM;
 
   // Filtered demand wanted by the loss zone (use demand, not actual)
   const qDem = (typeof totalLossDemand_m3s==='function')
     ? totalLossDemand_m3s()
     : ((typeof totalLossRate_gpm==='function' ? totalLossRate_gpm() : 0) * M3_PER_GPM);
+
+  // ============================================================================
+  // BOP CLOSED STATE - SEPARATE FLOW PATHS
+  // ============================================================================
+  if (BOP_CLOSED) {
+    // When BOP is closed, riser is ISOLATED from below-BOP annulus
+    // Only choke and kill lines can transfer fluid across BOP
+
+    // === BELOW BOP (Isolated wellbore annulus) ===
+    // Inputs: DS return, Kicks, Choke/Kill lines flowing DOWN
+    // Outputs: Losses, Choke/Kill lines flowing UP
+
+    let qIn_belowBOP = qDS + qInflux; // DS return + kicks enter below BOP
+
+    // Add choke/kill lines flowing DOWN (pumping into wellbore)
+    if (CHOKE_DIRECTION === "DOWN") qIn_belowBOP += qChoke_m3s;
+    if (KILL_DIRECTION === "DOWN") qIn_belowBOP += qKill_m3s;
+
+    // Losses consume fluid from below-BOP annulus
+    const qToLoss = Math.min(qDem, Math.max(0, qIn_belowBOP));
+
+    // Available fluid to flow UP through choke/kill lines
+    let qAvailable_belowBOP = Math.max(0, qIn_belowBOP - qToLoss);
+
+    // Choke and Kill lines flowing UP extract fluid from below-BOP
+    let qChoke_actual = 0, qKill_actual = 0;
+
+    if (CHOKE_DIRECTION === "UP" && qChoke_m3s > 0) {
+      if (KILL_DIRECTION === "UP" && qKill_m3s > 0) {
+        // ✅ BOTH LINES FLOWING UP - PRESSURE BALANCE LOGIC
+        // Lower resistance path gets MORE flow (inverse relationship)
+
+        // Calculate total resistance for each line (friction + applied pressure)
+        const BHP_psi = pressureAtDepth(BOP_DEPTH); // Pressure at BOP in annulus
+
+        const friction_choke_psi = chokeFrictionPsiLength(BOP_DEPTH, qChoke_m3s);
+        const friction_kill_psi = killFrictionPsiLength(BOP_DEPTH, qKill_m3s);
+
+        const R_choke = friction_choke_psi + CHOKE_PRESSURE_psi; // Total resistance
+        const R_kill = friction_kill_psi + KILL_PRESSURE_psi;
+
+        // Check if there's enough pressure to flow through either line
+        const can_flow_choke = BHP_psi > R_choke;
+        const can_flow_kill = BHP_psi > R_kill;
+
+        if (can_flow_choke && can_flow_kill) {
+          // Both lines can flow - split based on inverse resistance
+          const total_conductance = (1/Math.max(R_choke, 1)) + (1/Math.max(R_kill, 1));
+          const choke_fraction = (1/Math.max(R_choke, 1)) / total_conductance;
+          const kill_fraction = (1/Math.max(R_kill, 1)) / total_conductance;
+
+          qChoke_actual = Math.min(qChoke_m3s, qAvailable_belowBOP * choke_fraction);
+          qKill_actual = Math.min(qKill_m3s, qAvailable_belowBOP * kill_fraction);
+        } else if (can_flow_choke) {
+          qChoke_actual = Math.min(qChoke_m3s, qAvailable_belowBOP);
+        } else if (can_flow_kill) {
+          qKill_actual = Math.min(qKill_m3s, qAvailable_belowBOP);
+        }
+      } else {
+        // Only choke line flowing UP
+        qChoke_actual = Math.min(qChoke_m3s, qAvailable_belowBOP);
+      }
+    } else if (KILL_DIRECTION === "UP" && qKill_m3s > 0) {
+      // Only kill line flowing UP
+      qKill_actual = Math.min(qKill_m3s, qAvailable_belowBOP);
+    }
+
+    // Flow reaching surface through choke/kill lines
+    const qToSurface_belowBOP = qChoke_actual + qKill_actual;
+
+    // === ABOVE BOP (Isolated riser) ===
+    // Inputs: Booster, TopFill
+    // Outputs: CML, Flow Out (if riser full)
+
+    let qIn_aboveBOP = qBO + qTF; // Booster and TopFill enter riser from surface
+    let qOut_aboveBOP = qCML; // CML removes from riser
+
+    const qNet_riser = qIn_aboveBOP - qOut_aboveBOP;
+
+    // Publish separated flows for friction calculation
+    window.__qToLoss_m3s = qToLoss;
+    window.__qAnnBelow_m3s = Math.max(0, qIn_belowBOP - qToLoss - qToSurface_belowBOP); // Net upward in annulus below BOP
+    window.__qAnnAbove_m3s = qNet_riser; // Net flow in riser
+    window.__qAnnUp_m3s = qToSurface_belowBOP; // Flow through choke/kill lines
+    window.__qAnnDown_m3s = 0; // No downward flow when BOP closed
+
+    // Flow Out calculation - from choke/kill lines
+    const targetFO_gpm = Math.max(0, qToSurface_belowBOP * 15850.323);
+
+    // Update FLOW_OUT with fast filter
+    const ALPHA = 0.5;
+    const DQDT_MAX = 1000;
+    const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
+    const lp = prev + ALPHA*(targetFO_gpm - prev);
+    const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
+    const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
+    FLOW_OUT_gpm = prev + step;
+
+    if (typeof FLOW_OUT_ALPHA==='number') {
+      window.FLOW_OUT_smooth = (window.FLOW_OUT_smooth||0) + FLOW_OUT_ALPHA*(FLOW_OUT_gpm - (window.FLOW_OUT_smooth||0));
+    }
+
+    return; // Exit early for BOP closed state
+  }
+
+  // ============================================================================
+  // BOP OPEN STATE - NORMAL FLOW ROUTING
+  // ============================================================================
 
   // Supply that can feed losses from downhole side (no surface returns here)
   // We allow DS + Booster + TopFill to feed the zone; subtract CML intake
@@ -2303,7 +2419,6 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
   // ✅ KICK INFLUX: Add formation fluid influx to upward flow
   // Kicks enter the wellbore and flow upward, contributing to surface returns
-  const qInflux = (typeof current_influx_m3s === 'number') ? current_influx_m3s : 0;
 
   // Upward annulus flow contributor
   // - If riser full: everything goes up to surface
