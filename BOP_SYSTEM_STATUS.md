@@ -36,9 +36,16 @@
 - **Help Text**: Explains BOP operation modes
 - Positioned below Losses UI
 
+### Visualization (Part 4)
+- **BOP Indicator**: Red rectangle when closed, green outline when open at 2000m depth
+- **Choke Line Graphics**: Right side of well, color-coded by direction (blue=UP, orange=DOWN)
+- **Kill Line Graphics**: Adjacent to choke line, same color scheme
+- **Flow Arrows**: Three arrows per line showing flow direction
+- **Labels**: Flow rate and direction displayed on rotated text
+
 ---
 
-## 🚧 PENDING (Part 3 - Critical for Operation)
+## 🚧 PENDING (Part 5 - Integration Testing)
 
 ### Flow Routing Logic for BOP Closed
 **File**: `routeAnnulusFlowsWithLosses()` function
@@ -185,9 +192,9 @@ if (BOP_CLOSED) {
 - [ ] Verify kick density mixing with choke/kill line fluids
 
 ### Low Priority (Polish)
-- [ ] Add BOP visualization on well schematic
-- [ ] Add choke/kill line visualization
-- [ ] Add flow direction arrows
+- [x] Add BOP visualization on well schematic
+- [x] Add choke/kill line visualization
+- [x] Add flow direction arrows
 - [ ] Add diagnostic logging for BOP operations
 - [ ] Add SPP calculations for choke/kill lines when flowing DOWN
 
@@ -241,5 +248,8 @@ if (BOP_CLOSED) {
 **Commits**:
 - `81bde08`: Part 1 - Foundation and friction
 - `60abdd2`: Part 2 - Complete BOP Well Control UI
+- `029b835`: Part 3A - Flow routing with pressure balance
+- `cf2f5e7`: Part 3B - Choke/kill line advection
+- `cb96854`: Part 4 - Complete visualization
 
-Ready for Part 3 implementation! 🚀
+Parts 1-4 Complete! Ready for integration testing! 🚀
