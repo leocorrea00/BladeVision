@@ -4726,6 +4726,7 @@ function draw(){
   rect(0, 0, width, 120);
   fill(30, 60, 20);
   rect(0, 120, width, 520);
+  // Extended bottom band to accommodate kick and BOP frames
   fill(0, 0, 20);
   rect(0, 640, width, height-640);
   // Bottom frames (visual only; your UI inputs sit on top of these)
@@ -5019,15 +5020,61 @@ for (let i = 0; i < N_BELOW; i++) {
 }
 
 // ===== FORMATION FLUIDS VISUALIZATION (LEFT SIDE) =====
+// Extends from surface to TD, showing formation fluids in all regions
 if (formationFluidEnabled) {
   const formFluidBarX = well.x - 35; // Left of well
   const formFluidBarW = 18;
 
-  // Draw background bar
+  // Draw background bar (surface to TD)
   stroke(0, 0, 30); strokeWeight(1); fill(0, 0, 10, 150);
-  rect(formFluidBarX, mapDepthToY(BOP_DEPTH), formFluidBarW, mapDepthToY(TD_DEPTH) - mapDepthToY(BOP_DEPTH), 3);
+  rect(formFluidBarX, well.y, formFluidBarW, mapDepthToY(TD_DEPTH) - well.y, 3);
 
-  // Draw formation fluid cells
+  // Draw formation fluid cells in RISER (above BOP)
+  for (let i = 0; i < N_ABV; i++) {
+    const dTop_m = i * CELL_M;
+    const dBot_m = Math.min((i + 1) * CELL_M, BOP_DEPTH);
+
+    const gasAmt = gasPhaseFrom_above[i] || 0;
+    const oilAmt = oilPhaseFrom_above[i] || 0;
+    const waterAmt = waterPhaseFrom_above[i] || 0;
+    const totalFormFluid = gasAmt + oilAmt + waterAmt;
+
+    if (totalFormFluid > 0.01) {
+      const yTop = mapDepthToY(dTop_m);
+      const yBot = mapDepthToY(dBot_m);
+      const cellH = yBot - yTop;
+
+      // Stack formation fluids (gas on top, then oil, then water)
+      let yOffset = 0;
+
+      if (gasAmt > 0.01) {
+        const gasH = cellH * (gasAmt / totalFormFluid);
+        const gasColor = FORMATION_FLUID_TYPES.GAS.color;
+        noStroke(); fill(gasColor[0], gasColor[1], gasColor[2], 220);
+        rect(formFluidBarX + 2, yTop + yOffset, formFluidBarW - 4, gasH);
+        yOffset += gasH;
+      }
+
+      if (oilAmt > 0.01) {
+        const oilH = cellH * (oilAmt / totalFormFluid);
+        const oilColor = formationFluidType === 'BLACKOIL'
+          ? FORMATION_FLUID_TYPES.BLACKOIL.color
+          : FORMATION_FLUID_TYPES.OIL.color;
+        noStroke(); fill(oilColor[0], oilColor[1], oilColor[2], 220);
+        rect(formFluidBarX + 2, yTop + yOffset, formFluidBarW - 4, oilH);
+        yOffset += oilH;
+      }
+
+      if (waterAmt > 0.01) {
+        const waterH = cellH * (waterAmt / totalFormFluid);
+        const waterColor = FORMATION_FLUID_TYPES.WATER.color;
+        noStroke(); fill(waterColor[0], waterColor[1], waterColor[2], 220);
+        rect(formFluidBarX + 2, yTop + yOffset, formFluidBarW - 4, waterH);
+      }
+    }
+  }
+
+  // Draw formation fluid cells in BELOW BOP (annulus below BOP)
   for (let i = 0; i < N_BELOW; i++) {
     const dTop_m = BOP_DEPTH + i * CELL_M;
     const dBot_m = Math.min(BOP_DEPTH + (i + 1) * CELL_M, TD_DEPTH);
@@ -5045,7 +5092,6 @@ if (formationFluidEnabled) {
       // Stack formation fluids (gas on top, then oil, then water)
       let yOffset = 0;
 
-      // Gas (lightest, rises to top)
       if (gasAmt > 0.01) {
         const gasH = cellH * (gasAmt / totalFormFluid);
         const gasColor = FORMATION_FLUID_TYPES.GAS.color;
@@ -5054,7 +5100,6 @@ if (formationFluidEnabled) {
         yOffset += gasH;
       }
 
-      // Oil (medium density)
       if (oilAmt > 0.01) {
         const oilH = cellH * (oilAmt / totalFormFluid);
         const oilColor = formationFluidType === 'BLACKOIL'
@@ -5065,7 +5110,6 @@ if (formationFluidEnabled) {
         yOffset += oilH;
       }
 
-      // Water (heaviest, sinks to bottom)
       if (waterAmt > 0.01) {
         const waterH = cellH * (waterAmt / totalFormFluid);
         const waterColor = FORMATION_FLUID_TYPES.WATER.color;
@@ -5077,7 +5121,7 @@ if (formationFluidEnabled) {
 
   // Label
   push();
-  translate(formFluidBarX + formFluidBarW/2, (mapDepthToY(BOP_DEPTH) + mapDepthToY(TD_DEPTH))/2);
+  translate(formFluidBarX + formFluidBarW/2, (well.y + mapDepthToY(TD_DEPTH))/2);
   rotate(-HALF_PI);
   fill(0, 0, 90); textSize(10); textAlign(CENTER, CENTER);
   text("Formation Fluids", 0, 0);
@@ -5191,51 +5235,126 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   textAlign(CENTER, CENTER); // Reset
 }
 
+// ===== KILL LINE VISUALIZATION (LEFT SIDE, NEXT TO BOOSTER) =====
+// Always visible, positioned next to booster line
+{
+  const killLineW = 10;
+  const boosterX = well.x - 14;
+  const boosterW = 12;
+  const killLineX = boosterX - boosterW/2 - 8; // Left of booster
+  const yTop = well.y; // Surface
+  const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
+
+  // Color based on direction and flow state
+  let killHue, killSat, killBright, killAlpha;
+  if (Q_KILL > 0) {
+    if (KILL_DIRECTION === "UP") {
+      killHue = 200; killSat = 80; killBright = 90; killAlpha = 200; // Blue
+    } else {
+      killHue = 30; killSat = 90; killBright = 90; killAlpha = 200; // Orange
+    }
+  } else {
+    // No flow - gray dormant
+    killHue = 0; killSat = 0; killBright = 60; killAlpha = 120;
+  }
+
+  // Draw line pipe
+  stroke(killHue, killSat, killBright - 20, killAlpha);
+  strokeWeight(2);
+  noFill();
+  rect(killLineX - killLineW/2, yTop, killLineW, yBot - yTop, 3);
+
+  // Fill with fluid color if flowing
+  if (Q_KILL > 0) {
+    noStroke();
+    fill(killHue, killSat, killBright, killAlpha - 20);
+    rect(killLineX - killLineW/2 + 1, yTop, killLineW - 2, yBot - yTop);
+
+    // Draw flow arrows
+    noFill();
+    stroke(killHue, killSat, 100, 255);
+    strokeWeight(2);
+    const numArrows = 3;
+    const arrowSpacing = (yBot - yTop) / (numArrows + 1);
+    for (let i = 1; i <= numArrows; i++) {
+      const arrowY = KILL_DIRECTION === "UP"
+        ? yBot - i * arrowSpacing
+        : yTop + i * arrowSpacing;
+      const arrowDir = KILL_DIRECTION === "UP" ? -1 : 1;
+      const arrowSize = 6;
+
+      line(killLineX, arrowY - arrowDir * arrowSize, killLineX, arrowY + arrowDir * arrowSize);
+      line(killLineX, arrowY - arrowDir * arrowSize, killLineX - 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+      line(killLineX, arrowY - arrowDir * arrowSize, killLineX + 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+    }
+  }
+
+  // Label
+  push();
+  translate(killLineX - killLineW/2 - 10, (yTop + yBot)/2);
+  rotate(-HALF_PI);
+  noStroke();
+  fill(killHue, killSat, killBright);
+  textSize(10);
+  textAlign(CENTER, CENTER);
+  if (Q_KILL > 0) {
+    text(`KILL ${nf(Q_KILL, 0, 0)} gpm ${KILL_DIRECTION}`, 0, 0);
+  } else {
+    text(`KILL LINE`, 0, 0);
+  }
+  pop();
+}
+
 // ===== CHOKE LINE VISUALIZATION (RIGHT SIDE) =====
-if (BOP_CLOSED && Q_CHOKE > 0) {
+// Always visible, positioned on right side of well
+{
   const chokeLineW = 10;
   const chokeLineX = well.x + well.w + 16; // Right side of well
   const yTop = well.y; // Surface
   const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
 
-  // Color based on direction
-  let chokeHue, chokeSat, chokeBright;
-  if (CHOKE_DIRECTION === "UP") {
-    chokeHue = 200; chokeSat = 80; chokeBright = 90; // Blue
+  // Color based on direction and flow state
+  let chokeHue, chokeSat, chokeBright, chokeAlpha;
+  if (Q_CHOKE > 0) {
+    if (CHOKE_DIRECTION === "UP") {
+      chokeHue = 200; chokeSat = 80; chokeBright = 90; chokeAlpha = 200; // Blue
+    } else {
+      chokeHue = 30; chokeSat = 90; chokeBright = 90; chokeAlpha = 200; // Orange
+    }
   } else {
-    chokeHue = 30; chokeSat = 90; chokeBright = 90; // Orange
+    // No flow - gray dormant
+    chokeHue = 0; chokeSat = 0; chokeBright = 60; chokeAlpha = 120;
   }
 
   // Draw line pipe
-  stroke(chokeHue, chokeSat, chokeBright - 20, 200);
+  stroke(chokeHue, chokeSat, chokeBright - 20, chokeAlpha);
   strokeWeight(2);
   noFill();
   rect(chokeLineX - chokeLineW/2, yTop, chokeLineW, yBot - yTop, 3);
 
   // Fill with fluid color if flowing
-  noStroke();
-  fill(chokeHue, chokeSat, chokeBright, 180);
-  rect(chokeLineX - chokeLineW/2 + 1, yTop, chokeLineW - 2, yBot - yTop);
+  if (Q_CHOKE > 0) {
+    noStroke();
+    fill(chokeHue, chokeSat, chokeBright, chokeAlpha - 20);
+    rect(chokeLineX - chokeLineW/2 + 1, yTop, chokeLineW - 2, yBot - yTop);
 
-  // Draw flow arrows
-  noFill();
-  stroke(chokeHue, chokeSat, 100, 255);
-  strokeWeight(2);
-  const numArrows = 3;
-  const arrowSpacing = (yBot - yTop) / (numArrows + 1);
-  for (let i = 1; i <= numArrows; i++) {
-    const arrowY = CHOKE_DIRECTION === "UP"
-      ? yBot - i * arrowSpacing
-      : yTop + i * arrowSpacing;
-    const arrowDir = CHOKE_DIRECTION === "UP" ? -1 : 1; // -1 = up, 1 = down
-    const arrowSize = 6;
+    // Draw flow arrows
+    noFill();
+    stroke(chokeHue, chokeSat, 100, 255);
+    strokeWeight(2);
+    const numArrows = 3;
+    const arrowSpacing = (yBot - yTop) / (numArrows + 1);
+    for (let i = 1; i <= numArrows; i++) {
+      const arrowY = CHOKE_DIRECTION === "UP"
+        ? yBot - i * arrowSpacing
+        : yTop + i * arrowSpacing;
+      const arrowDir = CHOKE_DIRECTION === "UP" ? -1 : 1;
+      const arrowSize = 6;
 
-    // Arrow shaft
-    line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX, arrowY + arrowDir * arrowSize);
-
-    // Arrow head
-    line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX - 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
-    line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX + 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+      line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX, arrowY + arrowDir * arrowSize);
+      line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX - 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+      line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX + 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+    }
   }
 
   // Label
@@ -5246,66 +5365,11 @@ if (BOP_CLOSED && Q_CHOKE > 0) {
   fill(chokeHue, chokeSat, chokeBright);
   textSize(10);
   textAlign(CENTER, CENTER);
-  text(`CHOKE ${nf(Q_CHOKE, 0, 0)} gpm ${CHOKE_DIRECTION}`, 0, 0);
-  pop();
-}
-
-// ===== KILL LINE VISUALIZATION (RIGHT SIDE, NEXT TO CHOKE) =====
-if (BOP_CLOSED && Q_KILL > 0) {
-  const killLineW = 10;
-  const killLineX = well.x + well.w + 36; // Right of choke line
-  const yTop = well.y; // Surface
-  const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
-
-  // Color based on direction
-  let killHue, killSat, killBright;
-  if (KILL_DIRECTION === "UP") {
-    killHue = 200; killSat = 80; killBright = 90; // Blue
+  if (Q_CHOKE > 0) {
+    text(`CHOKE ${nf(Q_CHOKE, 0, 0)} gpm ${CHOKE_DIRECTION}`, 0, 0);
   } else {
-    killHue = 30; killSat = 90; killBright = 90; // Orange
+    text(`CHOKE LINE`, 0, 0);
   }
-
-  // Draw line pipe
-  stroke(killHue, killSat, killBright - 20, 200);
-  strokeWeight(2);
-  noFill();
-  rect(killLineX - killLineW/2, yTop, killLineW, yBot - yTop, 3);
-
-  // Fill with fluid color if flowing
-  noStroke();
-  fill(killHue, killSat, killBright, 180);
-  rect(killLineX - killLineW/2 + 1, yTop, killLineW - 2, yBot - yTop);
-
-  // Draw flow arrows
-  noFill();
-  stroke(killHue, killSat, 100, 255);
-  strokeWeight(2);
-  const numArrows = 3;
-  const arrowSpacing = (yBot - yTop) / (numArrows + 1);
-  for (let i = 1; i <= numArrows; i++) {
-    const arrowY = KILL_DIRECTION === "UP"
-      ? yBot - i * arrowSpacing
-      : yTop + i * arrowSpacing;
-    const arrowDir = KILL_DIRECTION === "UP" ? -1 : 1; // -1 = up, 1 = down
-    const arrowSize = 6;
-
-    // Arrow shaft
-    line(killLineX, arrowY - arrowDir * arrowSize, killLineX, arrowY + arrowDir * arrowSize);
-
-    // Arrow head
-    line(killLineX, arrowY - arrowDir * arrowSize, killLineX - 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
-    line(killLineX, arrowY - arrowDir * arrowSize, killLineX + 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
-  }
-
-  // Label
-  push();
-  translate(killLineX + killLineW/2 + 12, (yTop + yBot)/2);
-  rotate(-HALF_PI);
-  noStroke();
-  fill(killHue, killSat, killBright);
-  textSize(10);
-  textAlign(CENTER, CENTER);
-  text(`KILL ${nf(Q_KILL, 0, 0)} gpm ${KILL_DIRECTION}`, 0, 0);
   pop();
 }
 
@@ -5559,12 +5623,29 @@ function drawDepthGrid(){
 function drawReferenceBadges(){
   const starX = well.x - 40;
   for (const m of MARKS){
-    const y = mapDepthToY(m.d);
+    let y = mapDepthToY(m.d);
+
+    // Offset badge if at BOP depth to avoid overlap with BOP indicator
+    const yBOP = mapDepthToY(BOP_DEPTH);
+    if (m.d === BOP_DEPTH && BOP_CLOSED) {
+      y = y + 25; // Offset down when BOP closed
+    }
+
     drawStar(starX, y);
     const p = pressureAtDepth(m.d);
     const ecdEff = ecdWithSBPAtDepth(m.d);
-    drawBadge(well.x + well.w/2, y, `${m.name} • ${nf(p,0,0)} psi`, `Eff. ECD • ${nf(ecdEff,1,2)} ppg`);
+    drawBadgeSm(well.x + well.w/2, y, `${m.name} • ${nf(p,0,0)} psi`, `Eff. ECD • ${nf(ecdEff,1,2)} ppg`);
   }
+}
+
+// Smaller badge for reference marks (reduced size to avoid clutter)
+function drawBadgeSm(cx, cy, line1, line2){
+  push(); translate(cx,cy);
+  const boxW=160, boxH=32; // Reduced from 190x38
+  fill(0,0,20,200); rect(-boxW/2,-boxH/2,boxW,boxH,5);
+  fill(0,0,95); textAlign(CENTER,CENTER); textSize(10); text(line1,0,-5);
+  textSize(9); fill(0,0,80); text(line2,0,9);
+  pop();
 }
 
 function drawGaugesAndCharts(){
@@ -6445,9 +6526,11 @@ hdr.html(`<div style="display:grid;grid-template-columns:80px 100px 90px 90px 70
 let uiBOP = { root: null };
 
 function bopUIPosition() {
-  const lossPos = lossesUIPosition();
-  const x = lossPos.x;
-  const y = lossPos.y + 450; // Below losses UI
+  const kickPos = kicksUIPosition();
+  const kickWidth = 300;
+  const spacing = 20;
+  const x = kickPos.x + kickWidth + spacing; // To the right of kick frame
+  const y = kickPos.y; // Same vertical position
   return { x, y };
 }
 
