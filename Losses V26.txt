@@ -87,6 +87,31 @@ const GAUGE_SCALE = 0.70, R_BASE = 65;
 const R = Math.round(R_BASE * GAUGE_SCALE);
 // Reference marks to annotate
 const MARKS = [ { d: BOP_DEPTH, name: "BOP" }, { d: SHOE_DEPTH, name: "Casing Shoe" }, { d: TD_DEPTH, name: "TD" } ];
+
+// ========================================================================
+// FORMATION FLUIDS (KICKS)
+// ========================================================================
+const FORMATION_FLUID_TYPES = {
+  WATER: { name: 'Water', density_ppg: 8.33, density_kgm3: 997, viscosity_cp: 1.0, color: [200, 80, 60] },
+  OIL: { name: 'Oil', density_ppg: 7.0, density_kgm3: 838, viscosity_cp: 5.0, color: [30, 70, 40] },
+  GAS: { name: 'Gas', density_ppg: 0.7, density_kgm3: 84, viscosity_cp: 0.02, color: [0, 80, 90] },
+  BLACKOIL: { name: 'Black Oil', density_ppg: 7.5, density_kgm3: 898, viscosity_cp: 10.0, bubblePoint_psi: 2000, color: [270, 60, 30] }
+};
+
+let formationFluidEnabled = false;
+let formationFluidType = 'WATER';
+let formationFluidDepth_m = 4500; // Depth where kick enters
+let formationFluidRate_gpm = 0; // Influx rate
+let formationFluidVolume_bbl = 0; // Total volume entered
+let formationFluidFront_m = TD_DEPTH; // Current front position
+let formationFluidMigrationModel = 'SHUTIN'; // 'SHUTIN', 'HARMATHY', 'MODIFIED_HARMATHY'
+
+// Track formation fluid in cells (parallel to annulus grids)
+let formationFluidCells_below = []; // Formation fluid fraction in each cell below BOP
+let formationFluidCells_above = []; // Formation fluid fraction in each cell above BOP
+let gasPhaseFrom_below = []; // For black oil dissociation tracking
+let gasPhaseFrom_above = [];
+
 // ============================ GLOBAL STATE =============================
 let HYDRAULICS_MODEL = "Refined"; // "API" | "Refined"
 let FRICTION_MODE = "hydraulics"; // keep hydraulics by default
@@ -728,21 +753,20 @@ function dP_per_m_annulus_withRPM(Q, rho, Do, Di, K, n, tauY, rpm){
     dp_turb *= rough;
     dp_turb *= ecc;
 
+    // ✅ MONOTONICITY FIX: Turbulent must never be less than laminar
+    // This ensures friction increases monotonically with flow rate
+    const dp_turb_corrected = Math.max(dp_turb, dp_lam);
+
     // Smooth cubic blend: f(Re) = 3t² - 2t³ where t = (Re - RE_LAM)/(RE_TURB - RE_LAM)
     const t = (Re_g - RE_LAM) / (RE_TURB - RE_LAM);
     const blend = t * t * (3 - 2 * t);  // Smoothstep function
-    let result = dp_lam * (1 - blend) + dp_turb * blend;
+    let result = dp_lam * (1 - blend) + dp_turb_corrected * blend;
 
-    // ✅ PHYSICS ENFORCEMENT: Friction must be monotonic with flow rate
-    // Turbulent correlation sometimes gives lower values than laminar at transition
-    // Enforce: friction can't be less than 80% of laminar value
-    const dp_min = dp_lam * 0.8;
-    if (result < dp_min) {
-      result = dp_min;
-      logFlowRegime('TRANSITION (enforced min)', Re_g, dp_lam, dp_turb, result, blend*100, rough, ecc, dp_base);
-    } else {
-      logFlowRegime('TRANSITION', Re_g, dp_lam, dp_turb, result, blend*100, rough, ecc, dp_base);
-    }
+    // ✅ FINAL SAFETY: Result must NEVER be less than laminar
+    // This GUARANTEES monotonicity because laminar dp increases with Q
+    result = Math.max(result, dp_lam);
+
+    logFlowRegime('TRANSITION', Re_g, dp_lam, dp_turb_corrected, result, blend*100, rough, ecc, dp_base);
 
     return result;
   }
@@ -981,6 +1005,141 @@ function findFluidExitPoint(startDepth_m, flowRate_m3s, flowDirection) {
   return flowDirection === 'up'
     ? {depth: 0, reason: 'surface'}
     : {depth: TD_DEPTH, reason: 'static'};
+}
+
+// ========================================================================
+// FORMATION FLUID PHYSICS
+// ========================================================================
+
+function initializeFormationFluidCells() {
+  // Initialize arrays to track formation fluid in each cell
+  formationFluidCells_below = new Array(N_BELOW).fill(0);
+  formationFluidCells_above = new Array(N_ABV).fill(0);
+  gasPhaseFrom_below = new Array(N_BELOW).fill(0);
+  gasPhaseFrom_above = new Array(N_ABV).fill(0);
+}
+
+function calculateMigrationVelocity_m_s(fluidType, pressure_psi, mudWeight_ppg) {
+  // Migration velocity calculations based on literature
+  const fluidProps = FORMATION_FLUID_TYPES[fluidType];
+  if (!fluidProps) return 0;
+
+  const rho_mud_kgm3 = mudWeight_ppg * PPG_TO_KGM3;
+  const rho_fluid_kgm3 = fluidProps.density_kgm3;
+  const drho = rho_mud_kgm3 - rho_fluid_kgm3; // Density difference
+
+  if (drho <= 0) return 0; // Fluid heavier than mud, doesn't migrate
+
+  const g = 9.81; // m/s²
+
+  switch (formationFluidMigrationModel) {
+    case 'SHUTIN':
+      // Shut-in formula: v = 0 (no migration when shut in)
+      return 0;
+
+    case 'HARMATHY':
+      // Harmathy correlation for gas rise in stagnant fluid
+      // v = 0.35 * sqrt(g * D * Δρ / ρ_mud)
+      // Assuming annulus hydraulic diameter
+      const D_h = 0.1; // Approximate annulus Dh in meters
+      return 0.35 * Math.sqrt(g * D_h * drho / rho_mud_kgm3);
+
+    case 'MODIFIED_HARMATHY':
+      // Modified for wellbore conditions with adjustments for viscosity
+      const mu_mud_cp = 30; // Assumed mud viscosity
+      const mu_ratio = mu_mud_cp / Math.max(fluidProps.viscosity_cp, 0.1);
+      const D_h2 = 0.1;
+      const v_base = 0.35 * Math.sqrt(g * D_h2 * drho / rho_mud_kgm3);
+      return v_base / Math.sqrt(mu_ratio); // Slower rise in viscous mud
+
+    default:
+      return 0;
+  }
+}
+
+function updateFormationFluidMigration(dt_s) {
+  if (!formationFluidEnabled || formationFluidRate_gpm <= 0) return;
+
+  const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+  if (!fluidProps) return;
+
+  // Add formation fluid influx at specified depth
+  const influx_m3s = formationFluidRate_gpm / 15850.323;
+  const influx_volume_m3 = influx_m3s * dt_s;
+
+  // Determine which cell the influx enters
+  if (formationFluidDepth_m >= BOP_DEPTH) {
+    // Below BOP
+    const cellIndex = Math.floor((formationFluidDepth_m - BOP_DEPTH) / CELL_M);
+    if (cellIndex >= 0 && cellIndex < formationFluidCells_below.length) {
+      const cellVolume = areaAtDepthTop_(formationFluidDepth_m) * CELL_M;
+      formationFluidCells_below[cellIndex] += influx_volume_m3 / cellVolume;
+      formationFluidCells_below[cellIndex] = Math.min(formationFluidCells_below[cellIndex], 1.0);
+    }
+  } else {
+    // Above BOP (riser)
+    const cellIndex = Math.floor(formationFluidDepth_m / CELL_M);
+    if (cellIndex >= 0 && cellIndex < formationFluidCells_above.length) {
+      const cellVolume = areaAtDepthTop_(formationFluidDepth_m) * CELL_M;
+      formationFluidCells_above[cellIndex] += influx_volume_m3 / cellVolume;
+      formationFluidCells_above[cellIndex] = Math.min(formationFluidCells_above[cellIndex], 1.0);
+    }
+  }
+
+  // Calculate migration velocity
+  const avgMW = (MW_DS + MW_BO) / 2; // Simplified
+  const avgPressure = pressureAtDepth(formationFluidDepth_m);
+  const migrationVelocity = calculateMigrationVelocity_m_s(formationFluidType, avgPressure, avgMW);
+
+  // Move formation fluid upward through cells (migration)
+  if (migrationVelocity > 0 && formationFluidMigrationModel !== 'SHUTIN') {
+    const migrationDist_m = migrationVelocity * dt_s;
+    const cellsMoved = Math.floor(migrationDist_m / CELL_M);
+
+    // Shift cells upward (simplified - needs proper advection integration)
+    if (cellsMoved > 0) {
+      for (let i = 0; i < formationFluidCells_below.length - cellsMoved; i++) {
+        formationFluidCells_below[i] = formationFluidCells_below[i + cellsMoved];
+      }
+      // Clear bottom cells
+      for (let i = Math.max(0, formationFluidCells_below.length - cellsMoved); i < formationFluidCells_below.length; i++) {
+        formationFluidCells_below[i] = 0;
+      }
+    }
+  }
+
+  // Black oil dissociation check
+  if (formationFluidType === 'BLACKOIL' && fluidProps.bubblePoint_psi) {
+    for (let i = 0; i < formationFluidCells_below.length; i++) {
+      if (formationFluidCells_below[i] > 0) {
+        const depth = BOP_DEPTH + i * CELL_M;
+        const P = pressureAtDepth(depth);
+
+        // If pressure drops below bubble point, oil releases gas
+        if (P < fluidProps.bubblePoint_psi) {
+          const oilFraction = formationFluidCells_below[i];
+          const gasReleased = oilFraction * 0.2; // 20% gas release (simplified)
+          gasPhaseFrom_below[i] += gasReleased;
+          formationFluidCells_below[i] -= gasReleased;
+        }
+      }
+    }
+  }
+
+  // Update total volume
+  formationFluidVolume_bbl += (formationFluidRate_gpm * dt_s) / 42; // Convert to barrels
+
+  // Update front position (find highest cell with formation fluid)
+  let highestCell = -1;
+  for (let i = 0; i < formationFluidCells_below.length; i++) {
+    if (formationFluidCells_below[i] > 0.01) {
+      highestCell = i;
+      break;
+    }
+  }
+  if (highestCell >= 0) {
+    formationFluidFront_m = BOP_DEPTH + highestCell * CELL_M;
+  }
 }
 
 // REPLACE stepAdvection() completely:
@@ -2729,99 +2888,158 @@ function recomputeAnnulusSectionFlowsForLosses(dt_s){
 // ============================================================================
 
 function updateRiserLevelWithLosses(dt_s) {
+  // ========================================================================
+  // SPATIAL MASS BALANCE SOLVER
+  // Handles multiple fluid sections with different densities and flow directions
+  // ========================================================================
   const GPM_PER_M3S = 15850.323;
   const to_m3s = (gpm) => (gpm || 0) / GPM_PER_M3S;
-  
-  const qIn_m3s = to_m3s((Q_DS || 0) + (Q_BO || 0));
-  const qTopFill_m3s = TOPFILL_ON ? to_m3s(Q_TOPFILL || 0) : 0;
+
+  const qDS_m3s = to_m3s(Q_DS || 0);
+  const qBO_m3s = to_m3s(Q_BO || 0);
+  const qTF_m3s = TOPFILL_ON ? to_m3s(Q_TOPFILL || 0) : 0;
   const qCML_m3s = to_m3s(effective_Q_CML_gpm() || 0);
-  
-  const topDepthNow = annulusTopDepthGlobal();
+
+  // Get active loss zones sorted by depth (deepest first)
+  const activeLossZones = (LOSSES_ON && Array.isArray(lossZones))
+    ? lossZones.filter(z => z && z.enabled && (z.Qloss_gpm || 0) > 1.0).sort((a,b) => b.depth_m - a.depth_m)
+    : [];
+
+  const topDepthNow = LOSS_TOP_DEPTH_m || 0;
   const riserIsNotFull = topDepthNow > 0.5;
   const qOutSurface_m3s = riserIsNotFull ? 0 : to_m3s(FLOW_OUT_gpm || 0);
-  
-  const qLossActual_m3s = totalLossRate_gpm() / GPM_PER_M3S;
-  const qLossDemand_m3s = totalLossDemand_m3s();
-  const qAvailForLosses_m3s = Math.max(0, qIn_m3s + qTopFill_m3s - qCML_m3s);
-  const qComp_m3s = to_m3s(compressionEquivalentFlow_gpm(dt_s) || 0);
-  
-  const qDeficit_m3s = Math.max(0, qLossDemand_m3s - qAvailForLosses_m3s);
-  const qStillNeeded_m3s = Math.max(0, qDeficit_m3s - qComp_m3s);
-  
-  const qNet_m3s = (qIn_m3s + qTopFill_m3s - qCML_m3s - qOutSurface_m3s - qLossActual_m3s + qComp_m3s);
-  
-  // NET CHANGE (volumetric)
-  let remaining_dV = (qNet_m3s - qStillNeeded_m3s) * dt_s;  // m³
-  
-  const currentTop = LOSS_TOP_DEPTH_m || 0;
-  let newTop = currentTop;
-  
-  // === BOUNDARY-AWARE INTEGRATION (your existing logic) ===
-  function areaAtDepthTop_(d) {
-    if (d <= BOP_DEPTH) return A_riserAnn();
-    if (d <= SHOE_DEPTH) return A_casingAnn();
-    return A_openAnn();
-  }
-  
-  function nextBoundaryAfter_(d, goingUp) {
-    if (goingUp) {
-      if (d > SHOE_DEPTH) return SHOE_DEPTH;
-      if (d > BOP_DEPTH) return BOP_DEPTH;
-      return 0;
-    } else {
-      if (d < BOP_DEPTH) return BOP_DEPTH;
-      if (d < SHOE_DEPTH) return SHOE_DEPTH;
-      return TD_DEPTH;
-    }
-  }
-  
-  let guard = 0;
-  while (Math.abs(remaining_dV) > 1e-12 && guard++ < 4) {
-    const goingUp = (remaining_dV > 0);
-    const A_here = Math.max(areaAtDepthTop_(newTop), 1e-12);
-    const boundary = nextBoundaryAfter_(newTop, goingUp);
-    const dH_toB = Math.max(0, Math.abs(newTop - boundary));
-    const dV_toB = A_here * dH_toB;
-    
-    if (Math.abs(remaining_dV) <= dV_toB + 1e-12) {
-      const dH = remaining_dV / A_here;
-      newTop = newTop - dH;
-      remaining_dV = 0;
-      break;
-    } else {
-      if (goingUp) {
-        newTop = newTop - dH_toB;
-        remaining_dV -= dV_toB;
+
+  // ========================================================================
+  // SPATIAL SECTION ANALYSIS
+  // ========================================================================
+
+  if (activeLossZones.length === 0) {
+    // NO ACTIVE LOSSES: Simple global mass balance
+    const qIn_total = qDS_m3s + qBO_m3s + qTF_m3s - qCML_m3s;
+    const qOut_total = qOutSurface_m3s;
+    const qNet = qIn_total - qOut_total;
+
+    let dV = qNet * dt_s;
+    let newTop = topDepthNow;
+
+    // Move level up/down
+    let guard = 0;
+    while (Math.abs(dV) > 1e-12 && guard++ < 4) {
+      const A = Math.max(areaAtDepthTop_(newTop), 1e-12);
+      const dH = dV / A;
+      newTop = clamp(newTop - dH, 0, TD_DEPTH);
+
+      // Check boundary crossing
+      const nextBoundary = (dH < 0) ? nextBoundaryAfter_(newTop, false) : nextBoundaryAfter_(newTop, true);
+      if (Math.abs(newTop - nextBoundary) < 0.1) {
+        const dV_toBoundary = A * Math.abs(newTop - nextBoundary);
+        if (Math.abs(dV) > dV_toBoundary) {
+          dV -= (dH < 0 ? -dV_toBoundary : dV_toBoundary);
+          newTop = nextBoundary;
+        } else {
+          break;
+        }
       } else {
-        newTop = newTop + dH_toB;
-        remaining_dV += dV_toB;
+        break;
       }
     }
+
+    // Rate limiting
+    const deltaTop = newTop - topDepthNow;
+    const maxChange = (deltaTop < 0 ? LEVEL_MAX_DROP_RATE_M_S : LEVEL_MAX_RISE_RATE_M_S) * dt_s;
+    newTop = topDepthNow + clamp(deltaTop, -maxChange, maxChange);
+
+    LOSS_TOP_DEPTH_m = clamp(newTop, 0, TD_DEPTH);
+    if (typeof ANN_TOP_DEPTH_m !== 'undefined') ANN_TOP_DEPTH_m = LOSS_TOP_DEPTH_m;
+    return;
   }
-  
-  // === RATE LIMITING (prevents level spikes) ===
-  newTop = Math.max(0, Math.min(TD_DEPTH, newTop));
-  
-  const deltaTop = newTop - currentTop;
-  const maxRise = LEVEL_MAX_RISE_RATE_M_S * dt_s;
-  const maxDrop = LEVEL_MAX_DROP_RATE_M_S * dt_s;
-  
-  if (deltaTop < 0) {
-    // Dropping
-    newTop = Math.max(newTop, currentTop - maxDrop);
+
+  // ========================================================================
+  // WITH ACTIVE LOSSES: Spatial mass balance
+  // ========================================================================
+
+  // The deepest active loss zone determines the lower boundary
+  const deepestLossZone = activeLossZones[0];
+  const deepestLossDepth = deepestLossZone.depth_m;
+
+  // Below deepest loss zone: Always full (DS fluid enters at TD, flows up)
+  // At loss zones: Fluid exits spatially
+  // Above highest loss zone: Calculate fluid top
+
+  // Total losses
+  const qLoss_total_m3s = activeLossZones.reduce((sum, z) => sum + to_m3s(z.Qloss_gpm || 0), 0);
+
+  // Net flow above the deepest loss zone
+  // If all fluid exits at losses, nothing reaches surface
+  const qReachingSurface = Math.max(0, qDS_m3s + qBO_m3s + qTF_m3s - qCML_m3s - qLoss_total_m3s);
+  const qNet_above = qReachingSurface - qOutSurface_m3s;
+
+  // Calculate new fluid top
+  let dV_above = qNet_above * dt_s;
+  let newTop = topDepthNow;
+
+  // If losses consume everything, fluid top should drop towards highest loss zone
+  if (qLoss_total_m3s >= (qDS_m3s + qBO_m3s + qTF_m3s - qCML_m3s)) {
+    // Find highest active loss zone
+    const highestLossZone = activeLossZones[activeLossZones.length - 1];
+    const targetTop = highestLossZone.depth_m;
+
+    // Move towards target
+    const deltaToTarget = targetTop - topDepthNow;
+    const moveRate = Math.min(LEVEL_MAX_DROP_RATE_M_S * dt_s, Math.abs(deltaToTarget));
+    newTop = topDepthNow + (deltaToTarget > 0 ? moveRate : -moveRate);
   } else {
-    // Rising
-    newTop = Math.min(newTop, currentTop + maxRise);
+    // Some fluid reaches surface, use volumetric balance
+    let guard = 0;
+    while (Math.abs(dV_above) > 1e-12 && guard++ < 4) {
+      const A = Math.max(areaAtDepthTop_(newTop), 1e-12);
+      const dH = dV_above / A;
+      const proposedTop = newTop - dH;
+
+      // Don't go below highest loss zone
+      const highestLossDepth = activeLossZones[activeLossZones.length - 1].depth_m;
+      newTop = Math.max(0, Math.min(proposedTop, TD_DEPTH));
+
+      if (newTop > highestLossDepth) {
+        newTop = proposedTop;
+        break;
+      } else {
+        newTop = highestLossDepth;
+        break;
+      }
+    }
+
+    // Rate limiting
+    const deltaTop = newTop - topDepthNow;
+    const maxChange = (deltaTop < 0 ? LEVEL_MAX_DROP_RATE_M_S : LEVEL_MAX_RISE_RATE_M_S) * dt_s;
+    newTop = topDepthNow + clamp(deltaTop, -maxChange, maxChange);
   }
-  
-  // Commit
-  LOSS_TOP_DEPTH_m = newTop;
-  if (typeof ANN_TOP_DEPTH_m !== 'undefined') ANN_TOP_DEPTH_m = newTop;
-  
+
+  LOSS_TOP_DEPTH_m = clamp(newTop, 0, TD_DEPTH);
+  if (typeof ANN_TOP_DEPTH_m !== 'undefined') ANN_TOP_DEPTH_m = LOSS_TOP_DEPTH_m;
+
   // Diagnostics
   if (typeof window !== 'undefined') {
-    const qResid_m3s = (qIn_m3s + qTopFill_m3s) - (qCML_m3s + qOutSurface_m3s + qLossActual_m3s) - (qComp_m3s + qStillNeeded_m3s);
-    window.qResid_gpm = qResid_m3s * GPM_PER_M3S;
+    window.qResid_gpm = qNet_above * GPM_PER_M3S;
+  }
+}
+
+// Helper functions for level solver
+function areaAtDepthTop_(d) {
+  if (d <= BOP_DEPTH) return A_riserAnn();
+  if (d <= SHOE_DEPTH) return A_casingAnn();
+  return A_openAnn();
+}
+
+function nextBoundaryAfter_(d, goingUp) {
+  if (goingUp) {
+    if (d > SHOE_DEPTH) return SHOE_DEPTH;
+    if (d > BOP_DEPTH) return BOP_DEPTH;
+    return 0;
+  } else {
+    if (d < BOP_DEPTH) return BOP_DEPTH;
+    if (d < SHOE_DEPTH) return SHOE_DEPTH;
+    return TD_DEPTH;
   }
 }
 
@@ -3576,9 +3794,63 @@ topfillBtn.mousePressed(() => {
 });
 xPos += 110;
 
+// ========== FORMATION FLUIDS UI ==========
+// Row 3: Formation fluids controls (below row 2)
+const rowY3 = rowY2 + 32;
+let xPos3 = 16;
+
+mkLabel("Form Fluids", xPos3, rowY3 - 14);
+const formFluidsBtn = createButton(formationFluidEnabled ? 'Kicks: ON' : 'Kicks: OFF')
+  .size(90, 22).position(xPos3, rowY3)
+  .style('background', '#ff6b6b').style('font-weight', 'bold');
+formFluidsBtn.mousePressed(() => {
+  formationFluidEnabled = !formationFluidEnabled;
+  formFluidsBtn.html(formationFluidEnabled ? 'Kicks: ON' : 'Kicks: OFF');
+});
+xPos3 += 100;
+
+mkLabel("Fluid Type", xPos3, rowY3 - 14);
+const formFluidTypeSelect = createSelect().position(xPos3, rowY3).size(90);
+formFluidTypeSelect.option('WATER');
+formFluidTypeSelect.option('OIL');
+formFluidTypeSelect.option('GAS');
+formFluidTypeSelect.option('BLACKOIL');
+formFluidTypeSelect.selected(formationFluidType);
+formFluidTypeSelect.changed(() => {
+  formationFluidType = formFluidTypeSelect.value();
+});
+xPos3 += 100;
+
+mkLabel("Influx Rate (gpm)", xPos3, rowY3 - 14);
+const formFluidRateInput = createInput(String(formationFluidRate_gpm), 'number')
+  .position(xPos3, rowY3).size(80);
+formFluidRateInput.input(() => {
+  formationFluidRate_gpm = Math.max(0, Number(formFluidRateInput.value()) || 0);
+});
+xPos3 += 90;
+
+mkLabel("Influx Depth (m)", xPos3, rowY3 - 14);
+const formFluidDepthInput = createInput(String(formationFluidDepth_m), 'number')
+  .position(xPos3, rowY3).size(80);
+formFluidDepthInput.input(() => {
+  formationFluidDepth_m = Math.max(BOP_DEPTH, Math.min(TD_DEPTH, Number(formFluidDepthInput.value()) || 4500));
+});
+xPos3 += 90;
+
+mkLabel("Migration Model", xPos3, rowY3 - 14);
+const migrationModelSelect = createSelect().position(xPos3, rowY3).size(140);
+migrationModelSelect.option('SHUTIN');
+migrationModelSelect.option('HARMATHY');
+migrationModelSelect.option('MODIFIED_HARMATHY');
+migrationModelSelect.selected(formationFluidMigrationModel);
+migrationModelSelect.changed(() => {
+  formationFluidMigrationModel = migrationModelSelect.value();
+});
+xPos3 += 150;
+
 // ========== DIAGNOSTIC LOGGING BUTTONS ==========
-mkLabel("Diagnostic Log", xPos, rowY2 - 14);
-logStartBtn = createButton('START').size(70, 22).position(xPos, rowY2)
+mkLabel("Diagnostic Log", xPos3, rowY3 - 14);
+logStartBtn = createButton('START').size(70, 22).position(xPos3, rowY3)
   .style('background', '#4ade80').style('font-weight', 'bold');
 logStartBtn.mousePressed(() => {
   diagnosticLog.recording = true;
@@ -3589,7 +3861,7 @@ logStartBtn.mousePressed(() => {
   logStopBtn.removeAttribute('disabled');
 });
 
-logStopBtn = createButton('STOP').size(70, 22).position(xPos + 75, rowY2)
+logStopBtn = createButton('STOP').size(70, 22).position(xPos3 + 75, rowY3)
   .style('background', '#f87171').style('font-weight', 'bold');
 logStopBtn.attribute('disabled', '');
 logStopBtn.mousePressed(() => {
@@ -3599,7 +3871,7 @@ logStopBtn.mousePressed(() => {
   logStartBtn.removeAttribute('disabled');
 });
 
-logDownloadBtn = createButton('SAVE').size(70, 22).position(xPos + 150, rowY2)
+logDownloadBtn = createButton('SAVE').size(70, 22).position(xPos3 + 150, rowY3)
   .style('background', '#60a5fa').style('font-weight', 'bold');
 logDownloadBtn.attribute('disabled', '');
 logDownloadBtn.mousePressed(() => {
@@ -3676,6 +3948,8 @@ logDownloadBtn.mousePressed(() => {
   buildLossesUI();
 buildDiagnosticsUI();
 
+  // Initialize formation fluid cells
+  initializeFormationFluidCells();
 }
 
 function buildGelAndGeometryUI(x, y){
@@ -4007,6 +4281,11 @@ if (MPD_ON) updateChokeFromFO();
 // 9. Advect fluids
 stepAdvection();
 
+// 9b. Update formation fluid migration (kicks)
+if (formationFluidEnabled) {
+  updateFormationFluidMigration(dt_frame);
+}
+
 // 10. Gravity settling
 gravityDensitySwap();
 
@@ -4132,6 +4411,72 @@ for (let i = 0; i < N_BELOW; i++) {
   fill(hue, 70, 70, 210);
   if (wLeftAnn > 0) rect(xLeftAnn, yTop, wLeftAnn, yBot - yTop);
   if (wRightAnn > 0) rect(xRightAnn, yTop, wRightAnn, yBot - yTop);
+}
+
+// ===== FORMATION FLUIDS VISUALIZATION (LEFT SIDE) =====
+if (formationFluidEnabled) {
+  const formFluidBarX = well.x - 35; // Left of well
+  const formFluidBarW = 18;
+
+  // Draw background bar
+  stroke(0, 0, 30); strokeWeight(1); fill(0, 0, 10, 150);
+  rect(formFluidBarX, mapDepthToY(BOP_DEPTH), formFluidBarW, mapDepthToY(TD_DEPTH) - mapDepthToY(BOP_DEPTH), 3);
+
+  // Draw formation fluid cells
+  for (let i = 0; i < N_BELOW; i++) {
+    const dTop_m = BOP_DEPTH + i * CELL_M;
+    const dBot_m = Math.min(BOP_DEPTH + (i + 1) * CELL_M, TD_DEPTH);
+
+    const gasAmt = gasPhaseFrom_below[i] || 0;
+    const oilAmt = oilPhaseFrom_below[i] || 0;
+    const waterAmt = waterPhaseFrom_below[i] || 0;
+    const totalFormFluid = gasAmt + oilAmt + waterAmt;
+
+    if (totalFormFluid > 0.01) {
+      const yTop = mapDepthToY(dTop_m);
+      const yBot = mapDepthToY(dBot_m);
+      const cellH = yBot - yTop;
+
+      // Stack formation fluids (gas on top, then oil, then water)
+      let yOffset = 0;
+
+      // Gas (lightest, rises to top)
+      if (gasAmt > 0.01) {
+        const gasH = cellH * (gasAmt / totalFormFluid);
+        const gasColor = FORMATION_FLUID_TYPES.GAS.color;
+        noStroke(); fill(gasColor[0], gasColor[1], gasColor[2], 220);
+        rect(formFluidBarX + 2, yTop + yOffset, formFluidBarW - 4, gasH);
+        yOffset += gasH;
+      }
+
+      // Oil (medium density)
+      if (oilAmt > 0.01) {
+        const oilH = cellH * (oilAmt / totalFormFluid);
+        const oilColor = formationFluidType === 'BLACKOIL'
+          ? FORMATION_FLUID_TYPES.BLACKOIL.color
+          : FORMATION_FLUID_TYPES.OIL.color;
+        noStroke(); fill(oilColor[0], oilColor[1], oilColor[2], 220);
+        rect(formFluidBarX + 2, yTop + yOffset, formFluidBarW - 4, oilH);
+        yOffset += oilH;
+      }
+
+      // Water (heaviest, sinks to bottom)
+      if (waterAmt > 0.01) {
+        const waterH = cellH * (waterAmt / totalFormFluid);
+        const waterColor = FORMATION_FLUID_TYPES.WATER.color;
+        noStroke(); fill(waterColor[0], waterColor[1], waterColor[2], 220);
+        rect(formFluidBarX + 2, yTop + yOffset, formFluidBarW - 4, waterH);
+      }
+    }
+  }
+
+  // Label
+  push();
+  translate(formFluidBarX + formFluidBarW/2, (mapDepthToY(BOP_DEPTH) + mapDepthToY(TD_DEPTH))/2);
+  rotate(-HALF_PI);
+  fill(0, 0, 90); textSize(10); textAlign(CENTER, CENTER);
+  text("Formation Fluids", 0, 0);
+  pop();
 }
 
   // ===== DRY OVERLAYS & LABELS (UNIFIED WHEN EQUAL) =====
