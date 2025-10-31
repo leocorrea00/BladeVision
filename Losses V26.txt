@@ -101,10 +101,14 @@ const FORMATION_FLUID_TYPES = {
 let formationFluidEnabled = false;
 let formationFluidType = 'WATER';
 let formationFluidDepth_m = 4500; // Depth where kick enters
-let formationFluidRate_gpm = 0; // Influx rate
+let formationFluidRate_gpm = 0; // Influx rate (manual mode)
 let formationFluidVolume_bbl = 0; // Total volume entered
 let formationFluidFront_m = TD_DEPTH; // Current front position
 let formationFluidMigrationModel = 'SHUTIN'; // 'SHUTIN', 'HARMATHY', 'MODIFIED_HARMATHY'
+let kickMode = 'MANUAL'; // 'MANUAL' or 'PRESSURE_DRIVEN'
+let porePressure_psi = 7000; // Formation pore pressure
+let permeability_mD = 100; // Formation permeability (millidarcys)
+let productivityIndex_gpm_psi = 0.5; // Productivity index (gpm/psi)
 
 // Track formation fluid in cells (parallel to annulus grids)
 let formationFluidCells_below = []; // Formation fluid fraction in each cell below BOP
@@ -374,6 +378,12 @@ let uiLosses = {
   help: null
 };
 let uiDiag = { root:null, text:null };
+let uiKicks = {
+  root: null, title: null, toggleBtn: null, modeBtn: null,
+  fluidTypeSelect: null, migrationModelSelect: null,
+  manualRateInput: null, depthInput: null,
+  porePressureInput: null, permeabilityInput: null, piInput: null
+};
 
 
 
@@ -401,6 +411,16 @@ function lossesUIPosition() {
   const yBase = (typeof rheoFrameY!=='undefined' && typeof rheoFrameH!=='undefined')
                   ? (rheoFrameY + rheoFrameH + 16) : (height - 200);
   const y = Math.min(height - 180, Math.max(20, yBase));
+  return { x, y };
+}
+
+// Helper to place Kicks UI to the right of Diagnostics UI
+function kicksUIPosition() {
+  const lossPos = lossesUIPosition();
+  const diagWidth = 300;  // Width of diagnostics panel
+  const spacing = 20;
+  const x = lossPos.x + 430 + diagWidth + spacing;  // Losses width (430) + Diagnostics width + spacing
+  const y = lossPos.y;
   return { x, y };
 }
 
@@ -1066,13 +1086,26 @@ function calculateMigrationVelocity_m_s(fluidType, pressure_psi, mudWeight_ppg) 
 }
 
 function updateFormationFluidMigration(dt_s) {
-  if (!formationFluidEnabled || formationFluidRate_gpm <= 0) return;
+  if (!formationFluidEnabled) return;
 
   const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
   if (!fluidProps) return;
 
+  // Calculate influx rate based on mode
+  let influxRate_gpm = 0;
+  if (kickMode === 'MANUAL') {
+    influxRate_gpm = formationFluidRate_gpm;
+  } else if (kickMode === 'PRESSURE_DRIVEN') {
+    // Calculate BHP at kick depth
+    const BHP_psi = pressureAtDepth(formationFluidDepth_m);
+    const deltaP = Math.max(0, porePressure_psi - BHP_psi);
+    influxRate_gpm = productivityIndex_gpm_psi * deltaP;
+  }
+
+  if (influxRate_gpm <= 0) return;
+
   // Add formation fluid influx at specified depth
-  const influx_m3s = formationFluidRate_gpm / 15850.323;
+  const influx_m3s = influxRate_gpm / 15850.323;
   const influx_volume_m3 = influx_m3s * dt_s;
 
   // Determine which cell the influx enters and add to appropriate phase array
@@ -3841,63 +3874,9 @@ topfillBtn.mousePressed(() => {
 });
 xPos += 110;
 
-// ========== FORMATION FLUIDS UI ==========
-// Row 3: Formation fluids controls (below row 2)
-const rowY3 = rowY2 + 32;
-let xPos3 = 16;
-
-mkLabel("Form Fluids", xPos3, rowY3 - 14);
-const formFluidsBtn = createButton(formationFluidEnabled ? 'Kicks: ON' : 'Kicks: OFF')
-  .size(90, 22).position(xPos3, rowY3)
-  .style('background', '#ff6b6b').style('font-weight', 'bold');
-formFluidsBtn.mousePressed(() => {
-  formationFluidEnabled = !formationFluidEnabled;
-  formFluidsBtn.html(formationFluidEnabled ? 'Kicks: ON' : 'Kicks: OFF');
-});
-xPos3 += 100;
-
-mkLabel("Fluid Type", xPos3, rowY3 - 14);
-const formFluidTypeSelect = createSelect().position(xPos3, rowY3).size(90);
-formFluidTypeSelect.option('WATER');
-formFluidTypeSelect.option('OIL');
-formFluidTypeSelect.option('GAS');
-formFluidTypeSelect.option('BLACKOIL');
-formFluidTypeSelect.selected(formationFluidType);
-formFluidTypeSelect.changed(() => {
-  formationFluidType = formFluidTypeSelect.value();
-});
-xPos3 += 100;
-
-mkLabel("Influx Rate (gpm)", xPos3, rowY3 - 14);
-const formFluidRateInput = createInput(String(formationFluidRate_gpm), 'number')
-  .position(xPos3, rowY3).size(80);
-formFluidRateInput.input(() => {
-  formationFluidRate_gpm = Math.max(0, Number(formFluidRateInput.value()) || 0);
-});
-xPos3 += 90;
-
-mkLabel("Influx Depth (m)", xPos3, rowY3 - 14);
-const formFluidDepthInput = createInput(String(formationFluidDepth_m), 'number')
-  .position(xPos3, rowY3).size(80);
-formFluidDepthInput.input(() => {
-  formationFluidDepth_m = Math.max(BOP_DEPTH, Math.min(TD_DEPTH, Number(formFluidDepthInput.value()) || 4500));
-});
-xPos3 += 90;
-
-mkLabel("Migration Model", xPos3, rowY3 - 14);
-const migrationModelSelect = createSelect().position(xPos3, rowY3).size(140);
-migrationModelSelect.option('SHUTIN');
-migrationModelSelect.option('HARMATHY');
-migrationModelSelect.option('MODIFIED_HARMATHY');
-migrationModelSelect.selected(formationFluidMigrationModel);
-migrationModelSelect.changed(() => {
-  formationFluidMigrationModel = migrationModelSelect.value();
-});
-xPos3 += 150;
-
 // ========== DIAGNOSTIC LOGGING BUTTONS ==========
-mkLabel("Diagnostic Log", xPos3, rowY3 - 14);
-logStartBtn = createButton('START').size(70, 22).position(xPos3, rowY3)
+mkLabel("Diagnostic Log", xPos, rowY2 - 14);
+logStartBtn = createButton('START').size(70, 22).position(xPos, rowY2)
   .style('background', '#4ade80').style('font-weight', 'bold');
 logStartBtn.mousePressed(() => {
   diagnosticLog.recording = true;
@@ -3908,7 +3887,7 @@ logStartBtn.mousePressed(() => {
   logStopBtn.removeAttribute('disabled');
 });
 
-logStopBtn = createButton('STOP').size(70, 22).position(xPos3 + 75, rowY3)
+logStopBtn = createButton('STOP').size(70, 22).position(xPos + 75, rowY2)
   .style('background', '#f87171').style('font-weight', 'bold');
 logStopBtn.attribute('disabled', '');
 logStopBtn.mousePressed(() => {
@@ -3918,7 +3897,7 @@ logStopBtn.mousePressed(() => {
   logStartBtn.removeAttribute('disabled');
 });
 
-logDownloadBtn = createButton('SAVE').size(70, 22).position(xPos3 + 150, rowY3)
+logDownloadBtn = createButton('SAVE').size(70, 22).position(xPos + 150, rowY2)
   .style('background', '#60a5fa').style('font-weight', 'bold');
 logDownloadBtn.attribute('disabled', '');
 logDownloadBtn.mousePressed(() => {
@@ -3994,6 +3973,7 @@ logDownloadBtn.mousePressed(() => {
   
   buildLossesUI();
 buildDiagnosticsUI();
+buildKicksUI();
 
   // Initialize formation fluid cells
   initializeFormationFluidCells();
@@ -5642,7 +5622,162 @@ function updateDiagnosticsUI(dt_s){
   );
 }
 
+// ------------------------- Build Kicks UI -------------------------
+function buildKicksUI() {
+  const pos = kicksUIPosition();
 
+  uiKicks.root = createDiv('').position(pos.x, pos.y).style('padding', '8px')
+    .style('border', '1px solid rgba(255,100,100,0.25)')
+    .style('border-radius', '8px')
+    .style('background', 'rgba(40,0,0,0.25)')
+    .style('backdrop-filter', 'blur(6px)')
+    .style('color', '#EEE')
+    .style('width', '380px');
+
+  uiKicks.title = createDiv('Kicks (Formation Fluids)').parent(uiKicks.root)
+    .style('font-weight', 'bold').style('margin-bottom', '6px').style('color', '#ff6b6b');
+
+  // Toggle button
+  uiKicks.toggleBtn = createButton(formationFluidEnabled ? 'Kicks: ON' : 'Kicks: OFF')
+    .parent(uiKicks.root)
+    .style('background', formationFluidEnabled ? '#ff6b6b' : '#444')
+    .style('font-weight', 'bold')
+    .mousePressed(() => {
+      formationFluidEnabled = !formationFluidEnabled;
+      uiKicks.toggleBtn.html(formationFluidEnabled ? 'Kicks: ON' : 'Kicks: OFF');
+      uiKicks.toggleBtn.style('background', formationFluidEnabled ? '#ff6b6b' : '#444');
+    });
+
+  // Mode button
+  uiKicks.modeBtn = createButton(kickMode === 'MANUAL' ? 'Mode: Manual' : 'Mode: Pressure-Driven')
+    .parent(uiKicks.root)
+    .style('margin-left', '10px')
+    .mousePressed(() => {
+      kickMode = (kickMode === 'MANUAL') ? 'PRESSURE_DRIVEN' : 'MANUAL';
+      uiKicks.modeBtn.html(kickMode === 'MANUAL' ? 'Mode: Manual' : 'Mode: Pressure-Driven');
+      refreshKicksUI();
+    });
+
+  // Common parameters (always visible)
+  createDiv('').parent(uiKicks.root).style('margin-top', '12px')
+    .html('<div style="font-size:12px;opacity:0.8">Depth & Fluid Type:</div>');
+
+  const commonRow = createDiv('').parent(uiKicks.root)
+    .style('display', 'grid')
+    .style('grid-template-columns', '1fr 1fr')
+    .style('gap', '8px')
+    .style('margin-top', '6px');
+
+  const depthLabel = createDiv('').parent(commonRow).html('<label style="font-size:11px">Depth (m):</label>');
+  uiKicks.depthInput = createInput(String(formationFluidDepth_m), 'number').parent(depthLabel);
+  styleKicksInput(uiKicks.depthInput);
+  uiKicks.depthInput.input(() => {
+    formationFluidDepth_m = Math.max(BOP_DEPTH, Math.min(TD_DEPTH, Number(uiKicks.depthInput.value()) || 4500));
+  });
+
+  const fluidLabel = createDiv('').parent(commonRow).html('<label style="font-size:11px">Fluid Type:</label>');
+  uiKicks.fluidTypeSelect = createSelect().parent(fluidLabel);
+  uiKicks.fluidTypeSelect.option('WATER');
+  uiKicks.fluidTypeSelect.option('OIL');
+  uiKicks.fluidTypeSelect.option('GAS');
+  uiKicks.fluidTypeSelect.option('BLACKOIL');
+  uiKicks.fluidTypeSelect.selected(formationFluidType);
+  styleKicksInput(uiKicks.fluidTypeSelect);
+  uiKicks.fluidTypeSelect.changed(() => {
+    formationFluidType = uiKicks.fluidTypeSelect.value();
+  });
+
+  // Manual mode parameters
+  uiKicks.manualDiv = createDiv('').parent(uiKicks.root).style('margin-top', '12px');
+  createDiv('Manual Rate:').parent(uiKicks.manualDiv).style('font-size:12px').style('opacity','0.8');
+
+  const manualLabel = createDiv('').parent(uiKicks.manualDiv).style('margin-top', '6px')
+    .html('<label style="font-size:11px">Influx Rate (gpm):</label>');
+  uiKicks.manualRateInput = createInput(String(formationFluidRate_gpm), 'number').parent(manualLabel);
+  styleKicksInput(uiKicks.manualRateInput);
+  uiKicks.manualRateInput.input(() => {
+    formationFluidRate_gpm = Math.max(0, Number(uiKicks.manualRateInput.value()) || 0);
+  });
+
+  // Pressure-driven mode parameters
+  uiKicks.pressureDiv = createDiv('').parent(uiKicks.root).style('margin-top', '12px');
+  createDiv('Pressure-Driven Parameters:').parent(uiKicks.pressureDiv).style('font-size:12px').style('opacity','0.8');
+
+  const pressureGrid = createDiv('').parent(uiKicks.pressureDiv)
+    .style('display', 'grid')
+    .style('grid-template-columns', '1fr')
+    .style('gap', '8px')
+    .style('margin-top', '6px');
+
+  const ppLabel = createDiv('').parent(pressureGrid).html('<label style="font-size:11px">Pore Pressure (psi):</label>');
+  uiKicks.porePressureInput = createInput(String(porePressure_psi), 'number').parent(ppLabel);
+  styleKicksInput(uiKicks.porePressureInput);
+  uiKicks.porePressureInput.input(() => {
+    porePressure_psi = Math.max(0, Number(uiKicks.porePressureInput.value()) || 7000);
+  });
+
+  const piLabel = createDiv('').parent(pressureGrid).html('<label style="font-size:11px">Productivity Index (gpm/psi):</label>');
+  uiKicks.piInput = createInput(String(productivityIndex_gpm_psi), 'number').parent(piLabel);
+  styleKicksInput(uiKicks.piInput);
+  uiKicks.piInput.input(() => {
+    productivityIndex_gpm_psi = Math.max(0, Number(uiKicks.piInput.value()) || 0.5);
+  });
+
+  // Migration model
+  createDiv('').parent(uiKicks.root).style('margin-top', '12px')
+    .html('<div style="font-size:12px;opacity:0.8">Migration Model:</div>');
+
+  const migrationLabel = createDiv('').parent(uiKicks.root).style('margin-top', '6px')
+    .html('<label style="font-size:11px">Model:</label>');
+  uiKicks.migrationModelSelect = createSelect().parent(migrationLabel);
+  uiKicks.migrationModelSelect.option('SHUTIN');
+  uiKicks.migrationModelSelect.option('HARMATHY');
+  uiKicks.migrationModelSelect.option('MODIFIED_HARMATHY');
+  uiKicks.migrationModelSelect.selected(formationFluidMigrationModel);
+  styleKicksInput(uiKicks.migrationModelSelect);
+  uiKicks.migrationModelSelect.changed(() => {
+    formationFluidMigrationModel = uiKicks.migrationModelSelect.value();
+  });
+
+  // Help text
+  createDiv(
+    `<div style="margin-top:12px;font-size:10px;opacity:.7;line-height:1.3">
+      <b>Manual Mode:</b> Set influx rate directly (gpm).<br/>
+      <b>Pressure Mode:</b> Q = PI × (P<sub>pore</sub> - P<sub>BHP</sub>).<br/>
+      Triangle symbols on well & charts indicate kick depth.
+    </div>`
+  ).parent(uiKicks.root);
+
+  refreshKicksUI();
+}
+
+function styleKicksInput(inp) {
+  inp.style('background', 'rgba(255,255,255,0.07)')
+     .style('color', '#EEE')
+     .style('border', '1px solid rgba(255,100,100,0.2)')
+     .style('height', '22px')
+     .style('padding', '0 6px')
+     .style('border-radius', '4px')
+     .style('font-size', '11px')
+     .style('width', '100%');
+}
+
+function refreshKicksUI() {
+  if (!uiKicks.root) return;
+
+  // Show/hide divs based on mode
+  if (kickMode === 'MANUAL') {
+    uiKicks.manualDiv.show();
+    uiKicks.pressureDiv.hide();
+  } else {
+    uiKicks.manualDiv.hide();
+    uiKicks.pressureDiv.show();
+  }
+
+  // Update button text
+  uiKicks.modeBtn.html(kickMode === 'MANUAL' ? 'Mode: Manual' : 'Mode: Pressure-Driven');
+  uiKicks.toggleBtn.html(formationFluidEnabled ? 'Kicks: ON' : 'Kicks: OFF');
+}
 
 // --------- SIMPLE BADGES / ICONS ---------
 function drawBadge(x,y, line1, line2=""){
