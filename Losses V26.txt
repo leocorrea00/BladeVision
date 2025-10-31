@@ -5062,8 +5062,162 @@ if (cmlActive && lossActive && !topsDiffer) {
     textAlign(CENTER, CENTER);
   }
 }
-  
-  
+
+
+
+// ===== BOP INDICATOR =====
+// Draw BOP visual at BOP_DEPTH position
+if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
+  const yBOP_vis = mapDepthToY(BOP_DEPTH);
+  const bopWidth = well.w + 24; // Extends slightly beyond well
+  const bopHeight = 12;
+  const bopX = well.x - 12;
+
+  if (BOP_CLOSED) {
+    // Closed BOP - solid red rectangle
+    noStroke();
+    fill(0, 100, 85, 230); // Red in HSB
+    rect(bopX, yBOP_vis - bopHeight/2, bopWidth, bopHeight, 2);
+
+    // Label
+    fill(0, 0, 100); // White text
+    textSize(11);
+    textAlign(CENTER, CENTER);
+    text("BOP CLOSED", well.x + well.w/2, yBOP_vis);
+  } else {
+    // Open BOP - green outline
+    stroke(120, 80, 90, 230); // Green in HSB
+    strokeWeight(3);
+    noFill();
+    rect(bopX, yBOP_vis - bopHeight/2, bopWidth, bopHeight, 2);
+
+    // Label
+    noStroke();
+    fill(120, 80, 95); // Green text
+    textSize(11);
+    textAlign(CENTER, CENTER);
+    text("BOP OPEN", well.x + well.w/2, yBOP_vis);
+  }
+  textAlign(CENTER, CENTER); // Reset
+}
+
+// ===== CHOKE LINE VISUALIZATION (RIGHT SIDE) =====
+if (BOP_CLOSED && Q_CHOKE > 0) {
+  const chokeLineW = 10;
+  const chokeLineX = well.x + well.w + 16; // Right side of well
+  const yTop = well.y; // Surface
+  const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
+
+  // Color based on direction
+  let chokeHue, chokeSat, chokeBright;
+  if (CHOKE_DIRECTION === "UP") {
+    chokeHue = 200; chokeSat = 80; chokeBright = 90; // Blue
+  } else {
+    chokeHue = 30; chokeSat = 90; chokeBright = 90; // Orange
+  }
+
+  // Draw line pipe
+  stroke(chokeHue, chokeSat, chokeBright - 20, 200);
+  strokeWeight(2);
+  noFill();
+  rect(chokeLineX - chokeLineW/2, yTop, chokeLineW, yBot - yTop, 3);
+
+  // Fill with fluid color if flowing
+  noStroke();
+  fill(chokeHue, chokeSat, chokeBright, 180);
+  rect(chokeLineX - chokeLineW/2 + 1, yTop, chokeLineW - 2, yBot - yTop);
+
+  // Draw flow arrows
+  noFill();
+  stroke(chokeHue, chokeSat, 100, 255);
+  strokeWeight(2);
+  const numArrows = 3;
+  const arrowSpacing = (yBot - yTop) / (numArrows + 1);
+  for (let i = 1; i <= numArrows; i++) {
+    const arrowY = CHOKE_DIRECTION === "UP"
+      ? yBot - i * arrowSpacing
+      : yTop + i * arrowSpacing;
+    const arrowDir = CHOKE_DIRECTION === "UP" ? -1 : 1; // -1 = up, 1 = down
+    const arrowSize = 6;
+
+    // Arrow shaft
+    line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX, arrowY + arrowDir * arrowSize);
+
+    // Arrow head
+    line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX - 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+    line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX + 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+  }
+
+  // Label
+  push();
+  translate(chokeLineX + chokeLineW/2 + 12, (yTop + yBot)/2);
+  rotate(-HALF_PI);
+  noStroke();
+  fill(chokeHue, chokeSat, chokeBright);
+  textSize(10);
+  textAlign(CENTER, CENTER);
+  text(`CHOKE ${nf(Q_CHOKE, 0, 0)} gpm ${CHOKE_DIRECTION}`, 0, 0);
+  pop();
+}
+
+// ===== KILL LINE VISUALIZATION (RIGHT SIDE, NEXT TO CHOKE) =====
+if (BOP_CLOSED && Q_KILL > 0) {
+  const killLineW = 10;
+  const killLineX = well.x + well.w + 36; // Right of choke line
+  const yTop = well.y; // Surface
+  const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
+
+  // Color based on direction
+  let killHue, killSat, killBright;
+  if (KILL_DIRECTION === "UP") {
+    killHue = 200; killSat = 80; killBright = 90; // Blue
+  } else {
+    killHue = 30; killSat = 90; killBright = 90; // Orange
+  }
+
+  // Draw line pipe
+  stroke(killHue, killSat, killBright - 20, 200);
+  strokeWeight(2);
+  noFill();
+  rect(killLineX - killLineW/2, yTop, killLineW, yBot - yTop, 3);
+
+  // Fill with fluid color if flowing
+  noStroke();
+  fill(killHue, killSat, killBright, 180);
+  rect(killLineX - killLineW/2 + 1, yTop, killLineW - 2, yBot - yTop);
+
+  // Draw flow arrows
+  noFill();
+  stroke(killHue, killSat, 100, 255);
+  strokeWeight(2);
+  const numArrows = 3;
+  const arrowSpacing = (yBot - yTop) / (numArrows + 1);
+  for (let i = 1; i <= numArrows; i++) {
+    const arrowY = KILL_DIRECTION === "UP"
+      ? yBot - i * arrowSpacing
+      : yTop + i * arrowSpacing;
+    const arrowDir = KILL_DIRECTION === "UP" ? -1 : 1; // -1 = up, 1 = down
+    const arrowSize = 6;
+
+    // Arrow shaft
+    line(killLineX, arrowY - arrowDir * arrowSize, killLineX, arrowY + arrowDir * arrowSize);
+
+    // Arrow head
+    line(killLineX, arrowY - arrowDir * arrowSize, killLineX - 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+    line(killLineX, arrowY - arrowDir * arrowSize, killLineX + 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+  }
+
+  // Label
+  push();
+  translate(killLineX + killLineW/2 + 12, (yTop + yBot)/2);
+  rotate(-HALF_PI);
+  noStroke();
+  fill(killHue, killSat, killBright);
+  textSize(10);
+  textAlign(CENTER, CENTER);
+  text(`KILL ${nf(Q_KILL, 0, 0)} gpm ${KILL_DIRECTION}`, 0, 0);
+  pop();
+}
 
 // MPD RCD cap
 if (MPD_ON){
