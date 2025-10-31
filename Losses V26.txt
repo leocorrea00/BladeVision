@@ -128,6 +128,32 @@ let HYDRAULICS_MODEL = "Refined"; // "API" | "Refined"
 let FRICTION_MODE = "hydraulics"; // keep hydraulics by default
 let ACTIVE_RHEO_MODEL = "HB"; // "HB" | "PowerLaw" | "Bingham"
 let fitParams = { mu_p_Pa_s: null, tau_y_Pa: null, K_PL_Pa_s_n: null, n_PL: null, K_HB_Pa_s_n: null, n_HB: null, tau_y_HB_Pa: null };
+
+// ============================ BOP & WELL CONTROL =============================
+let BOP_CLOSED = false; // BOP state (open/closed)
+
+// Choke Line (runs from BOP to surface, parallel to riser)
+let CHOKE_LINE_ID_in = 3.0; // Inner diameter (inches)
+let CHOKE_LINE_ID_m = 0; // Converted to meters in setup
+let Q_CHOKE = 0; // gpm
+let CHOKE_DIRECTION = "UP"; // "UP" or "DOWN"
+let CHOKE_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
+let MW_CHOKE = 10.0; // ppg, choke line fluid
+let chokeGrid = []; // Fluid tracking grid (BOP to surface)
+let accChoke = 0; // Advection accumulator
+let levelDeficit_choke_m = 0; // Level deficit in choke line
+
+// Kill Line (runs from BOP to surface, parallel to riser)
+let KILL_LINE_ID_in = 3.0; // Inner diameter (inches)
+let KILL_LINE_ID_m = 0; // Converted to meters in setup
+let Q_KILL = 0; // gpm
+let KILL_DIRECTION = "UP"; // "UP" or "DOWN"
+let KILL_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
+let MW_KILL = 10.0; // ppg, kill line fluid
+let killGrid = []; // Fluid tracking grid (BOP to surface)
+let accKill = 0; // Advection accumulator
+let levelDeficit_kill_m = 0; // Level deficit in kill line
+
 // Fluids / flows
 let MW_DS = 9.5; // ppg, drillstring
 let MW_BO = 10.0; // ppg, booster line
@@ -2012,11 +2038,14 @@ function pressureAtDepth(d){
   // Friction
   const P_fric = frictionPsi_withCML_rheo(d);
 
-  // SBP (only when riser is FULL)
+  // SBP (only when riser is FULL and BOP OPEN)
   const riserFull = (fluidTop <= 0);
-  const P_sbp = (MPD_ON && riserFull) ? (CURRENT_SBP || 0) : 0;
+  const P_sbp = (MPD_ON && riserFull && !BOP_CLOSED) ? (CURRENT_SBP || 0) : 0;
 
-  const total = P_hydro + P_fric + P_sbp;
+  // BOP Line Contribution (when BOP closed and choke/kill lines flowing UP)
+  const P_bop_lines = bopLinePressureContribution();
+
+  const total = P_hydro + P_fric + P_sbp + P_bop_lines;
   return total;
 }
 
@@ -2038,6 +2067,69 @@ function boosterFrictionPsiLength(len_m){
   const { qBO } = flows_m3s();
   const pa_per_m = dPperM_booster(qBO);
   return (pa_per_m * Math.max(len_m, 0)) * PSI_PER_PASCAL;
+}
+
+// === CHOKE LINE FRICTION ===
+function chokeFrictionPsiLength(len_m, flowRate_m3s){
+  if (len_m <= 0 || flowRate_m3s <= 0) return 0;
+
+  // Get choke line properties
+  const D_m = CHOKE_LINE_ID_m || 0.076; // Default 3 inches
+  const { K, n, tauY } = getRheoForCalc();
+
+  // Average density from choke grid
+  const avgMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
+  const rho_kgm3 = avgMW * PPG_TO_KGM3;
+
+  // Calculate friction using rheology-aware model (pipe flow, no RPM)
+  const dpdm_Pa = dP_per_m_annulus_withRPM(flowRate_m3s, rho_kgm3, D_m, 0, K, n, tauY, 0); // Inner OD=0 for pipe
+  const PA_TO_PSI = 1.0 / 6894.757;
+  return dpdm_Pa * len_m * PA_TO_PSI;
+}
+
+// === KILL LINE FRICTION ===
+function killFrictionPsiLength(len_m, flowRate_m3s){
+  if (len_m <= 0 || flowRate_m3s <= 0) return 0;
+
+  // Get kill line properties
+  const D_m = KILL_LINE_ID_m || 0.076; // Default 3 inches
+  const { K, n, tauY } = getRheoForCalc();
+
+  // Average density from kill grid
+  const avgMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
+  const rho_kgm3 = avgMW * PPG_TO_KGM3;
+
+  // Calculate friction using rheology-aware model (pipe flow, no RPM)
+  const dpdm_Pa = dP_per_m_annulus_withRPM(flowRate_m3s, rho_kgm3, D_m, 0, K, n, tauY, 0); // Inner OD=0 for pipe
+  const PA_TO_PSI = 1.0 / 6894.757;
+  return dpdm_Pa * len_m * PA_TO_PSI;
+}
+
+// === BOP WELLBORE PRESSURE CONTRIBUTION FROM CHOKE/KILL LINES ===
+// When BOP is closed and lines flow UP, this pressure adds to BHP
+// When lines flow DOWN, this acts as pump pressure (SPP equivalent)
+function bopLinePressureContribution(){
+  if (!BOP_CLOSED) return 0;
+
+  let totalContribution = 0;
+
+  // Choke Line
+  if (CHOKE_DIRECTION === "UP" && Q_CHOKE > 0) {
+    const qChoke_m3s = Q_CHOKE / 15850.323;
+    const friction_psi = chokeFrictionPsiLength(BOP_DEPTH, qChoke_m3s);
+    // When flowing UP: Friction + Applied Choke Pressure adds to BHP
+    totalContribution += friction_psi + CHOKE_PRESSURE_psi;
+  }
+
+  // Kill Line
+  if (KILL_DIRECTION === "UP" && Q_KILL > 0) {
+    const qKill_m3s = Q_KILL / 15850.323;
+    const friction_psi = killFrictionPsiLength(BOP_DEPTH, qKill_m3s);
+    // When flowing UP: Friction + Applied Kill Pressure adds to BHP
+    totalContribution += friction_psi + KILL_PRESSURE_psi;
+  }
+
+  return totalContribution;
 }
 // --- Pump SPP helpers should also use the rheology-aware friction ---
 function sppAtLevel(lvl_m){
@@ -3943,6 +4035,12 @@ function setup(){
   ds_OD_m       = ds_OD_in       * 0.0254;
   ds_ID_m       = ds_ID_in       * 0.0254;
   booster_ID_m  = booster_ID_in  * 0.0254;
+  CHOKE_LINE_ID_m = CHOKE_LINE_ID_in * 0.0254;
+  KILL_LINE_ID_m  = KILL_LINE_ID_in  * 0.0254;
+
+  // Initialize choke and kill line grids (BOP to surface, same length as riser)
+  chokeGrid = new Array(N_ABV).fill(MW_CHOKE);
+  killGrid = new Array(N_ABV).fill(MW_KILL);
 
   // ========== Top: 2 compact rows ==========
   const rowY1 = 75;
@@ -4199,6 +4297,21 @@ function buildGelAndGeometryUI(x, y){
   mkLabel("DS ID", x+360, y2-16);
   const dsiIn = createInput(String(ds_ID_in),'number').position(x+360, y2).size(70);
   dsiIn.input(() => { ds_ID_in = num(dsiIn.value()); ds_ID_m = ds_ID_in * 0.0254; });
+
+  // === BOP WELL CONTROL LINES (Booster, Choke, Kill) ===
+  y2 += 40;
+  mkLabel("Booster ID (in)", x+360, y2-16);
+  const boosterIdIn = createInput(String(booster_ID_in),'number').position(x+360, y2).size(70);
+  boosterIdIn.input(() => { booster_ID_in = num(boosterIdIn.value()); booster_ID_m = booster_ID_in * 0.0254; });
+
+  mkLabel("Choke ID (in)", x+500, y2-16);
+  const chokeIdIn = createInput(String(CHOKE_LINE_ID_in),'number').position(x+500, y2).size(70);
+  chokeIdIn.input(() => { CHOKE_LINE_ID_in = num(chokeIdIn.value()); CHOKE_LINE_ID_m = CHOKE_LINE_ID_in * 0.0254; });
+
+  y2 += 40;
+  mkLabel("Kill ID (in)", x+360, y2-16);
+  const killIdIn = createInput(String(KILL_LINE_ID_in),'number').position(x+360, y2).size(70);
+  killIdIn.input(() => { KILL_LINE_ID_in = num(killIdIn.value()); KILL_LINE_ID_m = KILL_LINE_ID_in * 0.0254; });
 }
 
 if (typeof window.__qAnnAbove_m3s !== 'number' || typeof window.__qAnnBelow_m3s !== 'number') {
