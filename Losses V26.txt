@@ -111,6 +111,10 @@ let formationFluidCells_below = []; // Formation fluid fraction in each cell bel
 let formationFluidCells_above = []; // Formation fluid fraction in each cell above BOP
 let gasPhaseFrom_below = []; // For black oil dissociation tracking
 let gasPhaseFrom_above = [];
+let oilPhaseFrom_below = []; // Oil phase tracking
+let oilPhaseFrom_above = [];
+let waterPhaseFrom_below = []; // Water phase tracking
+let waterPhaseFrom_above = [];
 
 // ============================ GLOBAL STATE =============================
 let HYDRAULICS_MODEL = "Refined"; // "API" | "Refined"
@@ -1017,6 +1021,10 @@ function initializeFormationFluidCells() {
   formationFluidCells_above = new Array(N_ABV).fill(0);
   gasPhaseFrom_below = new Array(N_BELOW).fill(0);
   gasPhaseFrom_above = new Array(N_ABV).fill(0);
+  oilPhaseFrom_below = new Array(N_BELOW).fill(0);
+  oilPhaseFrom_above = new Array(N_ABV).fill(0);
+  waterPhaseFrom_below = new Array(N_BELOW).fill(0);
+  waterPhaseFrom_above = new Array(N_ABV).fill(0);
 }
 
 function calculateMigrationVelocity_m_s(fluidType, pressure_psi, mudWeight_ppg) {
@@ -1067,22 +1075,38 @@ function updateFormationFluidMigration(dt_s) {
   const influx_m3s = formationFluidRate_gpm / 15850.323;
   const influx_volume_m3 = influx_m3s * dt_s;
 
-  // Determine which cell the influx enters
+  // Determine which cell the influx enters and add to appropriate phase array
   if (formationFluidDepth_m >= BOP_DEPTH) {
     // Below BOP
     const cellIndex = Math.floor((formationFluidDepth_m - BOP_DEPTH) / CELL_M);
-    if (cellIndex >= 0 && cellIndex < formationFluidCells_below.length) {
+    if (cellIndex >= 0 && cellIndex < N_BELOW) {
       const cellVolume = areaAtDepthTop_(formationFluidDepth_m) * CELL_M;
-      formationFluidCells_below[cellIndex] += influx_volume_m3 / cellVolume;
-      formationFluidCells_below[cellIndex] = Math.min(formationFluidCells_below[cellIndex], 1.0);
+      const fraction = influx_volume_m3 / Math.max(cellVolume, 1e-9);
+
+      // Add to appropriate phase array based on fluid type
+      if (formationFluidType === 'GAS') {
+        gasPhaseFrom_below[cellIndex] = Math.min((gasPhaseFrom_below[cellIndex] || 0) + fraction, 1.0);
+      } else if (formationFluidType === 'OIL' || formationFluidType === 'BLACKOIL') {
+        oilPhaseFrom_below[cellIndex] = Math.min((oilPhaseFrom_below[cellIndex] || 0) + fraction, 1.0);
+      } else if (formationFluidType === 'WATER') {
+        waterPhaseFrom_below[cellIndex] = Math.min((waterPhaseFrom_below[cellIndex] || 0) + fraction, 1.0);
+      }
     }
   } else {
     // Above BOP (riser)
     const cellIndex = Math.floor(formationFluidDepth_m / CELL_M);
-    if (cellIndex >= 0 && cellIndex < formationFluidCells_above.length) {
+    if (cellIndex >= 0 && cellIndex < N_ABV) {
       const cellVolume = areaAtDepthTop_(formationFluidDepth_m) * CELL_M;
-      formationFluidCells_above[cellIndex] += influx_volume_m3 / cellVolume;
-      formationFluidCells_above[cellIndex] = Math.min(formationFluidCells_above[cellIndex], 1.0);
+      const fraction = influx_volume_m3 / Math.max(cellVolume, 1e-9);
+
+      // Add to appropriate phase array based on fluid type
+      if (formationFluidType === 'GAS') {
+        gasPhaseFrom_above[cellIndex] = Math.min((gasPhaseFrom_above[cellIndex] || 0) + fraction, 1.0);
+      } else if (formationFluidType === 'OIL' || formationFluidType === 'BLACKOIL') {
+        oilPhaseFrom_above[cellIndex] = Math.min((oilPhaseFrom_above[cellIndex] || 0) + fraction, 1.0);
+      } else if (formationFluidType === 'WATER') {
+        waterPhaseFrom_above[cellIndex] = Math.min((waterPhaseFrom_above[cellIndex] || 0) + fraction, 1.0);
+      }
     }
   }
 
@@ -1092,35 +1116,57 @@ function updateFormationFluidMigration(dt_s) {
   const migrationVelocity = calculateMigrationVelocity_m_s(formationFluidType, avgPressure, avgMW);
 
   // Move formation fluid upward through cells (migration)
-  if (migrationVelocity > 0 && formationFluidMigrationModel !== 'SHUTIN') {
+  if (migrationVelocity > 0.1 && formationFluidMigrationModel !== 'SHUTIN') {
     const migrationDist_m = migrationVelocity * dt_s;
     const cellsMoved = Math.floor(migrationDist_m / CELL_M);
 
-    // Shift cells upward (simplified - needs proper advection integration)
-    if (cellsMoved > 0) {
-      for (let i = 0; i < formationFluidCells_below.length - cellsMoved; i++) {
-        formationFluidCells_below[i] = formationFluidCells_below[i + cellsMoved];
+    // Shift each phase array upward with different velocities
+    if (cellsMoved > 0 && cellsMoved < N_BELOW) {
+      // Gas migration (fastest - full velocity)
+      for (let i = 0; i < N_BELOW - cellsMoved; i++) {
+        gasPhaseFrom_below[i] = gasPhaseFrom_below[i + cellsMoved] || 0;
       }
-      // Clear bottom cells
-      for (let i = Math.max(0, formationFluidCells_below.length - cellsMoved); i < formationFluidCells_below.length; i++) {
-        formationFluidCells_below[i] = 0;
+      for (let i = Math.max(0, N_BELOW - cellsMoved); i < N_BELOW; i++) {
+        gasPhaseFrom_below[i] = 0;
+      }
+
+      // Oil migration (medium speed - 70% of gas velocity)
+      const oilCellsMoved = Math.max(1, Math.floor(cellsMoved * 0.7));
+      if (oilCellsMoved > 0 && oilCellsMoved < N_BELOW) {
+        for (let i = 0; i < N_BELOW - oilCellsMoved; i++) {
+          oilPhaseFrom_below[i] = oilPhaseFrom_below[i + oilCellsMoved] || 0;
+        }
+        for (let i = Math.max(0, N_BELOW - oilCellsMoved); i < N_BELOW; i++) {
+          oilPhaseFrom_below[i] = 0;
+        }
+      }
+
+      // Water migration (slowest - 40% of gas velocity)
+      const waterCellsMoved = Math.max(1, Math.floor(cellsMoved * 0.4));
+      if (waterCellsMoved > 0 && waterCellsMoved < N_BELOW) {
+        for (let i = 0; i < N_BELOW - waterCellsMoved; i++) {
+          waterPhaseFrom_below[i] = waterPhaseFrom_below[i + waterCellsMoved] || 0;
+        }
+        for (let i = Math.max(0, N_BELOW - waterCellsMoved); i < N_BELOW; i++) {
+          waterPhaseFrom_below[i] = 0;
+        }
       }
     }
   }
 
   // Black oil dissociation check
   if (formationFluidType === 'BLACKOIL' && fluidProps.bubblePoint_psi) {
-    for (let i = 0; i < formationFluidCells_below.length; i++) {
-      if (formationFluidCells_below[i] > 0) {
+    for (let i = 0; i < N_BELOW; i++) {
+      const oilAmt = oilPhaseFrom_below[i] || 0;
+      if (oilAmt > 0.001) {
         const depth = BOP_DEPTH + i * CELL_M;
         const P = pressureAtDepth(depth);
 
         // If pressure drops below bubble point, oil releases gas
         if (P < fluidProps.bubblePoint_psi) {
-          const oilFraction = formationFluidCells_below[i];
-          const gasReleased = oilFraction * 0.2; // 20% gas release (simplified)
-          gasPhaseFrom_below[i] += gasReleased;
-          formationFluidCells_below[i] -= gasReleased;
+          const gasReleased = oilAmt * 0.2; // 20% gas release (simplified)
+          gasPhaseFrom_below[i] = (gasPhaseFrom_below[i] || 0) + gasReleased;
+          oilPhaseFrom_below[i] = Math.max(0, oilAmt - gasReleased);
         }
       }
     }
@@ -1129,10 +1175,11 @@ function updateFormationFluidMigration(dt_s) {
   // Update total volume
   formationFluidVolume_bbl += (formationFluidRate_gpm * dt_s) / 42; // Convert to barrels
 
-  // Update front position (find highest cell with formation fluid)
+  // Update front position (find highest cell with any formation fluid)
   let highestCell = -1;
-  for (let i = 0; i < formationFluidCells_below.length; i++) {
-    if (formationFluidCells_below[i] > 0.01) {
+  for (let i = 0; i < N_BELOW; i++) {
+    const total = (gasPhaseFrom_below[i] || 0) + (oilPhaseFrom_below[i] || 0) + (waterPhaseFrom_below[i] || 0);
+    if (total > 0.01) {
       highestCell = i;
       break;
     }
