@@ -1555,6 +1555,84 @@ function stepAdvection(){
       accCML -= CELL_M;
     }
   }
+
+  // ===============================
+  // 8) CHOKE LINE ADVECTION (BOP to Surface)
+  // ===============================
+  if (BOP_CLOSED && Q_CHOKE > 0) {
+    const qChoke_m3s = Q_CHOKE / 15850.323;
+    const A_choke = Math.PI * CHOKE_LINE_ID_m * CHOKE_LINE_ID_m / 4;
+    const v_choke = qChoke_m3s / Math.max(A_choke, 1e-12);
+    const chokeStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_choke / vref);
+
+    if (CHOKE_DIRECTION === "DOWN") {
+      // Fluid flows DOWN: Surface → BOP → Below-BOP annulus
+      // Grid: chokeGrid[0] = surface (inlet), chokeGrid[N_ABV-1] = BOP (outlet)
+      accChoke += chokeStep_m;
+      while (accChoke >= CELL_M) {
+        // Shift DOWN (surface to BOP)
+        for (let i = chokeGrid.length - 1; i > 0; i--) {
+          chokeGrid[i] = chokeGrid[i - 1];
+        }
+        chokeGrid[0] = MW_CHOKE; // Fresh fluid enters at surface
+        accChoke -= CELL_M;
+      }
+    } else if (CHOKE_DIRECTION === "UP") {
+      // Fluid flows UP: Below-BOP annulus → BOP → Surface
+      // Grid: chokeGrid[N_ABV-1] = BOP (inlet), chokeGrid[0] = surface (outlet)
+      accChoke += chokeStep_m;
+      while (accChoke >= CELL_M) {
+        // Shift UP (BOP to surface)
+        for (let i = 0; i < chokeGrid.length - 1; i++) {
+          chokeGrid[i] = chokeGrid[i + 1];
+        }
+        // Fluid entering from below-BOP annulus at BOP depth
+        // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
+        const sourceMW = annBelowGrid[0] || MW_DS;
+        chokeGrid[chokeGrid.length - 1] = sourceMW;
+        accChoke -= CELL_M;
+      }
+    }
+  }
+
+  // ===============================
+  // 9) KILL LINE ADVECTION (BOP to Surface)
+  // ===============================
+  if (BOP_CLOSED && Q_KILL > 0) {
+    const qKill_m3s = Q_KILL / 15850.323;
+    const A_kill = Math.PI * KILL_LINE_ID_m * KILL_LINE_ID_m / 4;
+    const v_kill = qKill_m3s / Math.max(A_kill, 1e-12);
+    const killStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_kill / vref);
+
+    if (KILL_DIRECTION === "DOWN") {
+      // Fluid flows DOWN: Surface → BOP → Below-BOP annulus
+      // Grid: killGrid[0] = surface (inlet), killGrid[N_ABV-1] = BOP (outlet)
+      accKill += killStep_m;
+      while (accKill >= CELL_M) {
+        // Shift DOWN (surface to BOP)
+        for (let i = killGrid.length - 1; i > 0; i--) {
+          killGrid[i] = killGrid[i - 1];
+        }
+        killGrid[0] = MW_KILL; // Fresh fluid enters at surface
+        accKill -= CELL_M;
+      }
+    } else if (KILL_DIRECTION === "UP") {
+      // Fluid flows UP: Below-BOP annulus → BOP → Surface
+      // Grid: killGrid[N_ABV-1] = BOP (inlet), killGrid[0] = surface (outlet)
+      accKill += killStep_m;
+      while (accKill >= CELL_M) {
+        // Shift UP (BOP to surface)
+        for (let i = 0; i < killGrid.length - 1; i++) {
+          killGrid[i] = killGrid[i + 1];
+        }
+        // Fluid entering from below-BOP annulus at BOP depth
+        // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
+        const sourceMW = annBelowGrid[0] || MW_DS;
+        killGrid[killGrid.length - 1] = sourceMW;
+        accKill -= CELL_M;
+      }
+    }
+  }
 }
 
 
