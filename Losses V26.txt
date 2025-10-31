@@ -138,7 +138,7 @@ let CHOKE_LINE_ID_m = 0; // Converted to meters in setup
 let Q_CHOKE = 0; // gpm
 let CHOKE_DIRECTION = "UP"; // "UP" or "DOWN"
 let CHOKE_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
-let MW_CHOKE = 10.0; // ppg, choke line fluid
+let MW_CHOKE = 9.5; // ppg, choke line fluid (starts with same as DS)
 let chokeGrid = []; // Fluid tracking grid (BOP to surface)
 let accChoke = 0; // Advection accumulator
 let levelDeficit_choke_m = 0; // Level deficit in choke line
@@ -149,14 +149,14 @@ let KILL_LINE_ID_m = 0; // Converted to meters in setup
 let Q_KILL = 0; // gpm
 let KILL_DIRECTION = "UP"; // "UP" or "DOWN"
 let KILL_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
-let MW_KILL = 10.0; // ppg, kill line fluid
+let MW_KILL = 9.5; // ppg, kill line fluid (starts with same as DS)
 let killGrid = []; // Fluid tracking grid (BOP to surface)
 let accKill = 0; // Advection accumulator
 let levelDeficit_kill_m = 0; // Level deficit in kill line
 
 // Fluids / flows
 let MW_DS = 9.5; // ppg, drillstring
-let MW_BO = 10.0; // ppg, booster line
+let MW_BO = 9.5; // ppg, booster line (starts with same as DS)
 let Q_DS = 500; // gpm
 let Q_BO = 100; // gpm
 // Rotational speed (affects shear)
@@ -4725,10 +4725,10 @@ function draw(){
   fill(210, 80, 30);
   rect(0, 0, width, 120);
   fill(30, 60, 20);
-  rect(0, 120, width, 520);
-  // Extended bottom band to accommodate kick and BOP frames
+  rect(0, 120, width, 420);
+  // Extended bottom band to accommodate kick and BOP frames (starts earlier)
   fill(0, 0, 20);
-  rect(0, 640, width, height-640);
+  rect(0, 540, width, height-540);
   // Bottom frames (visual only; your UI inputs sit on top of these)
   drawBottomFrames();
   drawEnhancedHydraulicsFrame();
@@ -6523,7 +6523,17 @@ hdr.html(`<div style="display:grid;grid-template-columns:80px 100px 90px 90px 70
   ).parent(uiLosses.root);
 }
 // ==================== BOP WELL CONTROL UI ====================
-let uiBOP = { root: null };
+let uiBOP = {
+  root: null,
+  chokeFlowSlider: null, chokeFlowInput: null,
+  chokeMWSlider: null, chokeMWInput: null,
+  chokePressSlider: null, chokePressInput: null,
+  chokeDirBtn: null,
+  killFlowSlider: null, killFlowInput: null,
+  killMWSlider: null, killMWInput: null,
+  killPressSlider: null, killPressInput: null,
+  killDirBtn: null
+};
 
 function bopUIPosition() {
   const kickPos = kicksUIPosition();
@@ -6537,13 +6547,13 @@ function bopUIPosition() {
 function buildBOPWellControlUI() {
   const pos = bopUIPosition();
 
-  uiBOP.root = createDiv('').position(pos.x, pos.y).style('padding', '8px')
+  uiBOP.root = createDiv('').position(pos.x, pos.y).style('padding', '10px')
     .style('border', '1px solid rgba(100,200,255,0.3)')
     .style('border-radius', '8px')
     .style('background', 'rgba(0,40,60,0.25)')
     .style('backdrop-filter', 'blur(6px)')
     .style('color', '#EEE')
-    .style('width', '410px');
+    .style('width', '480px');
 
   createDiv('BOP Well Control').parent(uiBOP.root)
     .style('font-weight', 'bold').style('margin-bottom', '8px').style('color', '#66ccff');
@@ -6554,6 +6564,8 @@ function buildBOPWellControlUI() {
     .style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80')
     .style('font-weight', 'bold')
     .style('width', '120px')
+    .style('height', '28px')
+    .style('margin-bottom', '12px')
     .mousePressed(() => {
       BOP_CLOSED = !BOP_CLOSED;
       uiBOP.bopBtn.html(BOP_CLOSED ? 'BOP: CLOSED' : 'BOP: OPEN');
@@ -6561,32 +6573,62 @@ function buildBOPWellControlUI() {
     });
 
   // === CHOKE LINE ===
-  createDiv('').parent(uiBOP.root).style('margin-top', '12px')
-    .html('<div style="font-size:12px;opacity:0.9;font-weight:bold">Choke Line</div>');
+  createDiv('Choke Line').parent(uiBOP.root)
+    .style('font-size', '13px').style('opacity', '0.9').style('font-weight', 'bold')
+    .style('margin-top', '12px').style('margin-bottom', '8px').style('color', '#88ccff');
 
-  const chokeRow1 = createDiv('').parent(uiBOP.root)
-    .style('display', 'grid')
-    .style('grid-template-columns', '1fr 1fr')
-    .style('gap', '8px')
-    .style('margin-top', '6px');
+  // Choke Flow
+  const chokeFlowDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
+  mkLabel("Flow (gpm)", pos.x + 10, -100, chokeFlowDiv);
+  uiBOP.chokeFlowSlider = createSlider(0, 1000, Q_CHOKE, 10).parent(chokeFlowDiv).style('width', '300px');
+  uiBOP.chokeFlowInput = createInput(nf(Q_CHOKE, 1, 0), 'number').parent(chokeFlowDiv).size(65);
+  uiBOP.chokeFlowInput.style('margin-left', '10px');
+  uiBOP.chokeFlowSlider.input(() => {
+    Q_CHOKE = uiBOP.chokeFlowSlider.value();
+    uiBOP.chokeFlowInput.value(nf(Q_CHOKE, 1, 0));
+  });
+  uiBOP.chokeFlowInput.input(() => {
+    Q_CHOKE = Math.max(0, Number(uiBOP.chokeFlowInput.value()) || 0);
+    uiBOP.chokeFlowSlider.value(Q_CHOKE);
+  });
 
-  const chokeFlowLabel = createDiv('').parent(chokeRow1).html('<label style="font-size:11px">Flow (gpm):</label>');
-  uiBOP.chokeFlowInput = createInput(String(Q_CHOKE), 'number').parent(chokeFlowLabel);
-  styleBOPInput(uiBOP.chokeFlowInput);
-  uiBOP.chokeFlowInput.input(() => { Q_CHOKE = Math.max(0, Number(uiBOP.chokeFlowInput.value()) || 0); });
+  // Choke MW
+  const chokeMWDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
+  mkLabel("MW (ppg)", pos.x + 10, -100, chokeMWDiv);
+  uiBOP.chokeMWSlider = createSlider(MW_MIN, MW_MAX, MW_CHOKE, MW_STEP).parent(chokeMWDiv).style('width', '300px');
+  uiBOP.chokeMWInput = createInput(nf(MW_CHOKE, 1, 1), 'number').parent(chokeMWDiv).size(65);
+  uiBOP.chokeMWInput.style('margin-left', '10px');
+  uiBOP.chokeMWSlider.input(() => {
+    MW_CHOKE = uiBOP.chokeMWSlider.value();
+    uiBOP.chokeMWInput.value(nf(MW_CHOKE, 1, 1));
+  });
+  uiBOP.chokeMWInput.input(() => {
+    MW_CHOKE = Math.max(MW_MIN, Math.min(MW_MAX, Number(uiBOP.chokeMWInput.value()) || MW_CHOKE));
+    uiBOP.chokeMWSlider.value(MW_CHOKE);
+  });
 
-  const chokePressLabel = createDiv('').parent(chokeRow1).html('<label style="font-size:11px">Pressure (psi):</label>');
-  uiBOP.chokePressInput = createInput(String(CHOKE_PRESSURE_psi), 'number').parent(chokePressLabel);
-  styleBOPInput(uiBOP.chokePressInput);
-  uiBOP.chokePressInput.input(() => { CHOKE_PRESSURE_psi = Math.max(0, Number(uiBOP.chokePressInput.value()) || 0); });
+  // Choke Pressure
+  const chokePressDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
+  mkLabel("Pressure (psi)", pos.x + 10, -100, chokePressDiv);
+  uiBOP.chokePressSlider = createSlider(0, 5000, CHOKE_PRESSURE_psi, 50).parent(chokePressDiv).style('width', '300px');
+  uiBOP.chokePressInput = createInput(nf(CHOKE_PRESSURE_psi, 1, 0), 'number').parent(chokePressDiv).size(65);
+  uiBOP.chokePressInput.style('margin-left', '10px');
+  uiBOP.chokePressSlider.input(() => {
+    CHOKE_PRESSURE_psi = uiBOP.chokePressSlider.value();
+    uiBOP.chokePressInput.value(nf(CHOKE_PRESSURE_psi, 1, 0));
+  });
+  uiBOP.chokePressInput.input(() => {
+    CHOKE_PRESSURE_psi = Math.max(0, Number(uiBOP.chokePressInput.value()) || 0);
+    uiBOP.chokePressSlider.value(CHOKE_PRESSURE_psi);
+  });
 
-  const chokeRow2 = createDiv('').parent(uiBOP.root)
-    .style('margin-top', '6px');
-
+  // Choke Direction
   uiBOP.chokeDirBtn = createButton(`Direction: ${CHOKE_DIRECTION}`)
-    .parent(chokeRow2)
+    .parent(uiBOP.root)
     .style('width', '140px')
+    .style('height', '26px')
     .style('font-size', '11px')
+    .style('margin-bottom', '4px')
     .mousePressed(() => {
       CHOKE_DIRECTION = (CHOKE_DIRECTION === 'UP') ? 'DOWN' : 'UP';
       uiBOP.chokeDirBtn.html(`Direction: ${CHOKE_DIRECTION}`);
@@ -6594,32 +6636,62 @@ function buildBOPWellControlUI() {
     });
 
   // === KILL LINE ===
-  createDiv('').parent(uiBOP.root).style('margin-top', '12px')
-    .html('<div style="font-size:12px;opacity:0.9;font-weight:bold">Kill Line</div>');
+  createDiv('Kill Line').parent(uiBOP.root)
+    .style('font-size', '13px').style('opacity', '0.9').style('font-weight', 'bold')
+    .style('margin-top', '16px').style('margin-bottom', '8px').style('color', '#88ccff');
 
-  const killRow1 = createDiv('').parent(uiBOP.root)
-    .style('display', 'grid')
-    .style('grid-template-columns', '1fr 1fr')
-    .style('gap', '8px')
-    .style('margin-top', '6px');
+  // Kill Flow
+  const killFlowDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
+  mkLabel("Flow (gpm)", pos.x + 10, -100, killFlowDiv);
+  uiBOP.killFlowSlider = createSlider(0, 1000, Q_KILL, 10).parent(killFlowDiv).style('width', '300px');
+  uiBOP.killFlowInput = createInput(nf(Q_KILL, 1, 0), 'number').parent(killFlowDiv).size(65);
+  uiBOP.killFlowInput.style('margin-left', '10px');
+  uiBOP.killFlowSlider.input(() => {
+    Q_KILL = uiBOP.killFlowSlider.value();
+    uiBOP.killFlowInput.value(nf(Q_KILL, 1, 0));
+  });
+  uiBOP.killFlowInput.input(() => {
+    Q_KILL = Math.max(0, Number(uiBOP.killFlowInput.value()) || 0);
+    uiBOP.killFlowSlider.value(Q_KILL);
+  });
 
-  const killFlowLabel = createDiv('').parent(killRow1).html('<label style="font-size:11px">Flow (gpm):</label>');
-  uiBOP.killFlowInput = createInput(String(Q_KILL), 'number').parent(killFlowLabel);
-  styleBOPInput(uiBOP.killFlowInput);
-  uiBOP.killFlowInput.input(() => { Q_KILL = Math.max(0, Number(uiBOP.killFlowInput.value()) || 0); });
+  // Kill MW
+  const killMWDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
+  mkLabel("MW (ppg)", pos.x + 10, -100, killMWDiv);
+  uiBOP.killMWSlider = createSlider(MW_MIN, MW_MAX, MW_KILL, MW_STEP).parent(killMWDiv).style('width', '300px');
+  uiBOP.killMWInput = createInput(nf(MW_KILL, 1, 1), 'number').parent(killMWDiv).size(65);
+  uiBOP.killMWInput.style('margin-left', '10px');
+  uiBOP.killMWSlider.input(() => {
+    MW_KILL = uiBOP.killMWSlider.value();
+    uiBOP.killMWInput.value(nf(MW_KILL, 1, 1));
+  });
+  uiBOP.killMWInput.input(() => {
+    MW_KILL = Math.max(MW_MIN, Math.min(MW_MAX, Number(uiBOP.killMWInput.value()) || MW_KILL));
+    uiBOP.killMWSlider.value(MW_KILL);
+  });
 
-  const killPressLabel = createDiv('').parent(killRow1).html('<label style="font-size:11px">Pressure (psi):</label>');
-  uiBOP.killPressInput = createInput(String(KILL_PRESSURE_psi), 'number').parent(killPressLabel);
-  styleBOPInput(uiBOP.killPressInput);
-  uiBOP.killPressInput.input(() => { KILL_PRESSURE_psi = Math.max(0, Number(uiBOP.killPressInput.value()) || 0); });
+  // Kill Pressure
+  const killPressDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
+  mkLabel("Pressure (psi)", pos.x + 10, -100, killPressDiv);
+  uiBOP.killPressSlider = createSlider(0, 5000, KILL_PRESSURE_psi, 50).parent(killPressDiv).style('width', '300px');
+  uiBOP.killPressInput = createInput(nf(KILL_PRESSURE_psi, 1, 0), 'number').parent(killPressDiv).size(65);
+  uiBOP.killPressInput.style('margin-left', '10px');
+  uiBOP.killPressSlider.input(() => {
+    KILL_PRESSURE_psi = uiBOP.killPressSlider.value();
+    uiBOP.killPressInput.value(nf(KILL_PRESSURE_psi, 1, 0));
+  });
+  uiBOP.killPressInput.input(() => {
+    KILL_PRESSURE_psi = Math.max(0, Number(uiBOP.killPressInput.value()) || 0);
+    uiBOP.killPressSlider.value(KILL_PRESSURE_psi);
+  });
 
-  const killRow2 = createDiv('').parent(uiBOP.root)
-    .style('margin-top', '6px');
-
+  // Kill Direction
   uiBOP.killDirBtn = createButton(`Direction: ${KILL_DIRECTION}`)
-    .parent(killRow2)
+    .parent(uiBOP.root)
     .style('width', '140px')
+    .style('height', '26px')
     .style('font-size', '11px')
+    .style('margin-bottom', '4px')
     .mousePressed(() => {
       KILL_DIRECTION = (KILL_DIRECTION === 'UP') ? 'DOWN' : 'UP';
       uiBOP.killDirBtn.html(`Direction: ${KILL_DIRECTION}`);
@@ -6653,7 +6725,7 @@ function styleBOPInput(inp) {
 
 // Update choke pressure input state based on direction
 function updateChokePressureInputState() {
-  if (!uiBOP.chokePressInput) return;
+  if (!uiBOP.chokePressInput || !uiBOP.chokePressSlider) return;
 
   if (CHOKE_DIRECTION === 'DOWN') {
     // DOWN = Pumping mode → SPP is calculated (read-only)
@@ -6661,18 +6733,22 @@ function updateChokePressureInputState() {
     uiBOP.chokePressInput.style('background', 'rgba(100,150,200,0.15)');
     uiBOP.chokePressInput.style('cursor', 'not-allowed');
     uiBOP.chokePressInput.style('opacity', '0.7');
+    uiBOP.chokePressSlider.attribute('disabled', true);
+    uiBOP.chokePressSlider.style('opacity', '0.5');
   } else {
     // UP = Extraction mode → User sets backpressure (editable)
     uiBOP.chokePressInput.removeAttribute('readonly');
     uiBOP.chokePressInput.style('background', 'rgba(255,255,255,0.07)');
     uiBOP.chokePressInput.style('cursor', 'text');
     uiBOP.chokePressInput.style('opacity', '1');
+    uiBOP.chokePressSlider.removeAttribute('disabled');
+    uiBOP.chokePressSlider.style('opacity', '1');
   }
 }
 
 // Update kill pressure input state based on direction
 function updateKillPressureInputState() {
-  if (!uiBOP.killPressInput) return;
+  if (!uiBOP.killPressInput || !uiBOP.killPressSlider) return;
 
   if (KILL_DIRECTION === 'DOWN') {
     // DOWN = Pumping mode → SPP is calculated (read-only)
@@ -6680,12 +6756,16 @@ function updateKillPressureInputState() {
     uiBOP.killPressInput.style('background', 'rgba(100,150,200,0.15)');
     uiBOP.killPressInput.style('cursor', 'not-allowed');
     uiBOP.killPressInput.style('opacity', '0.7');
+    uiBOP.killPressSlider.attribute('disabled', true);
+    uiBOP.killPressSlider.style('opacity', '0.5');
   } else {
     // UP = Extraction mode → User sets backpressure (editable)
     uiBOP.killPressInput.removeAttribute('readonly');
     uiBOP.killPressInput.style('background', 'rgba(255,255,255,0.07)');
     uiBOP.killPressInput.style('cursor', 'text');
     uiBOP.killPressInput.style('opacity', '1');
+    uiBOP.killPressSlider.removeAttribute('disabled');
+    uiBOP.killPressSlider.style('opacity', '1');
   }
 }
 
@@ -6700,6 +6780,7 @@ function updateBOPPressureDisplays() {
     const chokeSPP = updateChokeSPP(chokeRawSPP);
     CHOKE_PRESSURE_psi = chokeSPP;
     uiBOP.chokePressInput.value(nf(chokeSPP, 0, 1));
+    if (uiBOP.chokePressSlider) uiBOP.chokePressSlider.value(chokeSPP);
   } else if (CHOKE_DIRECTION === 'UP') {
     // UP mode: user controls pressure, just ensure it's not overwritten
     // (pressure is set by user input handler)
@@ -6712,6 +6793,7 @@ function updateBOPPressureDisplays() {
     const killSPP = updateKillSPP(killRawSPP);
     KILL_PRESSURE_psi = killSPP;
     uiBOP.killPressInput.value(nf(killSPP, 0, 1));
+    if (uiBOP.killPressSlider) uiBOP.killPressSlider.value(killSPP);
   } else if (KILL_DIRECTION === 'UP') {
     // UP mode: user controls pressure
   }
