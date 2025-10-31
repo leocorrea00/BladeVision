@@ -4218,6 +4218,7 @@ if (MPD_ON){
   // Well visuals and charts
   drawWellAndFluids();
   drawFractureSymbols();
+  drawKickSymbols();
   drawDepthGrid();
   drawReferenceBadges();
   drawGaugesAndCharts();
@@ -4668,6 +4669,90 @@ function drawFractureSymbols(){
   }
 }
 
+function drawKickSymbols(){
+  if (!formationFluidEnabled || formationFluidDepth_m <= 0) return;
+
+  const symbolSize = 20;
+  const xPos = well.x + well.w + 30; // To the right of the well
+
+  const y = mapDepthToY(formationFluidDepth_m);
+
+  // Calculate influx rate to determine if active
+  let influxRate_gpm = 0;
+  if (kickMode === 'MANUAL') {
+    influxRate_gpm = formationFluidRate_gpm;
+  } else if (kickMode === 'PRESSURE_DRIVEN') {
+    const BHP_psi = pressureAtDepth(formationFluidDepth_m);
+    const deltaP = Math.max(0, porePressure_psi - BHP_psi);
+    influxRate_gpm = productivityIndex_gpm_psi * deltaP;
+  }
+
+  const isActive = influxRate_gpm > 1; // Active if influx >1 gpm
+
+  push();
+  translate(xPos, y);
+
+  // Draw triangle symbol
+  if (isActive) {
+    // Active kick - pulsing triangle
+    const pulsePhase = (frameCount % 40) / 40;
+    const pulse = 1 + 0.2 * Math.sin(pulsePhase * TWO_PI);
+
+    // Bright color based on fluid type
+    const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+    const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
+
+    fill(fluidColor[0], fluidColor[1], fluidColor[2], 200);
+    stroke(fluidColor[0], Math.min(100, fluidColor[1] + 20), Math.min(100, fluidColor[2] + 20), 255);
+    strokeWeight(2);
+
+    // Draw upward-pointing triangle (indicating influx rising)
+    const size = symbolSize * pulse;
+    beginShape();
+    vertex(0, -size * 0.6);           // Top point
+    vertex(-size * 0.5, size * 0.4);  // Bottom left
+    vertex(size * 0.5, size * 0.4);   // Bottom right
+    endShape(CLOSE);
+
+    // Add small arrows inside to show upward movement
+    stroke(0, 0, 100, 200);
+    strokeWeight(1.5);
+    const arrowY = size * 0.1 * (1 - pulsePhase);
+    line(0, arrowY, 0, arrowY - size * 0.25);
+    line(0, arrowY - size * 0.25, -size * 0.1, arrowY - size * 0.15);
+    line(0, arrowY - size * 0.25, size * 0.1, arrowY - size * 0.15);
+
+  } else {
+    // Dormant kick zone - static triangle outline
+    const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+    const fluidColor = fluidProps ? fluidProps.color : [0, 60, 60];
+
+    stroke(fluidColor[0], fluidColor[1] * 0.6, fluidColor[2] * 0.6, 150);
+    strokeWeight(1.5);
+    noFill();
+
+    // Draw upward-pointing triangle
+    beginShape();
+    vertex(0, -symbolSize * 0.6);
+    vertex(-symbolSize * 0.5, symbolSize * 0.4);
+    vertex(symbolSize * 0.5, symbolSize * 0.4);
+    endShape(CLOSE);
+  }
+
+  // Label
+  noStroke();
+  const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+  const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
+  fill(isActive ? color(fluidColor[0], fluidColor[1], fluidColor[2]) : color(0, 0, 70));
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  const qStr = isActive ? ` (${nf(influxRate_gpm, 1, 0)} gpm)` : '';
+  const typeStr = fluidProps ? ` ${fluidProps.name}` : '';
+  text(`${nf(formationFluidDepth_m, 1, 0)}m${typeStr}${qStr}`, symbolSize/2 + 12, 0);
+
+  pop();
+}
+
 function drawCMLVisual(){
   if (!CML_ON) return;
   const yPump = mapDepthToY(CML_DEPTH);
@@ -5029,8 +5114,51 @@ function drawCharts(x0){
   }
 }
 
-  
-  
+// --- Kick markers on PRESSURE chart (triangle at Pore Pressure×Depth) ---
+{
+  if (formationFluidEnabled && formationFluidDepth_m > 0) {
+    const xL = px + padL, xR = px + wP - padR;
+    const yT = py + padT, yB = py + h - padB;
+    const pMin = 0, pMax = 16000;
+
+    const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
+
+    // In pressure-driven mode, show pore pressure; in manual mode, show BHP
+    let markerPressure_psi;
+    if (kickMode === 'PRESSURE_DRIVEN') {
+      markerPressure_psi = porePressure_psi;
+    } else {
+      markerPressure_psi = pressureAtDepth(formationFluidDepth_m);
+    }
+
+    const x = map(markerPressure_psi, pMin, pMax, xL, xR, true);
+
+    // Draw triangle
+    push();
+    const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+    const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
+    fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
+    stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
+    strokeWeight(1.5);
+    const size = 8;
+    beginShape();
+    vertex(x, y - size);           // Top point
+    vertex(x - size * 0.7, y + size * 0.5);  // Bottom left
+    vertex(x + size * 0.7, y + size * 0.5);   // Bottom right
+    endShape(CLOSE);
+
+    // Label
+    noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
+    textSize(10); textAlign(LEFT, BOTTOM);
+    const typeStr = fluidProps ? fluidProps.name : 'Kick';
+    const pressureLabel = kickMode === 'PRESSURE_DRIVEN' ? `P_pore=${nf(porePressure_psi,1,0)} psi` : `BHP=${nf(markerPressure_psi,1,0)} psi`;
+    text(`${typeStr} @ ${nf(formationFluidDepth_m,1,0)} m (${pressureLabel})`, x + 10, y - 2);
+    pop();
+  }
+}
+
+
+
 
   // -------- ECD-depth (ppg) --------
   const ex = px + wP + gap, ey = top;
@@ -5077,6 +5205,43 @@ function drawCharts(x0){
       text(`${nf(fg_ppg,1,2)} ppg @ ${nf(z.depth_m,1,0)} m`, x + 8, y - 2);
       pop();
     }
+  }
+}
+
+// --- Kick markers on ECD chart (triangle at formation fluid density×Depth) ---
+{
+  if (formationFluidEnabled && formationFluidDepth_m > 0) {
+    const xL = ex + padL, xR = ex + wE - padR;
+    const yT = ey + padT, yB = ey + h - padB;
+    const eMin = 6, eMax = 18;
+
+    const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
+
+    // Show formation fluid density in ppg
+    const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+    const fluid_ppg = fluidProps ? fluidProps.density_ppg : 8.33;
+
+    const x = map(fluid_ppg, eMin, eMax, xL, xR, true);
+
+    // Draw triangle
+    push();
+    const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
+    fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
+    stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
+    strokeWeight(1.5);
+    const size = 8;
+    beginShape();
+    vertex(x, y - size);           // Top point
+    vertex(x - size * 0.7, y + size * 0.5);  // Bottom left
+    vertex(x + size * 0.7, y + size * 0.5);   // Bottom right
+    endShape(CLOSE);
+
+    // Label
+    noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
+    textSize(10); textAlign(LEFT, BOTTOM);
+    const typeStr = fluidProps ? fluidProps.name : 'Kick';
+    text(`${typeStr}: ${nf(fluid_ppg,1,2)} ppg @ ${nf(formationFluidDepth_m,1,0)} m`, x + 10, y - 2);
+    pop();
   }
 }
 
