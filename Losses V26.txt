@@ -5056,7 +5056,7 @@ for (let i = 0; i < N_BELOW; i++) {
 // ===== FORMATION FLUIDS VISUALIZATION (LEFT SIDE) =====
 // Extends from surface to TD, showing formation fluids in all regions
 if (formationFluidEnabled) {
-  const formFluidBarX = well.x - 35; // Left of well
+  const formFluidBarX = well.x - 60; // Left of well, moved to avoid clash with kill line
   const formFluidBarW = 18;
 
   // Draw background bar (surface to TD)
@@ -6606,11 +6606,11 @@ let uiBOP = {
   chokeFlowSlider: null, chokeFlowInput: null,
   chokeMWSlider: null, chokeMWInput: null,
   chokePressSlider: null, chokePressInput: null,
-  chokeDirBtn: null, chokeOpenBtn: null,
+  chokeDirUpBtn: null, chokeDirDownBtn: null, chokeOpenBtn: null,
   killFlowSlider: null, killFlowInput: null,
   killMWSlider: null, killMWInput: null,
   killPressSlider: null, killPressInput: null,
-  killDirBtn: null, killOpenBtn: null
+  killDirUpBtn: null, killDirDownBtn: null, killOpenBtn: null
 };
 
 function bopUIPosition() {
@@ -6710,17 +6710,42 @@ function buildBOPWellControlUI() {
     .style('gap', '8px')
     .style('margin-bottom', '4px');
 
-  uiBOP.chokeDirBtn = createButton(`Direction: ${CHOKE_DIRECTION}`)
+  // Direction label
+  createDiv('Direction:').parent(chokeButtonDiv)
+    .style('font-size', '11px')
+    .style('opacity', '0.9')
+    .style('padding-top', '4px')
+    .style('width', '60px');
+
+  // UP button
+  uiBOP.chokeDirUpBtn = createButton('UP')
     .parent(chokeButtonDiv)
-    .style('width', '140px')
+    .style('width', '50px')
     .style('height', '26px')
     .style('font-size', '11px')
+    .style('background', CHOKE_DIRECTION === 'UP' ? '#4ade80' : 'rgba(255,255,255,0.1)')
+    .style('font-weight', CHOKE_DIRECTION === 'UP' ? 'bold' : 'normal')
     .mousePressed(() => {
-      CHOKE_DIRECTION = (CHOKE_DIRECTION === 'UP') ? 'DOWN' : 'UP';
-      uiBOP.chokeDirBtn.html(`Direction: ${CHOKE_DIRECTION}`);
+      CHOKE_DIRECTION = 'UP';
+      updateChokeDirectionButtons();
       updateChokePressureInputState();
     });
 
+  // DOWN button
+  uiBOP.chokeDirDownBtn = createButton('DOWN')
+    .parent(chokeButtonDiv)
+    .style('width', '50px')
+    .style('height', '26px')
+    .style('font-size', '11px')
+    .style('background', CHOKE_DIRECTION === 'DOWN' ? '#4ade80' : 'rgba(255,255,255,0.1)')
+    .style('font-weight', CHOKE_DIRECTION === 'DOWN' ? 'bold' : 'normal')
+    .mousePressed(() => {
+      CHOKE_DIRECTION = 'DOWN';
+      updateChokeDirectionButtons();
+      updateChokePressureInputState();
+    });
+
+  // Open/Close button
   uiBOP.chokeOpenBtn = createButton(CHOKE_LINE_OPEN ? 'OPEN' : 'CLOSED')
     .parent(chokeButtonDiv)
     .style('width', '90px')
@@ -6790,17 +6815,42 @@ function buildBOPWellControlUI() {
     .style('gap', '8px')
     .style('margin-bottom', '4px');
 
-  uiBOP.killDirBtn = createButton(`Direction: ${KILL_DIRECTION}`)
+  // Direction label
+  createDiv('Direction:').parent(killButtonDiv)
+    .style('font-size', '11px')
+    .style('opacity', '0.9')
+    .style('padding-top', '4px')
+    .style('width', '60px');
+
+  // UP button
+  uiBOP.killDirUpBtn = createButton('UP')
     .parent(killButtonDiv)
-    .style('width', '140px')
+    .style('width', '50px')
     .style('height', '26px')
     .style('font-size', '11px')
+    .style('background', KILL_DIRECTION === 'UP' ? '#4ade80' : 'rgba(255,255,255,0.1)')
+    .style('font-weight', KILL_DIRECTION === 'UP' ? 'bold' : 'normal')
     .mousePressed(() => {
-      KILL_DIRECTION = (KILL_DIRECTION === 'UP') ? 'DOWN' : 'UP';
-      uiBOP.killDirBtn.html(`Direction: ${KILL_DIRECTION}`);
+      KILL_DIRECTION = 'UP';
+      updateKillDirectionButtons();
       updateKillPressureInputState();
     });
 
+  // DOWN button
+  uiBOP.killDirDownBtn = createButton('DOWN')
+    .parent(killButtonDiv)
+    .style('width', '50px')
+    .style('height', '26px')
+    .style('font-size', '11px')
+    .style('background', KILL_DIRECTION === 'DOWN' ? '#4ade80' : 'rgba(255,255,255,0.1)')
+    .style('font-weight', KILL_DIRECTION === 'DOWN' ? 'bold' : 'normal')
+    .mousePressed(() => {
+      KILL_DIRECTION = 'DOWN';
+      updateKillDirectionButtons();
+      updateKillPressureInputState();
+    });
+
+  // Open/Close button
   uiBOP.killOpenBtn = createButton(KILL_LINE_OPEN ? 'OPEN' : 'CLOSED')
     .parent(killButtonDiv)
     .style('width', '90px')
@@ -6882,6 +6932,40 @@ function updateKillPressureInputState() {
     uiBOP.killPressInput.style('opacity', '1');
     uiBOP.killPressSlider.removeAttribute('disabled');
     uiBOP.killPressSlider.style('opacity', '1');
+  }
+}
+
+// Update choke direction button highlighting
+function updateChokeDirectionButtons() {
+  if (!uiBOP.chokeDirUpBtn || !uiBOP.chokeDirDownBtn) return;
+
+  if (CHOKE_DIRECTION === 'UP') {
+    uiBOP.chokeDirUpBtn.style('background', '#4ade80');
+    uiBOP.chokeDirUpBtn.style('font-weight', 'bold');
+    uiBOP.chokeDirDownBtn.style('background', 'rgba(255,255,255,0.1)');
+    uiBOP.chokeDirDownBtn.style('font-weight', 'normal');
+  } else {
+    uiBOP.chokeDirUpBtn.style('background', 'rgba(255,255,255,0.1)');
+    uiBOP.chokeDirUpBtn.style('font-weight', 'normal');
+    uiBOP.chokeDirDownBtn.style('background', '#4ade80');
+    uiBOP.chokeDirDownBtn.style('font-weight', 'bold');
+  }
+}
+
+// Update kill direction button highlighting
+function updateKillDirectionButtons() {
+  if (!uiBOP.killDirUpBtn || !uiBOP.killDirDownBtn) return;
+
+  if (KILL_DIRECTION === 'UP') {
+    uiBOP.killDirUpBtn.style('background', '#4ade80');
+    uiBOP.killDirUpBtn.style('font-weight', 'bold');
+    uiBOP.killDirDownBtn.style('background', 'rgba(255,255,255,0.1)');
+    uiBOP.killDirDownBtn.style('font-weight', 'normal');
+  } else {
+    uiBOP.killDirUpBtn.style('background', 'rgba(255,255,255,0.1)');
+    uiBOP.killDirUpBtn.style('font-weight', 'normal');
+    uiBOP.killDirDownBtn.style('background', '#4ade80');
+    uiBOP.killDirDownBtn.style('font-weight', 'bold');
   }
 }
 
