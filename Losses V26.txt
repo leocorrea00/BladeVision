@@ -131,6 +131,7 @@ let fitParams = { mu_p_Pa_s: null, tau_y_Pa: null, K_PL_Pa_s_n: null, n_PL: null
 
 // ============================ BOP & WELL CONTROL =============================
 let BOP_CLOSED = false; // BOP state (open/closed)
+let closedWellPressureBoost_psi = 0; // Pressure increase from pumping to closed well
 
 // Choke Line (runs from BOP to surface, parallel to riser)
 let CHOKE_LINE_ID_in = 3.0; // Inner diameter (inches)
@@ -139,6 +140,7 @@ let Q_CHOKE = 0; // gpm
 let CHOKE_DIRECTION = "UP"; // "UP" or "DOWN"
 let CHOKE_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
 let MW_CHOKE = 9.5; // ppg, choke line fluid (starts with same as DS)
+let CHOKE_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let chokeGrid = []; // Fluid tracking grid (BOP to surface)
 let accChoke = 0; // Advection accumulator
 let levelDeficit_choke_m = 0; // Level deficit in choke line
@@ -150,6 +152,7 @@ let Q_KILL = 0; // gpm
 let KILL_DIRECTION = "UP"; // "UP" or "DOWN"
 let KILL_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
 let MW_KILL = 9.5; // ppg, kill line fluid (starts with same as DS)
+let KILL_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let killGrid = []; // Fluid tracking grid (BOP to surface)
 let accKill = 0; // Advection accumulator
 let levelDeficit_kill_m = 0; // Level deficit in kill line
@@ -1572,7 +1575,7 @@ function stepAdvection(){
   // ===============================
   // 8) CHOKE LINE ADVECTION (BOP to Surface)
   // ===============================
-  if (BOP_CLOSED && Q_CHOKE > 0) {
+  if (BOP_CLOSED && Q_CHOKE > 0 && CHOKE_LINE_OPEN) {
     const qChoke_m3s = Q_CHOKE / 15850.323;
     const A_choke = Math.PI * CHOKE_LINE_ID_m * CHOKE_LINE_ID_m / 4;
     const v_choke = qChoke_m3s / Math.max(A_choke, 1e-12);
@@ -1611,7 +1614,7 @@ function stepAdvection(){
   // ===============================
   // 9) KILL LINE ADVECTION (BOP to Surface)
   // ===============================
-  if (BOP_CLOSED && Q_KILL > 0) {
+  if (BOP_CLOSED && Q_KILL > 0 && KILL_LINE_OPEN) {
     const qKill_m3s = Q_KILL / 15850.323;
     const A_kill = Math.PI * KILL_LINE_ID_m * KILL_LINE_ID_m / 4;
     const v_kill = qKill_m3s / Math.max(A_kill, 1e-12);
@@ -2136,7 +2139,10 @@ function pressureAtDepth(d){
   // BOP Line Contribution (when BOP closed and choke/kill lines flowing UP)
   const P_bop_lines = bopLinePressureContribution();
 
-  const total = P_hydro + P_fric + P_sbp + P_bop_lines;
+  // Closed Well Pressure Boost (when pumping to closed well with no exit)
+  const P_closed_well = BOP_CLOSED ? (closedWellPressureBoost_psi || 0) : 0;
+
+  const total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
   return total;
 }
 
@@ -2205,7 +2211,7 @@ function bopLinePressureContribution(){
   let totalContribution = 0;
 
   // Choke Line
-  if (CHOKE_DIRECTION === "UP" && Q_CHOKE > 0) {
+  if (CHOKE_DIRECTION === "UP" && Q_CHOKE > 0 && CHOKE_LINE_OPEN) {
     const qChoke_m3s = Q_CHOKE / 15850.323;
     const friction_psi = chokeFrictionPsiLength(BOP_DEPTH, qChoke_m3s);
     // When flowing UP: Friction + Applied Choke Pressure adds to BHP
@@ -2213,7 +2219,7 @@ function bopLinePressureContribution(){
   }
 
   // Kill Line
-  if (KILL_DIRECTION === "UP" && Q_KILL > 0) {
+  if (KILL_DIRECTION === "UP" && Q_KILL > 0 && KILL_LINE_OPEN) {
     const qKill_m3s = Q_KILL / 15850.323;
     const friction_psi = killFrictionPsiLength(BOP_DEPTH, qKill_m3s);
     // When flowing UP: Friction + Applied Kill Pressure adds to BHP
@@ -2456,8 +2462,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
     let qIn_belowBOP = qDS + qInflux; // DS return + kicks enter below BOP
 
     // Add choke/kill lines flowing DOWN (pumping into wellbore)
-    if (CHOKE_DIRECTION === "DOWN") qIn_belowBOP += qChoke_m3s;
-    if (KILL_DIRECTION === "DOWN") qIn_belowBOP += qKill_m3s;
+    if (CHOKE_DIRECTION === "DOWN" && CHOKE_LINE_OPEN) qIn_belowBOP += qChoke_m3s;
+    if (KILL_DIRECTION === "DOWN" && KILL_LINE_OPEN) qIn_belowBOP += qKill_m3s;
 
     // Losses consume fluid from below-BOP annulus
     const qToLoss = Math.min(qDem, Math.max(0, qIn_belowBOP));
@@ -2468,8 +2474,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Choke and Kill lines flowing UP extract fluid from below-BOP
     let qChoke_actual = 0, qKill_actual = 0;
 
-    if (CHOKE_DIRECTION === "UP" && qChoke_m3s > 0) {
-      if (KILL_DIRECTION === "UP" && qKill_m3s > 0) {
+    if (CHOKE_DIRECTION === "UP" && qChoke_m3s > 0 && CHOKE_LINE_OPEN) {
+      if (KILL_DIRECTION === "UP" && qKill_m3s > 0 && KILL_LINE_OPEN) {
         // ✅ BOTH LINES FLOWING UP - PRESSURE BALANCE LOGIC
         // Lower resistance path gets MORE flow (inverse relationship)
 
@@ -2511,6 +2517,24 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Flow reaching surface through choke/kill lines
     const qToSurface_belowBOP = qChoke_actual + qKill_actual;
 
+    // === CLOSED WELL PHYSICS ===
+    // When pumping to a closed well (no UP path, more IN than losses), pressure builds
+    const netVolumeTrapped_m3s = Math.max(0, qIn_belowBOP - qToLoss - qToSurface_belowBOP);
+    const wellIsClosed = (qToSurface_belowBOP < 0.001) && (netVolumeTrapped_m3s > 0.001);
+
+    if (wellIsClosed) {
+      // Well is closed - fluid has nowhere to go, pressure increases
+      // Convert trapped volume to pressure increase
+      // Using simplified compressibility: ~10 psi per bbl in a typical wellbore
+      const dt_s = Math.max(1/120, window.dt_s || 1/60); // time step in seconds
+      const trappedVolume_bbl = netVolumeTrapped_m3s * 6.28981 * dt_s; // m3/s to bbl
+      const pressureIncrease_psi = trappedVolume_bbl * 15; // ~15 psi per bbl trapped
+      closedWellPressureBoost_psi += pressureIncrease_psi;
+    } else {
+      // Well has exit path - pressure boost decays back to normal
+      closedWellPressureBoost_psi *= 0.95; // Decay factor
+    }
+
     // === ABOVE BOP (Isolated riser) ===
     // Inputs: Booster, TopFill
     // Outputs: CML, Flow Out (if riser full)
@@ -2530,14 +2554,20 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Flow Out calculation - from choke/kill lines
     const targetFO_gpm = Math.max(0, qToSurface_belowBOP * 15850.323);
 
-    // Update FLOW_OUT with fast filter
-    const ALPHA = 0.5;
-    const DQDT_MAX = 1000;
-    const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
-    const lp = prev + ALPHA*(targetFO_gpm - prev);
-    const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
-    const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
-    FLOW_OUT_gpm = prev + step;
+    // Update FLOW_OUT with fast filter (or immediate if well is closed)
+    if (wellIsClosed) {
+      // Well is closed - set FO to 0 immediately (no filter delay)
+      FLOW_OUT_gpm = 0;
+    } else {
+      // Normal filter for smooth FO changes
+      const ALPHA = 0.5;
+      const DQDT_MAX = 1000;
+      const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
+      const lp = prev + ALPHA*(targetFO_gpm - prev);
+      const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
+      const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
+      FLOW_OUT_gpm = prev + step;
+    }
 
     if (typeof FLOW_OUT_ALPHA==='number') {
       window.FLOW_OUT_smooth = (window.FLOW_OUT_smooth||0) + FLOW_OUT_ALPHA*(FLOW_OUT_gpm - (window.FLOW_OUT_smooth||0));
@@ -4324,6 +4354,10 @@ function setup(){
   chokeGrid = new Array(N_ABV).fill(MW_CHOKE);
   killGrid = new Array(N_ABV).fill(MW_KILL);
 
+  // Ensure choke and kill lines start completely full
+  levelDeficit_choke_m = 0;
+  levelDeficit_kill_m = 0;
+
   // ========== Top: 2 compact rows ==========
   const rowY1 = 75;
   const rowY2 = 20;
@@ -4725,10 +4759,10 @@ function draw(){
   fill(210, 80, 30);
   rect(0, 0, width, 120);
   fill(30, 60, 20);
-  rect(0, 120, width, 420);
-  // Extended bottom band to accommodate kick and BOP frames (starts earlier)
+  rect(0, 120, width, height - 120);  // Extended middle band to cover BOP and Kick frames
+  // Bottom band (darkest) - reduced to just bottom edge
   fill(0, 0, 20);
-  rect(0, 540, width, height-540);
+  rect(0, height - 40, width, 40);
   // Bottom frames (visual only; your UI inputs sit on top of these)
   drawBottomFrames();
   drawEnhancedHydraulicsFrame();
@@ -5246,15 +5280,16 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
 
   // Color based on direction and flow state
+  const killIsFlowing = Q_KILL > 0 && KILL_LINE_OPEN;
   let killHue, killSat, killBright, killAlpha;
-  if (Q_KILL > 0) {
+  if (killIsFlowing) {
     if (KILL_DIRECTION === "UP") {
       killHue = 200; killSat = 80; killBright = 90; killAlpha = 200; // Blue
     } else {
       killHue = 30; killSat = 90; killBright = 90; killAlpha = 200; // Orange
     }
   } else {
-    // No flow - gray dormant
+    // No flow or closed - gray dormant
     killHue = 0; killSat = 0; killBright = 60; killAlpha = 120;
   }
 
@@ -5265,7 +5300,7 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   rect(killLineX - killLineW/2, yTop, killLineW, yBot - yTop, 3);
 
   // Fill with fluid color if flowing
-  if (Q_KILL > 0) {
+  if (killIsFlowing) {
     noStroke();
     fill(killHue, killSat, killBright, killAlpha - 20);
     rect(killLineX - killLineW/2 + 1, yTop, killLineW - 2, yBot - yTop);
@@ -5297,12 +5332,33 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   fill(killHue, killSat, killBright);
   textSize(10);
   textAlign(CENTER, CENTER);
-  if (Q_KILL > 0) {
+  if (killIsFlowing) {
     text(`KILL ${nf(Q_KILL, 0, 0)} gpm ${KILL_DIRECTION}`, 0, 0);
+  } else if (!KILL_LINE_OPEN) {
+    text(`KILL LINE (CLOSED)`, 0, 0);
   } else {
     text(`KILL LINE`, 0, 0);
   }
   pop();
+
+  // Valve indicator at surface
+  const valveW = 14;
+  const valveH = 8;
+  const valveY = yTop + 15;
+  if (KILL_LINE_OPEN) {
+    // Open - green
+    noStroke();
+    fill(120, 80, 90, 200); // Green
+  } else {
+    // Closed - red
+    noStroke();
+    fill(0, 100, 85, 200); // Red
+  }
+  rect(killLineX - valveW/2, valveY - valveH/2, valveW, valveH, 2);
+  // Valve indicator line
+  stroke(0, 0, 100, 150);
+  strokeWeight(1);
+  line(killLineX - valveW/2 - 2, valveY, killLineX + valveW/2 + 2, valveY);
 }
 
 // ===== CHOKE LINE VISUALIZATION (RIGHT SIDE) =====
@@ -5314,15 +5370,16 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
 
   // Color based on direction and flow state
+  const chokeIsFlowing = Q_CHOKE > 0 && CHOKE_LINE_OPEN;
   let chokeHue, chokeSat, chokeBright, chokeAlpha;
-  if (Q_CHOKE > 0) {
+  if (chokeIsFlowing) {
     if (CHOKE_DIRECTION === "UP") {
       chokeHue = 200; chokeSat = 80; chokeBright = 90; chokeAlpha = 200; // Blue
     } else {
       chokeHue = 30; chokeSat = 90; chokeBright = 90; chokeAlpha = 200; // Orange
     }
   } else {
-    // No flow - gray dormant
+    // No flow or closed - gray dormant
     chokeHue = 0; chokeSat = 0; chokeBright = 60; chokeAlpha = 120;
   }
 
@@ -5333,7 +5390,7 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   rect(chokeLineX - chokeLineW/2, yTop, chokeLineW, yBot - yTop, 3);
 
   // Fill with fluid color if flowing
-  if (Q_CHOKE > 0) {
+  if (chokeIsFlowing) {
     noStroke();
     fill(chokeHue, chokeSat, chokeBright, chokeAlpha - 20);
     rect(chokeLineX - chokeLineW/2 + 1, yTop, chokeLineW - 2, yBot - yTop);
@@ -5365,12 +5422,33 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   fill(chokeHue, chokeSat, chokeBright);
   textSize(10);
   textAlign(CENTER, CENTER);
-  if (Q_CHOKE > 0) {
+  if (chokeIsFlowing) {
     text(`CHOKE ${nf(Q_CHOKE, 0, 0)} gpm ${CHOKE_DIRECTION}`, 0, 0);
+  } else if (!CHOKE_LINE_OPEN) {
+    text(`CHOKE LINE (CLOSED)`, 0, 0);
   } else {
     text(`CHOKE LINE`, 0, 0);
   }
   pop();
+
+  // Valve indicator at surface
+  const valveW = 14;
+  const valveH = 8;
+  const valveY = yTop + 15;
+  if (CHOKE_LINE_OPEN) {
+    // Open - green
+    noStroke();
+    fill(120, 80, 90, 200); // Green
+  } else {
+    // Closed - red
+    noStroke();
+    fill(0, 100, 85, 200); // Red
+  }
+  rect(chokeLineX - valveW/2, valveY - valveH/2, valveW, valveH, 2);
+  // Valve indicator line
+  stroke(0, 0, 100, 150);
+  strokeWeight(1);
+  line(chokeLineX - valveW/2 - 2, valveY, chokeLineX + valveW/2 + 2, valveY);
 }
 
 // MPD RCD cap
@@ -6528,11 +6606,11 @@ let uiBOP = {
   chokeFlowSlider: null, chokeFlowInput: null,
   chokeMWSlider: null, chokeMWInput: null,
   chokePressSlider: null, chokePressInput: null,
-  chokeDirBtn: null,
+  chokeDirBtn: null, chokeOpenBtn: null,
   killFlowSlider: null, killFlowInput: null,
   killMWSlider: null, killMWInput: null,
   killPressSlider: null, killPressInput: null,
-  killDirBtn: null
+  killDirBtn: null, killOpenBtn: null
 };
 
 function bopUIPosition() {
@@ -6570,6 +6648,10 @@ function buildBOPWellControlUI() {
       BOP_CLOSED = !BOP_CLOSED;
       uiBOP.bopBtn.html(BOP_CLOSED ? 'BOP: CLOSED' : 'BOP: OPEN');
       uiBOP.bopBtn.style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80');
+      // Reset closed well pressure boost when opening BOP
+      if (!BOP_CLOSED) {
+        closedWellPressureBoost_psi = 0;
+      }
     });
 
   // === CHOKE LINE ===
@@ -6622,17 +6704,34 @@ function buildBOPWellControlUI() {
     uiBOP.chokePressSlider.value(CHOKE_PRESSURE_psi);
   });
 
-  // Choke Direction
+  // Choke Direction and Open/Close
+  const chokeButtonDiv = createDiv('').parent(uiBOP.root)
+    .style('display', 'flex')
+    .style('gap', '8px')
+    .style('margin-bottom', '4px');
+
   uiBOP.chokeDirBtn = createButton(`Direction: ${CHOKE_DIRECTION}`)
-    .parent(uiBOP.root)
+    .parent(chokeButtonDiv)
     .style('width', '140px')
     .style('height', '26px')
     .style('font-size', '11px')
-    .style('margin-bottom', '4px')
     .mousePressed(() => {
       CHOKE_DIRECTION = (CHOKE_DIRECTION === 'UP') ? 'DOWN' : 'UP';
       uiBOP.chokeDirBtn.html(`Direction: ${CHOKE_DIRECTION}`);
       updateChokePressureInputState();
+    });
+
+  uiBOP.chokeOpenBtn = createButton(CHOKE_LINE_OPEN ? 'OPEN' : 'CLOSED')
+    .parent(chokeButtonDiv)
+    .style('width', '90px')
+    .style('height', '26px')
+    .style('font-size', '11px')
+    .style('background', CHOKE_LINE_OPEN ? '#4ade80' : '#ff6b6b')
+    .style('font-weight', 'bold')
+    .mousePressed(() => {
+      CHOKE_LINE_OPEN = !CHOKE_LINE_OPEN;
+      uiBOP.chokeOpenBtn.html(CHOKE_LINE_OPEN ? 'OPEN' : 'CLOSED');
+      uiBOP.chokeOpenBtn.style('background', CHOKE_LINE_OPEN ? '#4ade80' : '#ff6b6b');
     });
 
   // === KILL LINE ===
@@ -6685,17 +6784,34 @@ function buildBOPWellControlUI() {
     uiBOP.killPressSlider.value(KILL_PRESSURE_psi);
   });
 
-  // Kill Direction
+  // Kill Direction and Open/Close
+  const killButtonDiv = createDiv('').parent(uiBOP.root)
+    .style('display', 'flex')
+    .style('gap', '8px')
+    .style('margin-bottom', '4px');
+
   uiBOP.killDirBtn = createButton(`Direction: ${KILL_DIRECTION}`)
-    .parent(uiBOP.root)
+    .parent(killButtonDiv)
     .style('width', '140px')
     .style('height', '26px')
     .style('font-size', '11px')
-    .style('margin-bottom', '4px')
     .mousePressed(() => {
       KILL_DIRECTION = (KILL_DIRECTION === 'UP') ? 'DOWN' : 'UP';
       uiBOP.killDirBtn.html(`Direction: ${KILL_DIRECTION}`);
       updateKillPressureInputState();
+    });
+
+  uiBOP.killOpenBtn = createButton(KILL_LINE_OPEN ? 'OPEN' : 'CLOSED')
+    .parent(killButtonDiv)
+    .style('width', '90px')
+    .style('height', '26px')
+    .style('font-size', '11px')
+    .style('background', KILL_LINE_OPEN ? '#4ade80' : '#ff6b6b')
+    .style('font-weight', 'bold')
+    .mousePressed(() => {
+      KILL_LINE_OPEN = !KILL_LINE_OPEN;
+      uiBOP.killOpenBtn.html(KILL_LINE_OPEN ? 'OPEN' : 'CLOSED');
+      uiBOP.killOpenBtn.style('background', KILL_LINE_OPEN ? '#4ade80' : '#ff6b6b');
     });
 
   // Help text
@@ -6774,7 +6890,7 @@ function updateBOPPressureDisplays() {
   if (!uiBOP.chokePressInput || !uiBOP.killPressInput) return;
 
   // CHOKE LINE
-  if (CHOKE_DIRECTION === 'DOWN' && Q_CHOKE > 0 && BOP_CLOSED) {
+  if (CHOKE_DIRECTION === 'DOWN' && Q_CHOKE > 0 && BOP_CLOSED && CHOKE_LINE_OPEN) {
     // Calculate SPP for choke line
     const chokeRawSPP = chokeLinePumpPressure();
     const chokeSPP = updateChokeSPP(chokeRawSPP);
@@ -6787,7 +6903,7 @@ function updateBOPPressureDisplays() {
   }
 
   // KILL LINE
-  if (KILL_DIRECTION === 'DOWN' && Q_KILL > 0 && BOP_CLOSED) {
+  if (KILL_DIRECTION === 'DOWN' && Q_KILL > 0 && BOP_CLOSED && KILL_LINE_OPEN) {
     // Calculate SPP for kill line
     const killRawSPP = killLinePumpPressure();
     const killSPP = updateKillSPP(killRawSPP);
