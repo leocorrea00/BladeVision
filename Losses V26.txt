@@ -1453,6 +1453,17 @@ function stepAdvection(){
       // Topfill is injected at surface level, not at BOP
       annBelowGrid[0] = boosterEffluentMW;
 
+      // Advect formation fluids DOWN in parallel with mud
+      for (let i = gasPhaseFrom_below.length - 1; i > 0; i--) {
+        gasPhaseFrom_below[i] = gasPhaseFrom_below[i - 1];
+        oilPhaseFrom_below[i] = oilPhaseFrom_below[i - 1];
+        waterPhaseFrom_below[i] = waterPhaseFrom_below[i - 1];
+      }
+      // No formation fluid enters from booster (clean mud)
+      gasPhaseFrom_below[0] = 0;
+      oilPhaseFrom_below[0] = 0;
+      waterPhaseFrom_below[0] = 0;
+
       accBelow -= CELL_M;
     }
   }
@@ -1472,6 +1483,18 @@ function stepAdvection(){
       }
       // New fluid from bit enters at bottom
       annBelowGrid[annBelowGrid.length - 1] = dsEffluentMW;
+
+      // Advect formation fluids UP in parallel with mud
+      for (let i = 0; i < gasPhaseFrom_below.length - 1; i++) {
+        gasPhaseFrom_below[i] = gasPhaseFrom_below[i + 1];
+        oilPhaseFrom_below[i] = oilPhaseFrom_below[i + 1];
+        waterPhaseFrom_below[i] = waterPhaseFrom_below[i + 1];
+      }
+      // No formation fluid enters from drillstring at bottom (clean mud)
+      gasPhaseFrom_below[gasPhaseFrom_below.length - 1] = 0;
+      oilPhaseFrom_below[oilPhaseFrom_below.length - 1] = 0;
+      waterPhaseFrom_below[waterPhaseFrom_below.length - 1] = 0;
+
       accDSup -= CELL_M;
     }
   }
@@ -1499,6 +1522,21 @@ function stepAdvection(){
       const mixMW = (qFromAnnBelow * fromBelowMW + qBO_up * boosterEffluentMW) / qTotal;
 
       annAboveGrid.push(mixMW);
+
+      // Advect formation fluids UP into riser
+      // Remove from surface
+      gasPhaseFrom_above.shift();
+      oilPhaseFrom_above.shift();
+      waterPhaseFrom_above.shift();
+
+      // Add formation fluids from below-BOP entering at BOP depth
+      // Only the fraction coming from annulus below carries formation fluids
+      // Booster is clean mud, so dilute the formation fluids by flow rate ratio
+      const dilutionFactor = qFromAnnBelow / qTotal;
+      gasPhaseFrom_above.push((gasPhaseFrom_below[0] || 0) * dilutionFactor);
+      oilPhaseFrom_above.push((oilPhaseFrom_below[0] || 0) * dilutionFactor);
+      waterPhaseFrom_above.push((waterPhaseFrom_below[0] || 0) * dilutionFactor);
+
       accAbove -= CELL_M;
     }
 
