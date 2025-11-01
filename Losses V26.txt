@@ -123,6 +123,23 @@ let waterPhaseFrom_above = [];
 // Track current influx rate for flow routing
 let current_influx_m3s = 0; // Current influx rate in m³/s (updated each frame)
 
+// Gas Expansion Model (for when formationFluidType === 'GAS')
+let GAS_EXPANSION_MODE = 'IDEAL'; // 'IDEAL' or 'REAL'
+let GAS_ENABLED = false; // Enable gas expansion calculations
+
+// Gas properties (for Methane CH4 as default)
+let GAS_Pc_psi = 667.8; // Critical pressure (psia) - Methane
+let GAS_Tc_R = 343.9; // Critical temperature (Rankine) - Methane
+let GAS_SPECIFIC_GRAVITY = 0.554; // Relative to air (Methane ≈ 0.554)
+
+// Reference conditions for gas (at entry point)
+let GAS_REFERENCE_P_psi = 7000; // Reference pressure (typically = pore pressure)
+let GAS_REFERENCE_T_R = 600; // Reference temperature (Rankine) at depth
+
+// Temperature profile (simplified - could be gradient later)
+let SURFACE_TEMP_R = 530; // 70°F in Rankine
+let BOTTOM_TEMP_R = 600; // Temperature at TD
+
 // ============================ GLOBAL STATE =============================
 let HYDRAULICS_MODEL = "Refined"; // "API" | "Refined"
 let FRICTION_MODE = "hydraulics"; // keep hydraulics by default
@@ -1687,6 +1704,13 @@ function stepAdvection(){
       }
     }
   }
+
+  // ===============================
+  // 10) GAS EXPANSION (if enabled)
+  // ===============================
+  // Apply gas expansion to all cells after advection
+  // Gas expands as it migrates upward to lower pressure zones
+  applyGasExpansion(dt);
 }
 
 
@@ -1881,6 +1905,199 @@ function frictionPsi(depth_m){
   const qTot = (window.Q_DS || 0) + (window.Q_BO || 0);
   const base = (typeof K_FAC === 'number' ? K_FAC : 0) * qTot * Math.max(depth_m, 0);
   return base; // no RPM boost here
+}
+
+// ====================== SMOOTH TRANSITION HELPERS =======================
+
+// Global smoothstep function for smooth blending between two values
+// Uses Hermite interpolation: 3t² - 2t³
+function smoothstep(edge0, edge1, x) {
+  if (x <= edge0) return 0;
+  if (x >= edge1) return 1;
+  const t = (x - edge0) / (edge1 - edge0);
+  return t * t * (3 - 2 * t);
+}
+
+// Linear interpolation between two values
+function lerp(a, b, t) {
+  return a * (1 - t) + b * t;
+}
+
+// Clamp value between min and max
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(value, max));
+}
+
+// ====================== GAS EXPANSION CALCULATIONS =======================
+
+// Pre-calculated Z-factor table for Real Gas mode
+// Rows = Pr (reduced pressure = P/Pc), Columns = Tr (reduced temperature = T/Tc)
+// Covers typical drilling ranges: Pr from 0.1 to 10, Tr from 1.0 to 2.5
+const Z_FACTOR_TABLE = {
+  Pr: [0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0],
+  Tr: [1.0, 1.1, 1.2, 1.3, 1.5, 1.7, 2.0, 2.5],
+  // Z values [Pr_index][Tr_index]
+  Z: [
+    [0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 1.00, 1.00], // Pr = 0.1
+    [0.93, 0.95, 0.96, 0.97, 0.98, 0.99, 0.99, 1.00], // Pr = 0.5
+    [0.80, 0.88, 0.91, 0.93, 0.96, 0.97, 0.99, 1.00], // Pr = 1.0
+    [0.68, 0.81, 0.87, 0.90, 0.94, 0.96, 0.98, 1.00], // Pr = 1.5
+    [0.60, 0.75, 0.83, 0.88, 0.93, 0.95, 0.98, 1.00], // Pr = 2.0
+    [0.53, 0.68, 0.79, 0.85, 0.91, 0.94, 0.97, 0.99], // Pr = 3.0
+    [0.53, 0.66, 0.77, 0.84, 0.90, 0.94, 0.97, 0.99], // Pr = 4.0
+    [0.57, 0.68, 0.78, 0.84, 0.91, 0.94, 0.97, 1.00], // Pr = 5.0
+    [0.70, 0.77, 0.84, 0.88, 0.93, 0.96, 0.98, 1.00], // Pr = 7.0
+    [0.88, 0.91, 0.94, 0.96, 0.98, 0.99, 1.00, 1.01], // Pr = 10.0
+  ]
+};
+
+// Interpolate Z-factor from lookup table
+function getZFactor(P_psi, T_R) {
+  // Calculate reduced pressure and temperature
+  const Pr = P_psi / GAS_Pc_psi;
+  const Tr = T_R / GAS_Tc_R;
+
+  // Clamp to table bounds
+  const Pr_clamped = Math.max(Z_FACTOR_TABLE.Pr[0], Math.min(Pr, Z_FACTOR_TABLE.Pr[Z_FACTOR_TABLE.Pr.length - 1]));
+  const Tr_clamped = Math.max(Z_FACTOR_TABLE.Tr[0], Math.min(Tr, Z_FACTOR_TABLE.Tr[Z_FACTOR_TABLE.Tr.length - 1]));
+
+  // Find bounding indices for Pr
+  let Pr_idx0 = 0, Pr_idx1 = 0;
+  for (let i = 0; i < Z_FACTOR_TABLE.Pr.length - 1; i++) {
+    if (Pr_clamped >= Z_FACTOR_TABLE.Pr[i] && Pr_clamped <= Z_FACTOR_TABLE.Pr[i + 1]) {
+      Pr_idx0 = i;
+      Pr_idx1 = i + 1;
+      break;
+    }
+  }
+
+  // Find bounding indices for Tr
+  let Tr_idx0 = 0, Tr_idx1 = 0;
+  for (let i = 0; i < Z_FACTOR_TABLE.Tr.length - 1; i++) {
+    if (Tr_clamped >= Z_FACTOR_TABLE.Tr[i] && Tr_clamped <= Z_FACTOR_TABLE.Tr[i + 1]) {
+      Tr_idx0 = i;
+      Tr_idx1 = i + 1;
+      break;
+    }
+  }
+
+  // Bilinear interpolation
+  const Pr0 = Z_FACTOR_TABLE.Pr[Pr_idx0];
+  const Pr1 = Z_FACTOR_TABLE.Pr[Pr_idx1];
+  const Tr0 = Z_FACTOR_TABLE.Tr[Tr_idx0];
+  const Tr1 = Z_FACTOR_TABLE.Tr[Tr_idx1];
+
+  const Z00 = Z_FACTOR_TABLE.Z[Pr_idx0][Tr_idx0];
+  const Z01 = Z_FACTOR_TABLE.Z[Pr_idx0][Tr_idx1];
+  const Z10 = Z_FACTOR_TABLE.Z[Pr_idx1][Tr_idx0];
+  const Z11 = Z_FACTOR_TABLE.Z[Pr_idx1][Tr_idx1];
+
+  // Interpolation weights
+  const wPr = (Pr1 - Pr0) > 0.001 ? (Pr_clamped - Pr0) / (Pr1 - Pr0) : 0;
+  const wTr = (Tr1 - Tr0) > 0.001 ? (Tr_clamped - Tr0) / (Tr1 - Tr0) : 0;
+
+  // Bilinear interpolation
+  const Z_interp = Z00 * (1 - wPr) * (1 - wTr) +
+                   Z10 * wPr * (1 - wTr) +
+                   Z01 * (1 - wPr) * wTr +
+                   Z11 * wPr * wTr;
+
+  return Z_interp;
+}
+
+// Calculate temperature at a given depth (linear gradient)
+function temperatureAtDepth(depth_m) {
+  // Linear gradient from surface to bottom
+  const fraction = Math.min(1.0, depth_m / TD_DEPTH);
+  return SURFACE_TEMP_R + fraction * (BOTTOM_TEMP_R - SURFACE_TEMP_R);
+}
+
+// Calculate gas expansion for a single cell
+// Returns expansion factor (new volume / reference volume)
+function calculateGasExpansionFactor(depth_m, isAboveBOP) {
+  if (!GAS_ENABLED || formationFluidType !== 'GAS') return 1.0;
+
+  // Get current pressure at this depth
+  const P_current = pressureAtDepth(depth_m);
+  if (P_current < 14.7) return 1.0; // Clamp to atmospheric minimum
+
+  // Get temperature at this depth
+  const T_current = temperatureAtDepth(depth_m);
+
+  let expansionFactor = 1.0;
+
+  if (GAS_EXPANSION_MODE === 'IDEAL') {
+    // Ideal Gas Law: V2/V1 = (P1/P2) * (T2/T1)
+    const P_ref = GAS_REFERENCE_P_psi;
+    const T_ref = GAS_REFERENCE_T_R;
+
+    expansionFactor = (P_ref / P_current) * (T_current / T_ref);
+  } else {
+    // Real Gas: V2/V1 = (Z2*P1*T2) / (Z1*P2*T1)
+    const P_ref = GAS_REFERENCE_P_psi;
+    const T_ref = GAS_REFERENCE_T_R;
+
+    const Z_ref = getZFactor(P_ref, T_ref);
+    const Z_current = getZFactor(P_current, T_current);
+
+    expansionFactor = (Z_current * P_ref * T_current) / (Z_ref * P_current * T_ref);
+  }
+
+  // Clamp expansion to reasonable limits (prevents runaway expansion)
+  return Math.max(0.1, Math.min(expansionFactor, 100.0));
+}
+
+// Apply gas expansion to all cells with gas
+function applyGasExpansion(dt_s) {
+  if (!GAS_ENABLED || formationFluidType !== 'GAS' || dt_s < 1e-6) return;
+
+  // Process below-BOP cells
+  for (let i = 0; i < gasPhaseFrom_below.length; i++) {
+    const gasFraction = gasPhaseFrom_below[i];
+    if (gasFraction < 0.001) continue; // Skip cells with negligible gas
+
+    // Calculate cell depth (bottom-up indexing)
+    const cellDepth = BOP_DEPTH + (gasPhaseFrom_below.length - 1 - i) * CELL_HEIGHT;
+
+    // Get expansion factor
+    const expansionFactor = calculateGasExpansionFactor(cellDepth, false);
+
+    // Expanded gas tries to occupy more space
+    // This pushes into adjacent cells (simplified: just scale the fraction)
+    // Full implementation would redistribute volume across cells
+    // For now, scale gas fraction by expansion (clamped to 1.0 max)
+    const expandedFraction = Math.min(1.0, gasFraction * expansionFactor);
+
+    // If gas expands beyond cell capacity, excess would push to cell above
+    if (expandedFraction > 0.95 && i > 0) {
+      const excess = expandedFraction - 0.95;
+      gasPhaseFrom_below[i] = 0.95;
+      gasPhaseFrom_below[i - 1] = Math.min(1.0, gasPhaseFrom_below[i - 1] + excess * 0.5);
+    } else {
+      gasPhaseFrom_below[i] = expandedFraction;
+    }
+  }
+
+  // Process above-BOP cells (riser)
+  for (let i = 0; i < gasPhaseFrom_above.length; i++) {
+    const gasFraction = gasPhaseFrom_above[i];
+    if (gasFraction < 0.001) continue;
+
+    // Calculate cell depth (top-down indexing, 0 = surface)
+    const cellDepth = i * CELL_HEIGHT;
+
+    const expansionFactor = calculateGasExpansionFactor(cellDepth, true);
+    const expandedFraction = Math.min(1.0, gasFraction * expansionFactor);
+
+    // If gas expands beyond cell capacity, push upward (toward surface)
+    if (expandedFraction > 0.95 && i > 0) {
+      const excess = expandedFraction - 0.95;
+      gasPhaseFrom_above[i] = 0.95;
+      gasPhaseFrom_above[i - 1] = Math.min(1.0, gasPhaseFrom_above[i - 1] + excess * 0.5);
+    } else {
+      gasPhaseFrom_above[i] = expandedFraction;
+    }
+  }
 }
 
 // ====================== PRESSURE / ECD PROFILES =======================
@@ -2216,8 +2433,9 @@ function chokeFrictionPsiLength(len_m, flowRate_m3s){
   const avgMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
   const rho_kgm3 = avgMW * PPG_TO_KGM3;
 
-  // Calculate friction using rheology-aware model (pipe flow, no RPM)
-  const dpdm_Pa = dP_per_m_annulus_withRPM(flowRate_m3s, rho_kgm3, D_m, 0, K, n, tauY, 0); // Inner OD=0 for pipe
+  // ✅ FIXED: Use pipe friction function (not annulus with OD=0)
+  // This ensures proper laminar/turbulent transition for pipe flow
+  const dpdm_Pa = dP_per_m_pipe_withRPM(flowRate_m3s, rho_kgm3, D_m, K, n, tauY, 0); // No RPM in choke line
   const PA_TO_PSI = 1.0 / 6894.757;
   return dpdm_Pa * len_m * PA_TO_PSI;
 }
@@ -2234,8 +2452,9 @@ function killFrictionPsiLength(len_m, flowRate_m3s){
   const avgMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
   const rho_kgm3 = avgMW * PPG_TO_KGM3;
 
-  // Calculate friction using rheology-aware model (pipe flow, no RPM)
-  const dpdm_Pa = dP_per_m_annulus_withRPM(flowRate_m3s, rho_kgm3, D_m, 0, K, n, tauY, 0); // Inner OD=0 for pipe
+  // ✅ FIXED: Use pipe friction function (not annulus with OD=0)
+  // This ensures proper laminar/turbulent transition for pipe flow
+  const dpdm_Pa = dP_per_m_pipe_withRPM(flowRate_m3s, rho_kgm3, D_m, K, n, tauY, 0); // No RPM in kill line
   const PA_TO_PSI = 1.0 / 6894.757;
   return dpdm_Pa * len_m * PA_TO_PSI;
 }
@@ -2265,6 +2484,185 @@ function bopLinePressureContribution(){
   }
 
   return totalContribution;
+}
+
+// === MULTI-PATH PRESSURE BALANCE SOLVER FOR UP FLOW ===
+// Solves for flow distribution when multiple paths available for UP flow
+// Each path must satisfy: BHP_source = P_hydro + P_friction(Q) + P_applied
+function calculateUPFlowDistribution(qAvailable_m3s, BHP_source_psi) {
+  // Result object
+  const result = {
+    Q_riser_m3s: 0,
+    Q_choke_m3s: 0,
+    Q_kill_m3s: 0,
+    convergence: false,
+    iterations: 0,
+    warnings: []
+  };
+
+  if (qAvailable_m3s < 1e-8) return result;
+
+  // Identify available paths
+  const paths = [];
+
+  // RISER path (available if BOP open)
+  if (!BOP_CLOSED) {
+    const riserMW = annAboveGrid.length > 0 ? average(annAboveGrid) : MW_DS;
+    const riserHydro_psi = PSI_COEF * riserMW * BOP_DEPTH;
+    const appliedPressure = (MPD_ON && (annulusTopDepthGlobal() <= 0.5)) ? (CURRENT_SBP || 0) : 0;
+
+    paths.push({
+      name: 'RISER',
+      hydrostaticPsi: riserHydro_psi,
+      appliedPsi: appliedPressure,
+      length_m: BOP_DEPTH,
+      diameter_m: riser_ID_m,
+      avgMW: riserMW
+    });
+  }
+
+  // CHOKE LINE path (available if open and direction UP)
+  if (BOP_CLOSED && CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP') {
+    const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
+    const chokeHydro_psi = PSI_COEF * chokeMW * BOP_DEPTH;
+
+    paths.push({
+      name: 'CHOKE',
+      hydrostaticPsi: chokeHydro_psi,
+      appliedPsi: CHOKE_PRESSURE_psi,
+      length_m: BOP_DEPTH,
+      diameter_m: CHOKE_LINE_ID_m,
+      avgMW: chokeMW
+    });
+  }
+
+  // KILL LINE path (available if open and direction UP)
+  if (BOP_CLOSED && KILL_LINE_OPEN && KILL_DIRECTION === 'UP') {
+    const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
+    const killHydro_psi = PSI_COEF * killMW * BOP_DEPTH;
+
+    paths.push({
+      name: 'KILL',
+      hydrostaticPsi: killHydro_psi,
+      appliedPsi: KILL_PRESSURE_psi,
+      length_m: BOP_DEPTH,
+      diameter_m: KILL_LINE_ID_m,
+      avgMW: killMW
+    });
+  }
+
+  // If no paths available, return zero flow
+  if (paths.length === 0) {
+    result.warnings.push('No UP flow paths available');
+    return result;
+  }
+
+  // If only one path, all flow goes through it
+  if (paths.length === 1) {
+    const path = paths[0];
+    const Q = qAvailable_m3s;
+
+    if (path.name === 'RISER') result.Q_riser_m3s = Q;
+    else if (path.name === 'CHOKE') result.Q_choke_m3s = Q;
+    else if (path.name === 'KILL') result.Q_kill_m3s = Q;
+
+    result.convergence = true;
+    result.iterations = 1;
+    return result;
+  }
+
+  // MULTI-PATH: Iterative solver using conductance approach
+  // Initial guess: distribute by inverse resistance (linear approximation)
+  const { K, n, tauY } = getRheoForCalc();
+
+  // Estimate initial conductances (inverse resistance)
+  for (let p of paths) {
+    // Simplified conductance estimate based on Hagen-Poiseuille for initial guess
+    const D = p.diameter_m;
+    const L = p.length_m;
+    // Conductance ~ D^4 / (viscosity * L)
+    // Approximate viscosity from K for power law
+    const approxVisc = K * Math.pow(1.0, n-1); // at reference shear rate
+    p.conductance = Math.pow(D, 4) / (approxVisc * L + 1e-9);
+  }
+
+  const totalConductance = paths.reduce((sum, p) => sum + p.conductance, 0);
+
+  // Initial flow distribution by conductance
+  const Q_initial = paths.map(p => qAvailable_m3s * (p.conductance / totalConductance));
+
+  // Iterative refinement (Newton-Raphson style)
+  const MAX_ITERATIONS = 20;
+  const TOLERANCE_PSI = 10; // Converge when pressures within 10 psi
+
+  let Q_current = [...Q_initial];
+
+  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+    result.iterations = iter + 1;
+
+    // Calculate required source pressure for each path with current Q
+    const sourcePressures = paths.map((p, i) => {
+      const Q = Q_current[i];
+      if (Q < 1e-9) return BHP_source_psi + 1e6; // Very high if no flow
+
+      // Calculate friction for this flow rate
+      let frictionPsi = 0;
+      if (p.name === 'RISER') {
+        // Use annulus friction calculation
+        const A_riser = area_annulus(riser_ID_m, ds_OD_m);
+        const rho = p.avgMW * PPG_TO_KGM3;
+        const dpdm_Pa = dP_per_m_annulus_withRPM(Q, rho, riser_ID_m, ds_OD_m, K, n, tauY, 0);
+        frictionPsi = (dpdm_Pa * p.length_m) / 6894.757;
+      } else if (p.name === 'CHOKE') {
+        frictionPsi = chokeFrictionPsiLength(p.length_m, Q);
+      } else if (p.name === 'KILL') {
+        frictionPsi = killFrictionPsiLength(p.length_m, Q);
+      }
+
+      // Required source pressure = hydro + friction + applied
+      return p.hydrostaticPsi + frictionPsi + p.appliedPsi;
+    });
+
+    // Check convergence: all source pressures should match BHP_source
+    const avgSourceP = sourcePressures.reduce((sum, p) => sum + p, 0) / sourcePressures.length;
+    const maxDeviation = Math.max(...sourcePressures.map(p => Math.abs(p - avgSourceP)));
+
+    if (maxDeviation < TOLERANCE_PSI) {
+      result.convergence = true;
+      break;
+    }
+
+    // Adjust flow rates: if path requires higher pressure, reduce its flow
+    // If path requires lower pressure, increase its flow
+    const targetPressure = BHP_source_psi;
+
+    for (let i = 0; i < paths.length; i++) {
+      const pressureError = sourcePressures[i] - targetPressure;
+      // Adjustment factor: reduce Q if pressure too high, increase if too low
+      // Use small step for stability
+      const adjustment = -pressureError * 0.0001; // Damping factor
+      Q_current[i] = Math.max(0, Q_current[i] + adjustment);
+    }
+
+    // Normalize to maintain total flow
+    const sumQ = Q_current.reduce((sum, q) => sum + q, 0);
+    if (sumQ > 1e-9) {
+      Q_current = Q_current.map(q => q * (qAvailable_m3s / sumQ));
+    }
+  }
+
+  // Assign results
+  for (let i = 0; i < paths.length; i++) {
+    if (paths[i].name === 'RISER') result.Q_riser_m3s = Q_current[i];
+    else if (paths[i].name === 'CHOKE') result.Q_choke_m3s = Q_current[i];
+    else if (paths[i].name === 'KILL') result.Q_kill_m3s = Q_current[i];
+  }
+
+  if (!result.convergence) {
+    result.warnings.push('Pressure balance did not converge fully');
+  }
+
+  return result;
 }
 // --- Pump SPP helpers should also use the rheology-aware friction ---
 function sppAtLevel(lvl_m){
@@ -2509,47 +2907,47 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Available fluid to flow UP through choke/kill lines
     let qAvailable_belowBOP = Math.max(0, qIn_belowBOP - qToLoss);
 
-    // Choke and Kill lines flowing UP extract fluid from below-BOP
+    // === PRESSURE-DRIVEN UP FLOW CALCULATION ===
+    // Use pressure balance solver to calculate actual flow rates through choke/kill lines
+    // User-set flow rates (Q_CHOKE, Q_KILL) are IGNORED for UP direction
+    // Flow is determined by pressure balance, not pump setting
     let qChoke_actual = 0, qKill_actual = 0;
 
-    if (CHOKE_DIRECTION === "UP" && qChoke_m3s > 0 && CHOKE_LINE_OPEN) {
-      if (KILL_DIRECTION === "UP" && qKill_m3s > 0 && KILL_LINE_OPEN) {
-        // ✅ BOTH LINES FLOWING UP - PRESSURE BALANCE LOGIC
-        // Lower resistance path gets MORE flow (inverse relationship)
+    const BHP_at_BOP = pressureAtDepth(BOP_DEPTH);
+    const flowDistribution = calculateUPFlowDistribution(qAvailable_belowBOP, BHP_at_BOP);
 
-        // Calculate total resistance for each line (friction + applied pressure)
-        const BHP_psi = pressureAtDepth(BOP_DEPTH); // Pressure at BOP in annulus
+    qChoke_actual = flowDistribution.Q_choke_m3s;
+    qKill_actual = flowDistribution.Q_kill_m3s;
 
-        const friction_choke_psi = chokeFrictionPsiLength(BOP_DEPTH, qChoke_m3s);
-        const friction_kill_psi = killFrictionPsiLength(BOP_DEPTH, qKill_m3s);
+    // Store calculated flow rates for UI display
+    window.__Q_CHOKE_CALCULATED_m3s = qChoke_actual;
+    window.__Q_KILL_CALCULATED_m3s = qKill_actual;
+    window.__CHOKE_PRESSURE_WARNING = null;
+    window.__KILL_PRESSURE_WARNING = null;
 
-        const R_choke = friction_choke_psi + CHOKE_PRESSURE_psi; // Total resistance
-        const R_kill = friction_kill_psi + KILL_PRESSURE_psi;
-
-        // Check if there's enough pressure to flow through either line
-        const can_flow_choke = BHP_psi > R_choke;
-        const can_flow_kill = BHP_psi > R_kill;
-
-        if (can_flow_choke && can_flow_kill) {
-          // Both lines can flow - split based on inverse resistance
-          const total_conductance = (1/Math.max(R_choke, 1)) + (1/Math.max(R_kill, 1));
-          const choke_fraction = (1/Math.max(R_choke, 1)) / total_conductance;
-          const kill_fraction = (1/Math.max(R_kill, 1)) / total_conductance;
-
-          qChoke_actual = Math.min(qChoke_m3s, qAvailable_belowBOP * choke_fraction);
-          qKill_actual = Math.min(qKill_m3s, qAvailable_belowBOP * kill_fraction);
-        } else if (can_flow_choke) {
-          qChoke_actual = Math.min(qChoke_m3s, qAvailable_belowBOP);
-        } else if (can_flow_kill) {
-          qKill_actual = Math.min(qKill_m3s, qAvailable_belowBOP);
-        }
-      } else {
-        // Only choke line flowing UP
-        qChoke_actual = Math.min(qChoke_m3s, qAvailable_belowBOP);
+    // Check if requested pressures can be achieved (for user feedback)
+    if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP' && qChoke_actual > 1e-6) {
+      // Calculate actual pressure at surface with calculated flow
+      const actualFriction = chokeFrictionPsiLength(BOP_DEPTH, qChoke_actual);
+      const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
+      const actualHydro = PSI_COEF * chokeMW * BOP_DEPTH;
+      const actualSurfaceP = BHP_at_BOP - actualHydro - actualFriction;
+      const pressureDiff = Math.abs(actualSurfaceP - CHOKE_PRESSURE_psi);
+      if (pressureDiff > 50) {
+        window.__CHOKE_PRESSURE_WARNING = `Target: ${CHOKE_PRESSURE_psi.toFixed(0)} psi, Actual: ${actualSurfaceP.toFixed(0)} psi`;
       }
-    } else if (KILL_DIRECTION === "UP" && qKill_m3s > 0) {
-      // Only kill line flowing UP
-      qKill_actual = Math.min(qKill_m3s, qAvailable_belowBOP);
+    }
+
+    if (KILL_LINE_OPEN && KILL_DIRECTION === 'UP' && qKill_actual > 1e-6) {
+      // Calculate actual pressure at surface with calculated flow
+      const actualFriction = killFrictionPsiLength(BOP_DEPTH, qKill_actual);
+      const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
+      const actualHydro = PSI_COEF * killMW * BOP_DEPTH;
+      const actualSurfaceP = BHP_at_BOP - actualHydro - actualFriction;
+      const pressureDiff = Math.abs(actualSurfaceP - KILL_PRESSURE_psi);
+      if (pressureDiff > 50) {
+        window.__KILL_PRESSURE_WARNING = `Target: ${KILL_PRESSURE_psi.toFixed(0)} psi, Actual: ${actualSurfaceP.toFixed(0)} psi`;
+      }
     }
 
     // Flow reaching surface through choke/kill lines
@@ -2666,7 +3064,39 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // the zone deactivates (dP < 0 triggers hysteresis), qToLoss → 0, takeBO → 0,
   // and BO_left routes upward via this logic. Booster then increases riser
   // hydrostatic until new equilibrium is found. No explicit reversal code needed!
-  const qAnnUp = DS_left + TF_left + (riserFull || takeBO === 0 ? BO_left : 0) + qInflux;
+  let qAnnUp = DS_left + TF_left + (riserFull || takeBO === 0 ? BO_left : 0) + qInflux;
+
+  // === MULTI-PATH UP FLOW WHEN BOP OPEN + CHOKE/KILL LINES ALSO UP ===
+  // If choke/kill lines are open for UP flow when BOP is also open,
+  // use pressure balance to distribute flow across riser + choke + kill paths
+  const hasChokeUP = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+  const hasKillUP = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
+
+  if (hasChokeUP || hasKillUP) {
+    // Use pressure balance solver to distribute upward flow
+    const BHP_at_BOP = pressureAtDepth(BOP_DEPTH);
+    const flowDistribution = calculateUPFlowDistribution(qAnnUp, BHP_at_BOP);
+
+    // Flow through riser (most of it will go here due to lower resistance)
+    const Q_riser_actual = flowDistribution.Q_riser_m3s;
+    const Q_choke_actual = flowDistribution.Q_choke_m3s;
+    const Q_kill_actual = flowDistribution.Q_kill_m3s;
+
+    // Update qAnnUp to reflect only riser flow (choke/kill bypass the riser)
+    qAnnUp = Q_riser_actual;
+
+    // Store calculated choke/kill flows
+    window.__Q_CHOKE_CALCULATED_m3s = Q_choke_actual;
+    window.__Q_KILL_CALCULATED_m3s = Q_kill_actual;
+
+    // Total flow out includes riser + choke + kill paths
+    window.__Q_TOTAL_UP_m3s = Q_riser_actual + Q_choke_actual + Q_kill_actual;
+  } else {
+    // No choke/kill lines open for UP, all flow through riser
+    window.__Q_CHOKE_CALCULATED_m3s = 0;
+    window.__Q_KILL_CALCULATED_m3s = 0;
+    window.__Q_TOTAL_UP_m3s = qAnnUp;
+  }
 
   // ✅ CRITICAL FIX: Separate flows for friction calculation
   // BELOW BOP (casing/openhole): DS return + KICK INFLUX
@@ -4864,6 +5294,8 @@ if (MPD_ON){
 }
   // Update CML level and (if enabled) Auto-CML flow command BEFORE pressures are used
   updateCMLLevelAndControl();
+  // Update BOP flow displays based on direction (UP = calculated/read-only, DOWN = user-editable)
+  updateBOPFlowDisplays();
   // Well visuals and charts
   drawWellAndFluids();
   drawFractureSymbols();
@@ -7034,6 +7466,68 @@ function updateBOPPressureDisplays() {
     if (uiBOP.killPressSlider) uiBOP.killPressSlider.value(killSPP);
   } else if (KILL_DIRECTION === 'UP') {
     // UP mode: user controls pressure
+  }
+}
+
+// Update flow rate displays for choke/kill lines
+// For UP direction: shows calculated flow (read-only)
+// For DOWN direction: shows user-set flow (editable)
+function updateBOPFlowDisplays() {
+  if (!uiBOP.chokeFlowInput || !uiBOP.killFlowInput) return;
+
+  // CHOKE LINE FLOW
+  if (CHOKE_DIRECTION === 'UP') {
+    // UP: Show calculated flow (pressure-driven)
+    const calcFlow_m3s = window.__Q_CHOKE_CALCULATED_m3s || 0;
+    const calcFlow_gpm = calcFlow_m3s * 15850.323;
+    uiBOP.chokeFlowInput.value(nf(calcFlow_gpm, 0, 1));
+    if (uiBOP.chokeFlowSlider) uiBOP.chokeFlowSlider.value(calcFlow_gpm);
+
+    // Disable controls (flow is calculated, not user-set)
+    uiBOP.chokeFlowInput.attribute('readonly', true);
+    uiBOP.chokeFlowInput.style('background', 'rgba(100,150,200,0.15)');
+    uiBOP.chokeFlowInput.style('cursor', 'not-allowed');
+    if (uiBOP.chokeFlowSlider) {
+      uiBOP.chokeFlowSlider.attribute('disabled', true);
+      uiBOP.chokeFlowSlider.style('opacity', '0.5');
+    }
+  } else {
+    // DOWN: User controls flow (editable)
+    // Values are set by user input handlers
+    uiBOP.chokeFlowInput.removeAttribute('readonly');
+    uiBOP.chokeFlowInput.style('background', 'rgba(255,255,255,0.07)');
+    uiBOP.chokeFlowInput.style('cursor', 'text');
+    if (uiBOP.chokeFlowSlider) {
+      uiBOP.chokeFlowSlider.removeAttribute('disabled');
+      uiBOP.chokeFlowSlider.style('opacity', '1');
+    }
+  }
+
+  // KILL LINE FLOW
+  if (KILL_DIRECTION === 'UP') {
+    // UP: Show calculated flow (pressure-driven)
+    const calcFlow_m3s = window.__Q_KILL_CALCULATED_m3s || 0;
+    const calcFlow_gpm = calcFlow_m3s * 15850.323;
+    uiBOP.killFlowInput.value(nf(calcFlow_gpm, 0, 1));
+    if (uiBOP.killFlowSlider) uiBOP.killFlowSlider.value(calcFlow_gpm);
+
+    // Disable controls (flow is calculated, not user-set)
+    uiBOP.killFlowInput.attribute('readonly', true);
+    uiBOP.killFlowInput.style('background', 'rgba(100,150,200,0.15)');
+    uiBOP.killFlowInput.style('cursor', 'not-allowed');
+    if (uiBOP.killFlowSlider) {
+      uiBOP.killFlowSlider.attribute('disabled', true);
+      uiBOP.killFlowSlider.style('opacity', '0.5');
+    }
+  } else {
+    // DOWN: User controls flow (editable)
+    uiBOP.killFlowInput.removeAttribute('readonly');
+    uiBOP.killFlowInput.style('background', 'rgba(255,255,255,0.07)');
+    uiBOP.killFlowInput.style('cursor', 'text');
+    if (uiBOP.killFlowSlider) {
+      uiBOP.killFlowSlider.removeAttribute('disabled');
+      uiBOP.killFlowSlider.style('opacity', '1');
+    }
   }
 }
 
