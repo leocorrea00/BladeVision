@@ -128,11 +128,6 @@ let current_influx_m3s = 0; // Current influx rate in m³/s (updated each frame)
 // oil, and water as that slice moves toward the riser or side lines.
 let formationSlugQueue = [];
 
-// Line mud-weight tracking – stay synced with the drillstring unless the user
-// explicitly overrides the line density from the UI controls.
-let chokeMWSynced = true;
-let killMWSynced = true;
-
 // Gas Expansion Model (for when formationFluidType === 'GAS')
 let GAS_EXPANSION_MODE = 'IDEAL'; // 'IDEAL' or 'REAL'
 let GAS_ENABLED = false; // Enable gas expansion calculations
@@ -168,7 +163,7 @@ let CHOKE_LINE_ID_m = 0; // Converted to meters in setup
 let Q_CHOKE = 0; // gpm
 let CHOKE_DIRECTION = "UP"; // "UP" or "DOWN"
 let CHOKE_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
-let MW_CHOKE = 9.5; // ppg, choke line fluid (starts with same as DS)
+let MW_CHOKE = 9.5; // ppg, choke line fluid (initialized to well fluid at start)
 let CHOKE_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let chokeGrid = []; // Fluid tracking grid (BOP to surface)
 let accChoke = 0; // Advection accumulator
@@ -183,7 +178,7 @@ let KILL_LINE_ID_m = 0; // Converted to meters in setup
 let Q_KILL = 0; // gpm
 let KILL_DIRECTION = "UP"; // "UP" or "DOWN"
 let KILL_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
-let MW_KILL = 9.5; // ppg, kill line fluid (starts with same as DS)
+let MW_KILL = 9.5; // ppg, kill line fluid (initialized to well fluid at start)
 let KILL_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let killGrid = []; // Fluid tracking grid (BOP to surface)
 let accKill = 0; // Advection accumulator
@@ -7847,12 +7842,10 @@ function buildBOPWellControlUI() {
   uiBOP.chokeMWSlider = chokeMW.slider;
   uiBOP.chokeMWInput = chokeMW.input;
   chokeMW.slider.input(() => {
-    chokeMWSynced = false;
     MW_CHOKE = uiBOP.chokeMWSlider.value();
     uiBOP.chokeMWInput.value(nf(MW_CHOKE, 1, 1));
   });
   chokeMW.input.input(() => {
-    chokeMWSynced = false;
     MW_CHOKE = clamp(Number(uiBOP.chokeMWInput.value()) || MW_CHOKE, MW_MIN, MW_MAX);
     uiBOP.chokeMWSlider.value(MW_CHOKE);
   });
@@ -7940,12 +7933,10 @@ function buildBOPWellControlUI() {
   uiBOP.killMWSlider = killMW.slider;
   uiBOP.killMWInput = killMW.input;
   killMW.slider.input(() => {
-    killMWSynced = false;
     MW_KILL = uiBOP.killMWSlider.value();
     uiBOP.killMWInput.value(nf(MW_KILL, 1, 1));
   });
   killMW.input.input(() => {
-    killMWSynced = false;
     MW_KILL = clamp(Number(uiBOP.killMWInput.value()) || MW_KILL, MW_MIN, MW_MAX);
     uiBOP.killMWSlider.value(MW_KILL);
   });
@@ -8762,28 +8753,6 @@ function setDSMW(v){
   dsMWSlider?.value(MW_DS); dsMWInput?.value(nf(MW_DS,1,1));
   // seed the DS grid with the new MW at the inlet
   if (dsGrid && dsGrid.length){ dsGrid[0] = MW_DS; }
-
-  if (chokeMWSynced) {
-    MW_CHOKE = MW_DS;
-    if (Array.isArray(chokeGrid)) {
-      for (let i = 0; i < chokeGrid.length; i++) {
-        chokeGrid[i] = MW_CHOKE;
-      }
-    }
-    uiBOP?.chokeMWSlider?.value(MW_CHOKE);
-    uiBOP?.chokeMWInput?.value(nf(MW_CHOKE, 1, 1));
-  }
-
-  if (killMWSynced) {
-    MW_KILL = MW_DS;
-    if (Array.isArray(killGrid)) {
-      for (let i = 0; i < killGrid.length; i++) {
-        killGrid[i] = MW_KILL;
-      }
-    }
-    uiBOP?.killMWSlider?.value(MW_KILL);
-    uiBOP?.killMWInput?.value(nf(MW_KILL, 1, 1));
-  }
 }
 function setBOMW(v){
   MW_BO = clamp(Number(v)||0, MW_MIN, MW_MAX);
