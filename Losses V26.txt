@@ -123,6 +123,11 @@ let waterPhaseFrom_above = [];
 // Track current influx rate for flow routing
 let current_influx_m3s = 0; // Current influx rate in m³/s (updated each frame)
 
+// Queue of formation-fluid "slugs" exiting the annulus at the BOP. Each entry
+// stores fractions (0-1) representing the portion of a cell occupied by gas,
+// oil, and water as that slice moves toward the riser or side lines.
+let formationSlugQueue = [];
+
 // Gas Expansion Model (for when formationFluidType === 'GAS')
 let GAS_EXPANSION_MODE = 'IDEAL'; // 'IDEAL' or 'REAL'
 let GAS_ENABLED = false; // Enable gas expansion calculations
@@ -146,6 +151,8 @@ let FRICTION_MODE = "hydraulics"; // keep hydraulics by default
 let ACTIVE_RHEO_MODEL = "HB"; // "HB" | "PowerLaw" | "Bingham"
 let fitParams = { mu_p_Pa_s: null, tau_y_Pa: null, K_PL_Pa_s_n: null, n_PL: null, K_HB_Pa_s_n: null, n_HB: null, tau_y_HB_Pa: null };
 
+let showCKProfiles = true;
+
 // ============================ BOP & WELL CONTROL =============================
 let BOP_CLOSED = false; // BOP state (open/closed)
 let closedWellPressureBoost_psi = 0; // Pressure increase from pumping to closed well
@@ -156,11 +163,14 @@ let CHOKE_LINE_ID_m = 0; // Converted to meters in setup
 let Q_CHOKE = 0; // gpm
 let CHOKE_DIRECTION = "UP"; // "UP" or "DOWN"
 let CHOKE_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
-let MW_CHOKE = 9.5; // ppg, choke line fluid (starts with same as DS)
+let MW_CHOKE = 9.5; // ppg, choke line fluid (initialized to well fluid at start)
 let CHOKE_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let chokeGrid = []; // Fluid tracking grid (BOP to surface)
 let accChoke = 0; // Advection accumulator
 let levelDeficit_choke_m = 0; // Level deficit in choke line
+let chokeGasGrid = [];  // Formation gas fraction along choke line
+let chokeOilGrid = [];
+let chokeWaterGrid = [];
 
 // Kill Line (runs from BOP to surface, parallel to riser)
 let KILL_LINE_ID_in = 3.0; // Inner diameter (inches)
@@ -168,11 +178,14 @@ let KILL_LINE_ID_m = 0; // Converted to meters in setup
 let Q_KILL = 0; // gpm
 let KILL_DIRECTION = "UP"; // "UP" or "DOWN"
 let KILL_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
-let MW_KILL = 9.5; // ppg, kill line fluid (starts with same as DS)
+let MW_KILL = 9.5; // ppg, kill line fluid (initialized to well fluid at start)
 let KILL_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let killGrid = []; // Fluid tracking grid (BOP to surface)
 let accKill = 0; // Advection accumulator
 let levelDeficit_kill_m = 0; // Level deficit in kill line
+let killGasGrid = [];
+let killOilGrid = [];
+let killWaterGrid = [];
 
 // Fluids / flows
 let MW_DS = 9.5; // ppg, drillstring
@@ -236,8 +249,9 @@ let bitOutQ = []; // DS → TD (bit exit) → feeds annBelow bottom
 let belowOutQ = []; // annBelow top → BOP → feeds annAbove
 let boosterOutQ = []; // Booster bottom → BOP → feeds annAbove
 // --- bottom frames (for Rheology/Gels/Geometry) ---
-let frameY, frameHeight;
-let rheoFrameX, rheoFrameW, gelFrameX, gelFrameW, geomFrameX, geomFrameW;
+let frameY, frameY2, frameHeight;
+let bottomPanelW, bopPanelW, bottomPanelPadding, bottomPanelSpacing, bottomRowGap, gelFrameX;
+let rheoFrameX, configFrameX, statusFrameX, lossFrameX, kickFrameX, bopFrameX;
 let cmlQSlider, cmlQInput, cmlDepthInput, cmlBtn, cmlAutoBtn;
 let tsFrame = 0;
 // Booster SPP smoothing (top-level)
@@ -290,7 +304,6 @@ let tsChoke_pct   = [];      // newest at index 0
 //let belowOutQ = [];
 // Defaults for rheology inputs
 let rheoDefaults = { fv: 72, T: 49, R600: 69.4, R300: 46.3, R200: 36.3, R100: 27.6, R6: 12.0, R3: 11.9, R1: 9.5, PV: 40, YP: 22, G10s: 18.5, G10m: 26.9, G30m: 27.2 };
-let ehFrameX, ehFrameW, ehFrameY, ehFrameH;
 // SPP smoothing
 const SPP_ALPHA = 0.15; // 0–1 (higher = faster response)
 let SPP_smooth = 0;
@@ -443,7 +456,7 @@ let uiDiag = { root:null, text:null };
 let uiKicks = {
   root: null, title: null, toggleBtn: null, modeBtn: null,
   fluidTypeSelect: null, migrationModelSelect: null,
-  manualRateInput: null, depthInput: null,
+  manualRateInput: null, manualRateSlider: null, depthInput: null,
   porePressureInput: null, permeabilityInput: null, piInput: null
 };
 
@@ -469,20 +482,17 @@ function annulusAreaAtDepth(d){
 
 // Helper to place Losses UI under Rheology pane (fallback to bottom-left)
 function lossesUIPosition() {
-  const x = (typeof rheoFrameX!=='undefined') ? rheoFrameX : 40;
-  const yBase = (typeof rheoFrameY!=='undefined' && typeof rheoFrameH!=='undefined')
-                  ? (rheoFrameY + rheoFrameH + 16) : (height - 200);
-  const y = Math.min(height - 180, Math.max(20, yBase));
+  const x = (typeof lossFrameX === 'number') ? lossFrameX + 18 : 40;
+  const yBase = (typeof frameY2 === 'number') ? frameY2 + 40 : (height - 200);
+  const y = Math.min(height - 200, Math.max(20, yBase));
   return { x, y };
 }
 
-// Helper to place Kicks UI to the right of Diagnostics UI
+// Helper to place Kicks UI inside the kick frame
 function kicksUIPosition() {
-  const lossPos = lossesUIPosition();
-  const diagWidth = 300;  // Width of diagnostics panel
-  const spacing = 20;
-  const x = lossPos.x + 430 + diagWidth + spacing;  // Losses width (430) + Diagnostics width + spacing
-  const y = lossPos.y;
+  const x = (typeof kickFrameX === 'number') ? kickFrameX + 18 : 460;
+  const yBase = (typeof frameY2 === 'number') ? frameY2 + 40 : (height - 200);
+  const y = Math.min(height - 200, Math.max(20, yBase));
   return { x, y };
 }
 
@@ -534,6 +544,14 @@ function wetLength_openhole_m(){
   const topOH = Math.max(SHOE_DEPTH, annulusTopDepthGlobal());
   return Math.max(0, TD_DEPTH - topOH);
 }
+function wetLength_choke_m(){
+  const deficit = Math.max(0, Math.min(levelDeficit_choke_m || 0, BOP_DEPTH));
+  return Math.max(0, BOP_DEPTH - deficit);
+}
+function wetLength_kill_m(){
+  const deficit = Math.max(0, Math.min(levelDeficit_kill_m || 0, BOP_DEPTH));
+  return Math.max(0, BOP_DEPTH - deficit);
+}
 
 
 const A_riserAnn = () => area_annulus(riser_ID_m,  ds_OD_m);
@@ -549,6 +567,15 @@ function betaFluid(fl) {
 }
 const FLUID_TAG = () => (EH && EH.PCOR && EH.PCOR.fluid) ? EH.PCOR.fluid : 'WBM';
 
+function compressibilityForMudWeight_ppg(mw){
+  if (!isFinite(mw) || mw <= 0) return betaFluid('WBM');
+  if (mw >= 15) return 3.2e-10;
+  if (mw >= 12.5) return 3.6e-10;
+  if (mw >= 11) return 4.2e-10;
+  if (mw >= 9.5) return 4.8e-10;
+  return 5.2e-10;
+}
+
 function systemWetVolumes_m3() {
   return {
     Vriser:   A_riserAnn() * wetLength_riser_m(),
@@ -556,13 +583,53 @@ function systemWetVolumes_m3() {
     Vopen:    A_openAnn()  * wetLength_openhole_m(),
     Vds:      A_DS()       * wetLength_DS_m(),
     Vbooster: A_booster()  * wetLength_booster_m(),
+    Vchoke:   (Math.PI * Math.pow(CHOKE_LINE_ID_m, 2) / 4) * wetLength_choke_m(),
+    Vkill:    (Math.PI * Math.pow(KILL_LINE_ID_m, 2) / 4)  * wetLength_kill_m(),
   };
 }
 function systemCompliance_m3_per_Pa() {
   const fl = FLUID_TAG();
-  const {Vriser,Vcasing,Vopen,Vds,Vbooster} = systemWetVolumes_m3();
-  return betaFluid(fl)*Vriser + betaFluid(fl)*Vcasing + betaFluid(fl)*Vopen
-       + betaFluid(fl)*Vds   + betaFluid(fl)*Vbooster;
+  const betaMain = betaFluid(fl);
+  const {Vriser,Vcasing,Vopen,Vds,Vbooster,Vchoke,Vkill} = systemWetVolumes_m3();
+
+  const chokeUp = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+  const killUp  = KILL_LINE_OPEN  && KILL_DIRECTION  === 'UP';
+  const chokeDown = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'DOWN' && (Q_CHOKE || 0) > 0;
+  const killDown  = KILL_LINE_OPEN  && KILL_DIRECTION  === 'DOWN' && (Q_KILL  || 0) > 0;
+
+  const riserTop = (typeof annulusTopDepthGlobal === 'function')
+    ? annulusTopDepthGlobal()
+    : 0;
+  const riserFull = riserTop <= 0.5;
+  const riserSealed = BOP_CLOSED && MPD_ON && riserFull && !chokeUp && !killUp;
+
+  const belowSealed = BOP_CLOSED && !chokeUp && !killUp;
+
+  let compliance = 0;
+
+  if (belowSealed) {
+    const sealedMain = Math.max(0, Vcasing + Vopen + Vds);
+    compliance += betaMain * sealedMain;
+
+    if (chokeDown && Vchoke > 0) {
+      const mwChoke = chokeGrid.length ? chokeGrid[chokeGrid.length - 1] : MW_CHOKE;
+      compliance += compressibilityForMudWeight_ppg(mwChoke) * Vchoke;
+    }
+    if (killDown && Vkill > 0) {
+      const mwKill = killGrid.length ? killGrid[killGrid.length - 1] : MW_KILL;
+      compliance += compressibilityForMudWeight_ppg(mwKill) * Vkill;
+    }
+  } else {
+    compliance += betaMain * (Vcasing + Vopen + Vds);
+  }
+
+  if (!BOP_CLOSED) {
+    compliance += betaMain * (Vriser + Vbooster);
+  } else if (riserSealed) {
+    compliance += betaMain * (Vriser + Vbooster);
+  }
+
+  return Math.max(compliance, 1e-10);
 }
 function averageSystemPressure_psi() {
   const P0 = (CURRENT_SBP || 0);
@@ -1107,6 +1174,74 @@ function initializeFormationFluidCells() {
   oilPhaseFrom_above = new Array(N_ABV).fill(0);
   waterPhaseFrom_below = new Array(N_BELOW).fill(0);
   waterPhaseFrom_above = new Array(N_ABV).fill(0);
+  formationSlugQueue = [];
+}
+
+const EPS_FORMATION = 1e-6;
+
+function enqueueFormationSlug(gasFrac, oilFrac, waterFrac) {
+  const g = clamp(gasFrac || 0, 0, 1);
+  const o = clamp(oilFrac || 0, 0, 1);
+  const w = clamp(waterFrac || 0, 0, 1);
+  if (g + o + w < EPS_FORMATION) return;
+  formationSlugQueue.push({ gas: g, oil: o, water: w });
+}
+
+function pullFormationFromQueue(requestFraction) {
+  const delivered = { gas: 0, oil: 0, water: 0 };
+  let remaining = Math.max(0, requestFraction);
+
+  while (remaining > EPS_FORMATION && formationSlugQueue.length) {
+    const slug = formationSlugQueue[0];
+    const take = Math.min(1, remaining);
+    const keepFactor = 1 - take;
+
+    delivered.gas += slug.gas * take;
+    delivered.oil += slug.oil * take;
+    delivered.water += slug.water * take;
+
+    slug.gas *= keepFactor;
+    slug.oil *= keepFactor;
+    slug.water *= keepFactor;
+
+    if ((slug.gas + slug.oil + slug.water) < EPS_FORMATION) {
+      formationSlugQueue.shift();
+    }
+
+    remaining -= take;
+  }
+
+  return { delivered, remaining };
+}
+
+function pullFormationFromBOP(requestFraction) {
+  const { delivered, remaining } = pullFormationFromQueue(requestFraction);
+  if (remaining <= EPS_FORMATION) {
+    return delivered;
+  }
+
+  const frac = clamp(remaining, 0, 1);
+  if (!gasPhaseFrom_below.length) {
+    return delivered;
+  }
+
+  const gasAvail = clamp(gasPhaseFrom_below[0] || 0, 0, 1);
+  const oilAvail = clamp(oilPhaseFrom_below[0] || 0, 0, 1);
+  const waterAvail = clamp(waterPhaseFrom_below[0] || 0, 0, 1);
+
+  const gasTake = gasAvail * frac;
+  const oilTake = oilAvail * frac;
+  const waterTake = waterAvail * frac;
+
+  gasPhaseFrom_below[0] = Math.max(0, gasAvail - gasTake);
+  oilPhaseFrom_below[0] = Math.max(0, oilAvail - oilTake);
+  waterPhaseFrom_below[0] = Math.max(0, waterAvail - waterTake);
+
+  delivered.gas += gasTake;
+  delivered.oil += oilTake;
+  delivered.water += waterTake;
+
+  return delivered;
 }
 
 function calculateMigrationVelocity_m_s(fluidType, pressure_psi, mudWeight_ppg) {
@@ -1366,6 +1501,47 @@ function updateFormationFluidMigration(dt_s) {
   }
 }
 
+function formationFluidFrontExtents(threshold = 0.01) {
+  if (!formationFluidEnabled) {
+    return { top: null, bottom: null };
+  }
+
+  let topDepth = null;
+  let bottomDepth = null;
+
+  const considerCell = (dTop, dBot, fraction) => {
+    if (!isFinite(fraction) || fraction <= threshold) return;
+    if (topDepth === null || dTop < topDepth) topDepth = dTop;
+    if (bottomDepth === null || dBot > bottomDepth) bottomDepth = dBot;
+  };
+
+  for (let i = 0; i < N_ABV; i++) {
+    const gas = gasPhaseFrom_above[i] || 0;
+    const oil = oilPhaseFrom_above[i] || 0;
+    const water = waterPhaseFrom_above[i] || 0;
+    const total = gas + oil + water;
+    if (total > threshold) {
+      const dTop = i * CELL_M;
+      const dBot = Math.min((i + 1) * CELL_M, BOP_DEPTH);
+      considerCell(dTop, dBot, total);
+    }
+  }
+
+  for (let i = 0; i < N_BELOW; i++) {
+    const gas = gasPhaseFrom_below[i] || 0;
+    const oil = oilPhaseFrom_below[i] || 0;
+    const water = waterPhaseFrom_below[i] || 0;
+    const total = gas + oil + water;
+    if (total > threshold) {
+      const dTop = BOP_DEPTH + i * CELL_M;
+      const dBot = Math.min(BOP_DEPTH + (i + 1) * CELL_M, TD_DEPTH);
+      considerCell(dTop, dBot, total);
+    }
+  }
+
+  return { top: topDepth, bottom: bottomDepth };
+}
+
 // REPLACE stepAdvection() completely:
 
 // REPLACE stepAdvection() completely:
@@ -1385,6 +1561,9 @@ function stepAdvection(){
   // Routed internal section flows (magnitudes, in m^3/s) from the router:
   const qUp_m3s   = (typeof __qAnnUp_m3s   === 'number') ? __qAnnUp_m3s   : 0;  // upward above loss zone
   const qDown_m3s = (typeof __qAnnDown_m3s === 'number') ? __qAnnDown_m3s : 0;  // downward toward loss zone
+  const qDownChoke_m3s = Math.max(0, window.__qChokeDown_m3s || 0);
+  const qDownKill_m3s  = Math.max(0, window.__qKillDown_m3s  || 0);
+  const qDownBooster_m3s = Math.max(0, window.__qBoosterDown_m3s || 0);
 
   // Grids & geometry helpers you already have:
   const A_riser = area_annulus(riser_ID_m,   ds_OD_m);
@@ -1422,6 +1601,7 @@ function stepAdvection(){
   // 2) BOOSTER PIPE (TOP → DOWN)
   // ===============================
   let boosterEffluentMW = MW_BO;  // Track what exits booster pipe at BOP
+  let qBO_up_m3s = 0;
   {
     const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
     if (qBO_m3s > FLOW_THRESHOLD) {
@@ -1439,8 +1619,19 @@ function stepAdvection(){
     }
     // Always use bottom of grid as current effluent
     boosterEffluentMW = boosterGrid[boosterGrid.length - 1] || MW_BO;
+    qBO_up_m3s = Math.max(0, qBO_m3s - qDown_m3s);
   }
   const boosterMW = boosterEffluentMW;  // Compatibility
+
+  let chokeEffluentMW = chokeGrid.length ? (chokeGrid[chokeGrid.length - 1] || MW_CHOKE) : MW_CHOKE;
+  let chokeEffluentGas = chokeGasGrid.length ? clamp(chokeGasGrid[chokeGasGrid.length - 1] || 0, 0, 1) : 0;
+  let chokeEffluentOil = chokeOilGrid.length ? clamp(chokeOilGrid[chokeOilGrid.length - 1] || 0, 0, 1) : 0;
+  let chokeEffluentWater = chokeWaterGrid.length ? clamp(chokeWaterGrid[chokeWaterGrid.length - 1] || 0, 0, 1) : 0;
+
+  let killEffluentMW = killGrid.length ? (killGrid[killGrid.length - 1] || MW_KILL) : MW_KILL;
+  let killEffluentGas = killGasGrid.length ? clamp(killGasGrid[killGasGrid.length - 1] || 0, 0, 1) : 0;
+  let killEffluentOil = killOilGrid.length ? clamp(killOilGrid[killOilGrid.length - 1] || 0, 0, 1) : 0;
+  let killEffluentWater = killWaterGrid.length ? clamp(killWaterGrid[killWaterGrid.length - 1] || 0, 0, 1) : 0;
 
   // ===============================
   // 3) EXTRACT LOSSES FROM GRIDS
@@ -1486,28 +1677,29 @@ function stepAdvection(){
   }
 
   // (B) UPWARD advection (leftover DS above zone)
-  if (qUp_m3s > FLOW_THRESHOLD) {
-    const v_up = qUp_m3s / Math.max(A_below, 1e-12);
+  const qAnnulusUp_m3s = Math.max(0, qUp_m3s - qBO_up_m3s);
+  if (qAnnulusUp_m3s > FLOW_THRESHOLD) {
+    const v_up = qAnnulusUp_m3s / Math.max(A_below, 1e-12);
     const upStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_up / vref);
 
-    // We shift UP the portion *from the zone upwards*
     accDSup += upStep_m;
-    const cellsFlowing = annBelowGrid.length; // upward through whole below section toward BOP
-    while (accDSup >= CELL_M && cellsFlowing > 0){
-      // Shift UP from bottom to top
+    const cellsFlowing = annBelowGrid.length;
+    while (accDSup >= CELL_M && cellsFlowing > 0) {
+      const leavingGas = clamp(gasPhaseFrom_below[0] || 0, 0, 1);
+      const leavingOil = clamp(oilPhaseFrom_below[0] || 0, 0, 1);
+      const leavingWater = clamp(waterPhaseFrom_below[0] || 0, 0, 1);
+      enqueueFormationSlug(leavingGas, leavingOil, leavingWater);
+
       for (let i = 0; i < annBelowGrid.length - 1; i++) {
         annBelowGrid[i] = annBelowGrid[i + 1];
       }
-      // New fluid from bit enters at bottom
       annBelowGrid[annBelowGrid.length - 1] = dsEffluentMW;
 
-      // Advect formation fluids UP in parallel with mud
       for (let i = 0; i < gasPhaseFrom_below.length - 1; i++) {
         gasPhaseFrom_below[i] = gasPhaseFrom_below[i + 1];
         oilPhaseFrom_below[i] = oilPhaseFrom_below[i + 1];
         waterPhaseFrom_below[i] = waterPhaseFrom_below[i + 1];
       }
-      // No formation fluid enters from drillstring at bottom (clean mud)
       gasPhaseFrom_below[gasPhaseFrom_below.length - 1] = 0;
       oilPhaseFrom_below[oilPhaseFrom_below.length - 1] = 0;
       waterPhaseFrom_below[waterPhaseFrom_below.length - 1] = 0;
@@ -1526,7 +1718,7 @@ function stepAdvection(){
 
     // Calculate booster contribution going UP (not routed down to losses)
     const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
-    const qBO_up = Math.max(0, qBO_m3s - qDown_m3s);  // Booster NOT going down = going UP
+    const qBO_up = qBO_up_m3s;  // Booster NOT going down = going UP
     const qFromAnnBelow = Math.max(0, qUp_m3s - qBO_up);  // Flow from annulus below (DS + TF)
 
     accAbove += aboveStep_m;
@@ -1535,8 +1727,10 @@ function stepAdvection(){
       annAboveGrid.shift();
 
       const fromBelowMW = annBelowGrid[0] || dsEffluentMW; // incoming upward fluid from annulus
+      const fromBelowEff = effectiveCellDensity_ppg(fromBelowMW, 0, false);
+      const boosterEff = boosterEffluentMW;
       const qTotal = Math.max(qFromAnnBelow + qBO_up, 1e-12);
-      const mixMW = (qFromAnnBelow * fromBelowMW + qBO_up * boosterEffluentMW) / qTotal;
+      const mixMW = (qFromAnnBelow * fromBelowEff + qBO_up * boosterEff) / qTotal;
 
       annAboveGrid.push(mixMW);
 
@@ -1549,10 +1743,11 @@ function stepAdvection(){
       // Add formation fluids from below-BOP entering at BOP depth
       // Only the fraction coming from annulus below carries formation fluids
       // Booster is clean mud, so dilute the formation fluids by flow rate ratio
-      const dilutionFactor = qFromAnnBelow / qTotal;
-      gasPhaseFrom_above.push((gasPhaseFrom_below[0] || 0) * dilutionFactor);
-      oilPhaseFrom_above.push((oilPhaseFrom_below[0] || 0) * dilutionFactor);
-      waterPhaseFrom_above.push((waterPhaseFrom_below[0] || 0) * dilutionFactor);
+      const dilutionFactor = clamp(qFromAnnBelow / Math.max(qTotal, 1e-12), 0, 1);
+      const deliveredSlug = pullFormationFromBOP(dilutionFactor);
+      gasPhaseFrom_above.push(clamp(deliveredSlug.gas, 0, 1));
+      oilPhaseFrom_above.push(clamp(deliveredSlug.oil, 0, 1));
+      waterPhaseFrom_above.push(clamp(deliveredSlug.water, 0, 1));
 
       accAbove -= CELL_M;
     }
@@ -1560,8 +1755,10 @@ function stepAdvection(){
     if (annAboveGrid.length){
       const k = annAboveGrid.length - 1;
       const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
+      const fromBelowEff = effectiveCellDensity_ppg(fromBelowMW, 0, false);
+      const boosterEff = boosterEffluentMW;
       const qTotal = Math.max(qFromAnnBelow + qBO_up, 1e-12);
-      const mixMW = (qFromAnnBelow * fromBelowMW + qBO_up * boosterEffluentMW) / qTotal;
+      const mixMW = (qFromAnnBelow * fromBelowEff + qBO_up * boosterEff) / qTotal;
       annAboveGrid[k] = (1 - accAbove/CELL_M) * annAboveGrid[k] + (accAbove/CELL_M) * mixMW;
     }
   }
@@ -1636,16 +1833,34 @@ function stepAdvection(){
     const v_choke = qChoke_m3s / Math.max(A_choke, 1e-12);
     const chokeStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_choke / vref);
 
+    const annulusCellVolume = Math.max(areaAtDepthTop_(BOP_DEPTH) * CELL_M, 1e-9);
+
     if (CHOKE_DIRECTION === "DOWN") {
       // Fluid flows DOWN: Surface → BOP → Below-BOP annulus
       // Grid: chokeGrid[0] = surface (inlet), chokeGrid[N_ABV-1] = BOP (outlet)
       accChoke += chokeStep_m;
       while (accChoke >= CELL_M) {
         // Shift DOWN (surface to BOP)
+        const effMW = chokeGrid.length ? (chokeGrid[chokeGrid.length - 1] || MW_CHOKE) : MW_CHOKE;
+        const effGas = chokeGasGrid.length ? (chokeGasGrid[chokeGasGrid.length - 1] || 0) : 0;
+        const effOil = chokeOilGrid.length ? (chokeOilGrid[chokeOilGrid.length - 1] || 0) : 0;
+        const effWater = chokeWaterGrid.length ? (chokeWaterGrid[chokeWaterGrid.length - 1] || 0) : 0;
+
         for (let i = chokeGrid.length - 1; i > 0; i--) {
           chokeGrid[i] = chokeGrid[i - 1];
+          if (chokeGasGrid.length) chokeGasGrid[i] = chokeGasGrid[i - 1] || 0;
+          if (chokeOilGrid.length) chokeOilGrid[i] = chokeOilGrid[i - 1] || 0;
+          if (chokeWaterGrid.length) chokeWaterGrid[i] = chokeWaterGrid[i - 1] || 0;
         }
         chokeGrid[0] = MW_CHOKE; // Fresh fluid enters at surface
+        if (chokeGasGrid.length) chokeGasGrid[0] = 0;
+        if (chokeOilGrid.length) chokeOilGrid[0] = 0;
+        if (chokeWaterGrid.length) chokeWaterGrid[0] = 0;
+
+        chokeEffluentMW = effMW;
+        chokeEffluentGas = clamp(effGas, 0, 1);
+        chokeEffluentOil = clamp(effOil, 0, 1);
+        chokeEffluentWater = clamp(effWater, 0, 1);
         accChoke -= CELL_M;
       }
     } else if (CHOKE_DIRECTION === "UP") {
@@ -1656,11 +1871,23 @@ function stepAdvection(){
         // Shift UP (BOP to surface)
         for (let i = 0; i < chokeGrid.length - 1; i++) {
           chokeGrid[i] = chokeGrid[i + 1];
+          if (chokeGasGrid.length) chokeGasGrid[i] = chokeGasGrid[i + 1] || 0;
+          if (chokeOilGrid.length) chokeOilGrid[i] = chokeOilGrid[i + 1] || 0;
+          if (chokeWaterGrid.length) chokeWaterGrid[i] = chokeWaterGrid[i + 1] || 0;
         }
         // Fluid entering from below-BOP annulus at BOP depth
         // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
         const sourceMW = annBelowGrid[0] || MW_DS;
-        chokeGrid[chokeGrid.length - 1] = sourceMW;
+        const effMW = effectiveCellDensity_ppg(sourceMW, 0, false);
+        const lineFrac = clamp((A_choke * CELL_M) / annulusCellVolume, 0, 1);
+        const slug = pullFormationFromBOP(lineFrac);
+        const gasFrac = clamp(slug.gas, 0, 1);
+        const oilFrac = clamp(slug.oil, 0, 1);
+        const waterFrac = clamp(slug.water, 0, 1);
+        if (chokeGasGrid.length) chokeGasGrid[chokeGasGrid.length - 1] = gasFrac;
+        if (chokeOilGrid.length) chokeOilGrid[chokeOilGrid.length - 1] = oilFrac;
+        if (chokeWaterGrid.length) chokeWaterGrid[chokeWaterGrid.length - 1] = waterFrac;
+        chokeGrid[chokeGrid.length - 1] = effMW;
         accChoke -= CELL_M;
       }
     }
@@ -1675,16 +1902,34 @@ function stepAdvection(){
     const v_kill = qKill_m3s / Math.max(A_kill, 1e-12);
     const killStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_kill / vref);
 
+    const annulusCellVolume = Math.max(areaAtDepthTop_(BOP_DEPTH) * CELL_M, 1e-9);
+
     if (KILL_DIRECTION === "DOWN") {
       // Fluid flows DOWN: Surface → BOP → Below-BOP annulus
       // Grid: killGrid[0] = surface (inlet), killGrid[N_ABV-1] = BOP (outlet)
       accKill += killStep_m;
       while (accKill >= CELL_M) {
         // Shift DOWN (surface to BOP)
+        const effMW = killGrid.length ? (killGrid[killGrid.length - 1] || MW_KILL) : MW_KILL;
+        const effGas = killGasGrid.length ? (killGasGrid[killGasGrid.length - 1] || 0) : 0;
+        const effOil = killOilGrid.length ? (killOilGrid[killOilGrid.length - 1] || 0) : 0;
+        const effWater = killWaterGrid.length ? (killWaterGrid[killWaterGrid.length - 1] || 0) : 0;
+
         for (let i = killGrid.length - 1; i > 0; i--) {
           killGrid[i] = killGrid[i - 1];
+          if (killGasGrid.length) killGasGrid[i] = killGasGrid[i - 1] || 0;
+          if (killOilGrid.length) killOilGrid[i] = killOilGrid[i - 1] || 0;
+          if (killWaterGrid.length) killWaterGrid[i] = killWaterGrid[i - 1] || 0;
         }
         killGrid[0] = MW_KILL; // Fresh fluid enters at surface
+        if (killGasGrid.length) killGasGrid[0] = 0;
+        if (killOilGrid.length) killOilGrid[0] = 0;
+        if (killWaterGrid.length) killWaterGrid[0] = 0;
+
+        killEffluentMW = effMW;
+        killEffluentGas = clamp(effGas, 0, 1);
+        killEffluentOil = clamp(effOil, 0, 1);
+        killEffluentWater = clamp(effWater, 0, 1);
         accKill -= CELL_M;
       }
     } else if (KILL_DIRECTION === "UP") {
@@ -1695,14 +1940,56 @@ function stepAdvection(){
         // Shift UP (BOP to surface)
         for (let i = 0; i < killGrid.length - 1; i++) {
           killGrid[i] = killGrid[i + 1];
+          if (killGasGrid.length) killGasGrid[i] = killGasGrid[i + 1] || 0;
+          if (killOilGrid.length) killOilGrid[i] = killOilGrid[i + 1] || 0;
+          if (killWaterGrid.length) killWaterGrid[i] = killWaterGrid[i + 1] || 0;
         }
         // Fluid entering from below-BOP annulus at BOP depth
         // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
         const sourceMW = annBelowGrid[0] || MW_DS;
-        killGrid[killGrid.length - 1] = sourceMW;
+        const effMW = effectiveCellDensity_ppg(sourceMW, 0, false);
+        const lineFrac = clamp((A_kill * CELL_M) / annulusCellVolume, 0, 1);
+        const slug = pullFormationFromBOP(lineFrac);
+        const gasFrac = clamp(slug.gas, 0, 1);
+        const oilFrac = clamp(slug.oil, 0, 1);
+        const waterFrac = clamp(slug.water, 0, 1);
+        if (killGasGrid.length) killGasGrid[killGasGrid.length - 1] = gasFrac;
+        if (killOilGrid.length) killOilGrid[killOilGrid.length - 1] = oilFrac;
+        if (killWaterGrid.length) killWaterGrid[killWaterGrid.length - 1] = waterFrac;
+        killGrid[killGrid.length - 1] = effMW;
         accKill -= CELL_M;
       }
     }
+  }
+
+  if (qDown_m3s > FLOW_THRESHOLD && annBelowGrid.length > 0) {
+    const totalDown = Math.max(qDownBooster_m3s + qDownChoke_m3s + qDownKill_m3s, 1e-9);
+    const mwMix = (
+      qDownBooster_m3s * boosterEffluentMW +
+      qDownChoke_m3s   * chokeEffluentMW +
+      qDownKill_m3s    * killEffluentMW
+    ) / totalDown;
+
+    let gasMix = (qDownChoke_m3s * chokeEffluentGas + qDownKill_m3s * killEffluentGas) / totalDown;
+    let oilMix = (qDownChoke_m3s * chokeEffluentOil + qDownKill_m3s * killEffluentOil) / totalDown;
+    let waterMix = (qDownChoke_m3s * chokeEffluentWater + qDownKill_m3s * killEffluentWater) / totalDown;
+
+    gasMix = clamp(gasMix, 0, 1);
+    oilMix = clamp(oilMix, 0, 1);
+    waterMix = clamp(waterMix, 0, 1);
+
+    const fracSum = gasMix + oilMix + waterMix;
+    if (fracSum > 1e-6 && fracSum > 1) {
+      const scale = 1 / fracSum;
+      gasMix *= scale;
+      oilMix *= scale;
+      waterMix *= scale;
+    }
+
+    annBelowGrid[0] = mwMix;
+    if (gasPhaseFrom_below.length) gasPhaseFrom_below[0] = gasMix;
+    if (oilPhaseFrom_below.length) oilPhaseFrom_below[0] = oilMix;
+    if (waterPhaseFrom_below.length) waterPhaseFrom_below[0] = waterMix;
   }
 
   // ===============================
@@ -2144,6 +2431,18 @@ function effectiveCellDensity_ppg(mudWeight_ppg, cellIndex, isAboveBOP) {
   return effectiveDensity;
 }
 
+function averageEffectiveDensity(grid, isAboveBOP){
+  if (!Array.isArray(grid) || grid.length === 0) {
+    return MW_DS;
+  }
+  let sum = 0;
+  for (let i = 0; i < grid.length; i++){
+    const base = grid[i] || MW_DS;
+    sum += effectiveCellDensity_ppg(base, i, isAboveBOP);
+  }
+  return sum / grid.length;
+}
+
 function ecdAtDepth(d){
   // ✅ FIXED: Correct averaging from surface to depth
   // ECD = average mud weight from surface down to specified depth
@@ -2391,11 +2690,13 @@ function pressureAtDepth(d){
   const riserFull = (fluidTop <= 0);
   const P_sbp = (MPD_ON && riserFull && !BOP_CLOSED) ? (CURRENT_SBP || 0) : 0;
 
+  const belowBOP = d >= BOP_DEPTH;
+
   // BOP Line Contribution (when BOP closed and choke/kill lines flowing UP)
-  const P_bop_lines = bopLinePressureContribution();
+  const P_bop_lines = belowBOP ? bopLinePressureContribution() : 0;
 
   // Closed Well Pressure Boost (when pumping to closed well with no exit)
-  const P_closed_well = BOP_CLOSED ? (closedWellPressureBoost_psi || 0) : 0;
+  const P_closed_well = (BOP_CLOSED && belowBOP) ? (closedWellPressureBoost_psi || 0) : 0;
 
   const total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
   return total;
@@ -2406,6 +2707,95 @@ function ecdWithSBPAtDepth(d){
   const depth = Math.max(1, d); // avoid /0
   const P     = pressureAtDepth(depth);
   return P / ((typeof PSI_COEF==='number' ? PSI_COEF : 0.1704) * depth);
+}
+
+function chokeLinePressureAtDepth(depth_m){
+  if (!isFinite(depth_m)) return NaN;
+  const len = BOP_DEPTH;
+  if (len <= 0) return NaN;
+
+  const d = clamp(depth_m, 0, len);
+  const isUp = CHOKE_DIRECTION === 'UP';
+  const lineOpen = CHOKE_LINE_OPEN;
+
+  const flow_m3s = (lineOpen)
+    ? (isUp ? (window.__Q_CHOKE_CALCULATED_m3s || 0) : (Q_CHOKE || 0) * M3_PER_GPM)
+    : 0;
+
+  const mw = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
+  const hydro = PSI_COEF * mw * d;
+
+  let friction = 0;
+  if (flow_m3s > 1e-8) {
+    friction = chokeFrictionPsiLength(len, flow_m3s) * (d / Math.max(len, 1e-6));
+  }
+
+  let surfacePressure;
+  if (isUp) {
+    surfacePressure = CHOKE_PRESSURE_psi || 0;
+  } else {
+    const hasPump = lineOpen && BOP_CLOSED && flow_m3s > 1e-8;
+    surfacePressure = hasPump ? ChokeSPP_smooth : (CHOKE_PRESSURE_psi || 0);
+  }
+
+  const pressure = isUp
+    ? surfacePressure + hydro + friction
+    : surfacePressure - hydro - friction;
+
+  return Math.max(0, pressure);
+}
+
+function killLinePressureAtDepth(depth_m){
+  if (!isFinite(depth_m)) return NaN;
+  const len = BOP_DEPTH;
+  if (len <= 0) return NaN;
+
+  const d = clamp(depth_m, 0, len);
+  const isUp = KILL_DIRECTION === 'UP';
+  const lineOpen = KILL_LINE_OPEN;
+
+  const flow_m3s = (lineOpen)
+    ? (isUp ? (window.__Q_KILL_CALCULATED_m3s || 0) : (Q_KILL || 0) * M3_PER_GPM)
+    : 0;
+
+  const mw = killGrid.length > 0 ? average(killGrid) : MW_KILL;
+  const hydro = PSI_COEF * mw * d;
+
+  let friction = 0;
+  if (flow_m3s > 1e-8) {
+    friction = killFrictionPsiLength(len, flow_m3s) * (d / Math.max(len, 1e-6));
+  }
+
+  let surfacePressure;
+  if (isUp) {
+    surfacePressure = KILL_PRESSURE_psi || 0;
+  } else {
+    const hasPump = lineOpen && BOP_CLOSED && flow_m3s > 1e-8;
+    surfacePressure = hasPump ? KillSPP_smooth : (KILL_PRESSURE_psi || 0);
+  }
+
+  const pressure = isUp
+    ? surfacePressure + hydro + friction
+    : surfacePressure - hydro - friction;
+
+  return Math.max(0, pressure);
+}
+
+function chokeKillPressureAtDepth(depth_m){
+  const values = [];
+  const chokeP = chokeLinePressureAtDepth(depth_m);
+  if (isFinite(chokeP)) values.push(chokeP);
+  const killP = killLinePressureAtDepth(depth_m);
+  if (isFinite(killP)) values.push(killP);
+  if (!values.length) return NaN;
+  return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+function chokeKillEcdAtDepth(depth_m){
+  if (depth_m <= 0) return NaN;
+  const P = chokeKillPressureAtDepth(depth_m);
+  if (!isFinite(P)) return NaN;
+  return P / (PSI_COEF * Math.max(depth_m, 1e-6));
 }
 
 
@@ -2507,7 +2897,7 @@ function calculateUPFlowDistribution(qAvailable_m3s, BHP_source_psi) {
 
   // RISER path (available if BOP open)
   if (!BOP_CLOSED) {
-    const riserMW = annAboveGrid.length > 0 ? average(annAboveGrid) : MW_DS;
+    const riserMW = averageEffectiveDensity(annAboveGrid, true);
     const riserHydro_psi = PSI_COEF * riserMW * BOP_DEPTH;
     const appliedPressure = (MPD_ON && (annulusTopDepthGlobal() <= 0.5)) ? (CURRENT_SBP || 0) : 0;
 
@@ -2522,7 +2912,8 @@ function calculateUPFlowDistribution(qAvailable_m3s, BHP_source_psi) {
   }
 
   // CHOKE LINE path (available if open and direction UP)
-  if (BOP_CLOSED && CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP') {
+  const chokeUp = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+  if (chokeUp) {
     const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
     const chokeHydro_psi = PSI_COEF * chokeMW * BOP_DEPTH;
 
@@ -2537,7 +2928,8 @@ function calculateUPFlowDistribution(qAvailable_m3s, BHP_source_psi) {
   }
 
   // KILL LINE path (available if open and direction UP)
-  if (BOP_CLOSED && KILL_LINE_OPEN && KILL_DIRECTION === 'UP') {
+  const killUp = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
+  if (killUp) {
     const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
     const killHydro_psi = PSI_COEF * killMW * BOP_DEPTH;
 
@@ -2683,7 +3075,7 @@ function boSppAtLevel(lvl_m){
   const boFricPsi = boosterFrictionPsiLength(filledLen);
   const annFricAbovePsi = frictionPsi_withCML_rheo(BOP_DEPTH); // <— rheology-aware
   const sbpPsi = (window.CURRENT_SBP || 0);
-  const MWannAbv = average(annAboveGrid);
+  const MWannAbv = averageEffectiveDensity(annAboveGrid, true);
   const MWbo = boosterAvgPPG();
   const hydroPsi = PSI_COEF * (MWannAbv * BOP_DEPTH - MWbo * filledLen);
   return boFricPsi + annFricAbovePsi + sbpPsi + hydroPsi;
@@ -2878,6 +3270,27 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // Choke and Kill line flows
   const qChoke_m3s = (Q_CHOKE || 0) * M3_PER_GPM;
   const qKill_m3s = (Q_KILL || 0) * M3_PER_GPM;
+  const chokeDownRequest = (CHOKE_DIRECTION === 'DOWN' && CHOKE_LINE_OPEN) ? qChoke_m3s : 0;
+  const killDownRequest  = (KILL_DIRECTION  === 'DOWN' && KILL_LINE_OPEN)  ? qKill_m3s  : 0;
+
+  const chokeUpActive = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+  const killUpActive = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
+
+  window.__CHOKE_PRESSURE_WARNING = null;
+  window.__KILL_PRESSURE_WARNING = null;
+  window.__Q_TOTAL_UP_m3s = 0;
+  window.__Q_CHOKE_CALCULATED_m3s = 0;
+  window.__Q_KILL_CALCULATED_m3s = 0;
+  window.__qChokeDown_m3s = 0;
+  window.__qKillDown_m3s = 0;
+  window.__qBoosterDown_m3s = 0;
+
+  if (CHOKE_DIRECTION === 'UP' && !chokeUpActive) {
+    Q_CHOKE = 0;
+  }
+  if (KILL_DIRECTION === 'UP' && !killUpActive) {
+    Q_KILL = 0;
+  }
 
   // Filtered demand wanted by the loss zone (use demand, not actual)
   const qDem = (typeof totalLossDemand_m3s==='function')
@@ -2895,11 +3308,14 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Inputs: DS return, Kicks, Choke/Kill lines flowing DOWN
     // Outputs: Losses, Choke/Kill lines flowing UP
 
-    let qIn_belowBOP = qDS + qInflux; // DS return + kicks enter below BOP
+    const qChokeDown = Math.max(0, chokeDownRequest);
+    const qKillDown = Math.max(0, killDownRequest);
 
-    // Add choke/kill lines flowing DOWN (pumping into wellbore)
-    if (CHOKE_DIRECTION === "DOWN" && CHOKE_LINE_OPEN) qIn_belowBOP += qChoke_m3s;
-    if (KILL_DIRECTION === "DOWN" && KILL_LINE_OPEN) qIn_belowBOP += qKill_m3s;
+    window.__qChokeDown_m3s = qChokeDown;
+    window.__qKillDown_m3s = qKillDown;
+    window.__qBoosterDown_m3s = 0;
+
+    let qIn_belowBOP = qDS + qInflux + qChokeDown + qKillDown; // DS return + kicks + line injection
 
     // Losses consume fluid from below-BOP annulus
     const qToLoss = Math.min(qDem, Math.max(0, qIn_belowBOP));
@@ -2919,11 +3335,19 @@ function routeAnnulusFlowsWithLosses(dt_s){
     qChoke_actual = flowDistribution.Q_choke_m3s;
     qKill_actual = flowDistribution.Q_kill_m3s;
 
+    const chokeActual_gpm = qChoke_actual * 15850.323;
+    const killActual_gpm = qKill_actual * 15850.323;
+
+    if (chokeUpActive) {
+      Q_CHOKE = chokeActual_gpm;
+    }
+    if (killUpActive) {
+      Q_KILL = killActual_gpm;
+    }
+
     // Store calculated flow rates for UI display
     window.__Q_CHOKE_CALCULATED_m3s = qChoke_actual;
     window.__Q_KILL_CALCULATED_m3s = qKill_actual;
-    window.__CHOKE_PRESSURE_WARNING = null;
-    window.__KILL_PRESSURE_WARNING = null;
 
     // Check if requested pressures can be achieved (for user feedback)
     if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP' && qChoke_actual > 1e-6) {
@@ -2952,6 +3376,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
     // Flow reaching surface through choke/kill lines
     const qToSurface_belowBOP = qChoke_actual + qKill_actual;
+    window.__Q_TOTAL_UP_m3s = qToSurface_belowBOP;
 
     // === CLOSED WELL PHYSICS ===
     // When pumping to a closed well (no UP path, more IN than losses), pressure builds
@@ -2960,11 +3385,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
     if (wellIsClosed) {
       // Well is closed - fluid has nowhere to go, pressure increases
-      // Convert trapped volume to pressure increase
-      // Using simplified compressibility: ~10 psi per bbl in a typical wellbore
       const dt_s = Math.max(1/120, window.dt_s || 1/60); // time step in seconds
-      const trappedVolume_bbl = netVolumeTrapped_m3s * 6.28981 * dt_s; // m3/s to bbl
-      const pressureIncrease_psi = trappedVolume_bbl * 15; // ~15 psi per bbl trapped
+      const deltaVolume_m3 = netVolumeTrapped_m3s * dt_s;
+      const compliance_m3_per_Pa = Math.max(systemCompliance_m3_per_Pa(), 1e-12);
+      const deltaP_Pa = deltaVolume_m3 / compliance_m3_per_Pa;
+      const pressureIncrease_psi = deltaP_Pa / 6894.757;
       closedWellPressureBoost_psi += pressureIncrease_psi;
     } else {
       // Well has exit path - pressure boost decays back to normal
@@ -2985,7 +3410,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
     window.__qAnnBelow_m3s = Math.max(0, qIn_belowBOP - qToLoss - qToSurface_belowBOP); // Net upward in annulus below BOP
     window.__qAnnAbove_m3s = qNet_riser; // Net flow in riser
     window.__qAnnUp_m3s = qToSurface_belowBOP; // Flow through choke/kill lines
-    window.__qAnnDown_m3s = 0; // No downward flow when BOP closed
+    window.__qAnnDown_m3s = qChokeDown + qKillDown;
 
     // Flow Out calculation - from choke/kill lines
     const targetFO_gpm = Math.max(0, qToSurface_belowBOP * 15850.323);
@@ -3000,7 +3425,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
       const DQDT_MAX = 1000;
       const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
       const lp = prev + ALPHA*(targetFO_gpm - prev);
-      const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
+      const dtSmooth = Math.max(window.dt_s || 1/60, 1/120);
+      const maxStep = DQDT_MAX * dtSmooth;
       const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
       FLOW_OUT_gpm = prev + step;
     }
@@ -3018,7 +3444,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
   // Supply that can feed losses from downhole side (no surface returns here)
   // We allow DS + Booster + TopFill to feed the zone; subtract CML intake
-  let qSupply = Math.max(0, qDS + qBO + qTF - qCML);
+  const qChokeDown = Math.max(0, chokeDownRequest);
+  const qKillDown = Math.max(0, killDownRequest);
+
+  let qSupply = Math.max(0, qDS + qBO + qTF + qChokeDown + qKillDown - qCML);
 
   // Amount that actually goes to the loss zone this step
   const qToLoss = Math.min(qDem, qSupply);
@@ -3091,6 +3520,32 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
     // Total flow out includes riser + choke + kill paths
     window.__Q_TOTAL_UP_m3s = Q_riser_actual + Q_choke_actual + Q_kill_actual;
+
+    if (hasChokeUP) {
+      const chokeActual_gpm = Q_choke_actual * 15850.323;
+      Q_CHOKE = chokeActual_gpm;
+
+      const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
+      const friction = chokeFrictionPsiLength(BOP_DEPTH, Q_choke_actual);
+      const hydro = PSI_COEF * chokeMW * BOP_DEPTH;
+      const actualSurface = BHP_at_BOP - hydro - friction;
+      if (Math.abs(actualSurface - CHOKE_PRESSURE_psi) > 50) {
+        window.__CHOKE_PRESSURE_WARNING = `Target: ${CHOKE_PRESSURE_psi.toFixed(0)} psi, Actual: ${actualSurface.toFixed(0)} psi`;
+      }
+    }
+
+    if (hasKillUP) {
+      const killActual_gpm = Q_kill_actual * 15850.323;
+      Q_KILL = killActual_gpm;
+
+      const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
+      const friction = killFrictionPsiLength(BOP_DEPTH, Q_kill_actual);
+      const hydro = PSI_COEF * killMW * BOP_DEPTH;
+      const actualSurface = BHP_at_BOP - hydro - friction;
+      if (Math.abs(actualSurface - KILL_PRESSURE_psi) > 50) {
+        window.__KILL_PRESSURE_WARNING = `Target: ${KILL_PRESSURE_psi.toFixed(0)} psi, Actual: ${actualSurface.toFixed(0)} psi`;
+      }
+    }
   } else {
     // No choke/kill lines open for UP, all flow through riser
     window.__Q_CHOKE_CALCULATED_m3s = 0;
@@ -3109,7 +3564,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const qAnnAbove = qAnnUp;  // DS_left + TF_left + BO_left + qInflux (when riser full or no losses)
 
   // Downward flow component (for advection direction tracking)
-  const qAnnDown = takeBO; // booster flow going DOWN to losses (for advection)
+  window.__qChokeDown_m3s = qChokeDown;
+  window.__qKillDown_m3s = qKillDown;
+  window.__qBoosterDown_m3s = takeBO;
+
+  const qAnnDown = takeBO + qChokeDown + qKillDown; // downward flow towards losses (for advection)
 
   // Publish clean section "signals" (magnitudes, signless)
   window.__qToLoss_m3s   = qToLoss;
@@ -3134,7 +3593,21 @@ function routeAnnulusFlowsWithLosses(dt_s){
   routeAnnulusFlowsWithLosses._full = nowFull;
 
   // If riser full, surface return equals upward annulus flow; otherwise zero
-  const targetFO_gpm = nowFull ? Math.max(0, qAnnUp * 15850.323) : 0;
+  const totalUp_m3s = window.__Q_TOTAL_UP_m3s || 0;
+  const chokeUp_m3s = window.__Q_CHOKE_CALCULATED_m3s || 0;
+  const killUp_m3s = window.__Q_KILL_CALCULATED_m3s || 0;
+  const riserUp_m3s = Math.max(0, totalUp_m3s - (chokeUp_m3s + killUp_m3s));
+
+  let targetFO_m3s = 0;
+  const lineUp_m3s = chokeUp_m3s + killUp_m3s;
+  if (lineUp_m3s > 1e-6) {
+    targetFO_m3s += lineUp_m3s;
+  }
+  if (nowFull) {
+    targetFO_m3s += riserUp_m3s;
+  }
+
+  const targetFO_gpm = Math.max(0, targetFO_m3s * 15850.323);
 
   // Debug FO calculation disabled (too verbose)
   // if (frameCount % 150 === 0) {
@@ -4531,8 +5004,8 @@ function computeImbalanceFlows(){
 
   // Mean densities
   const MW_ds = dsAvgPPG();
-  const MW_abv = average(annAboveGrid) || MW_ds;
-  const MW_blw = average(annBelowGrid) || MW_ds;
+  const MW_abv = averageEffectiveDensity(annAboveGrid, true) || MW_ds;
+  const MW_blw = averageEffectiveDensity(annBelowGrid, false) || MW_ds;
   const MW_bo = boosterAvgPPG();
 
   // Hydrostatic pressures at key points
@@ -4785,28 +5258,35 @@ function setup(){
   textAlign(CENTER, CENTER);
   frameRate(30);
 
+  // Center the main well schematic horizontally
+  well.x = Math.round((width - well.w) / 2);
 
-  // ========== Bottom: 4 equal panels side-by-side ==========
-  const padding = 30;
-  frameWidth  = (W - 2 * padding - 40) / 3; // 3 equal panels
-  frameHeight = 280;
-  frameY      = well.y + well.h + 100;
 
-  rheoFrameX = padding;
-  rheoFrameW = frameWidth;
+  // ========== Bottom banner layout ==========
+  bottomPanelPadding = 40;
+  bottomPanelSpacing = 24;
+  const standardColumns = 3; // status + losses + kick (BOP uses weighted width)
+  const bopWeight = 2.1;
 
-  gelFrameX = rheoFrameX + rheoFrameW + 20;
-  gelFrameW = frameWidth / 2;
+  frameHeight = 260;
+  frameY      = well.y + well.h + 40;
+  bottomRowGap = 40;
+  frameY2     = frameY + frameHeight + bottomRowGap;
 
-  // Legacy geometry frame variables (not used but kept for compatibility)
-  geomFrameX = gelFrameX + gelFrameW + 20;
-  geomFrameW = gelFrameW;
+  const gaps = standardColumns; // four columns → three gaps
+  const availableWidth = W - 2 * bottomPanelPadding - gaps * bottomPanelSpacing;
+  const unitWidth = availableWidth / (standardColumns + bopWeight);
 
-  // Enhanced Hydraulics on the RIGHT (same row)
-  ehFrameX = geomFrameX + gelFrameW + 20;
-  ehFrameW = frameWidth;
-  ehFrameH = frameHeight;
-  ehFrameY = frameY; // Same Y as other panels
+  bottomPanelW = unitWidth;
+  bopPanelW = unitWidth * bopWeight;
+
+  rheoFrameX   = bottomPanelPadding;
+  configFrameX = rheoFrameX   + bottomPanelW + bottomPanelSpacing;
+  kickFrameX   = configFrameX + bottomPanelW + bottomPanelSpacing;
+  bopFrameX    = kickFrameX   + bottomPanelW + bottomPanelSpacing;
+  statusFrameX = rheoFrameX;
+  lossFrameX   = configFrameX;
+  gelFrameX    = configFrameX;
 
   // Convert inches to meters
   riser_ID_m    = riser_ID_in    * 0.0254;
@@ -4821,6 +5301,12 @@ function setup(){
   // Initialize choke and kill line grids (BOP to surface, same length as riser)
   chokeGrid = new Array(N_ABV).fill(MW_CHOKE);
   killGrid = new Array(N_ABV).fill(MW_KILL);
+  chokeGasGrid = new Array(N_ABV).fill(0);
+  chokeOilGrid = new Array(N_ABV).fill(0);
+  chokeWaterGrid = new Array(N_ABV).fill(0);
+  killGasGrid = new Array(N_ABV).fill(0);
+  killOilGrid = new Array(N_ABV).fill(0);
+  killWaterGrid = new Array(N_ABV).fill(0);
 
   // Ensure choke and kill lines start completely full
   levelDeficit_choke_m = 0;
@@ -4985,8 +5471,6 @@ logDownloadBtn.mousePressed(() => {
   // ========== Build bottom panels ==========
   buildRheologyUI(rheoFrameX + 16, frameY + 40);
   buildGelAndGeometryUI(gelFrameX + 16, frameY + 40); // Combined panel
-  buildEnhancedHydraulicsUI(ehFrameX + 16, ehFrameY + 40);
-  
   doRheologyFit();
     publishRheoToGlobals(); // 
   
@@ -5034,9 +5518,8 @@ logDownloadBtn.mousePressed(() => {
   });
   
   buildLossesUI();
-buildDiagnosticsUI();
-buildKicksUI();
-buildBOPWellControlUI();
+  buildKicksUI();
+  buildBOPWellControlUI();
 
   // Initialize formation fluid cells
   initializeFormationFluidCells();
@@ -5226,14 +5709,17 @@ function draw(){
   noStroke();
   fill(210, 80, 30);
   rect(0, 0, width, 120);
+
+  const middleBandBottom = (typeof frameY === 'number') ? Math.max(frameY - 40, 160) : height - 200;
   fill(30, 60, 20);
-  rect(0, 120, width, height - 120);  // Extended middle band to cover BOP and Kick frames
-  // Bottom band (darkest) - reduced to just bottom edge
-  fill(0, 0, 20);
-  rect(0, height - 40, width, 40);
+  rect(0, 120, width, middleBandBottom - 120);
+
+  const bottomBandY = middleBandBottom;
+  fill(210, 8, 26);
+  rect(0, bottomBandY, width, height - bottomBandY);
+
   // Bottom frames (visual only; your UI inputs sit on top of these)
   drawBottomFrames();
-  drawEnhancedHydraulicsFrame();
 
   // ✅ CRITICAL FIX: Update annulus flows BEFORE any pressure/friction calculations
   // The SBP logic below calls pressureAtDepth_noSBP() which needs friction which
@@ -5303,8 +5789,9 @@ if (MPD_ON){
   drawDepthGrid();
   drawReferenceBadges();
   drawGaugesAndCharts();
- 
-  
+  drawStatusPanelRight(statusFrameX + 18, frameY2 + 18, Math.max(bottomPanelW - 36, 220));
+
+
 // Time series logging (right before stepAdvection)
 tsFrame++;
 if (tsFrame % TS_STRIDE === 0){
@@ -5496,7 +5983,8 @@ for (let i = 0; i < N_ABV; i++) {
   
   const yTop = mapDepthToY(dTop_m);
   const yBot = mapDepthToY(dBot_m);
-  const hue = remap(annAboveGrid[i], MW_MIN, MW_MAX, 170, 355);
+    const effMW = effectiveCellDensity_ppg(annAboveGrid[i] || MW_DS, i, true);
+    const hue = remap(effMW, MW_MIN, MW_MAX, 170, 355);
   fill(hue, 70, 70, 190);
   const clippedTop = Math.max(yTop, yTopWetRis);
   const cellHeight = yBot - clippedTop;
@@ -5517,7 +6005,8 @@ for (let i = 0; i < N_BELOW; i++) {
   
   const yTop = mapDepthToY(Math.max(dTop_m, annulusBelowTop));
   const yBot = mapDepthToY(dBot_m);
-  const hue = remap(annBelowGrid[i], MW_MIN, MW_MAX, 170, 355);
+    const effMW = effectiveCellDensity_ppg(annBelowGrid[i] || MW_DS, i, false);
+    const hue = remap(effMW, MW_MIN, MW_MAX, 170, 355);
   fill(hue, 70, 70, 210);
   if (wLeftAnn > 0) rect(xLeftAnn, yTop, wLeftAnn, yBot - yTop);
   if (wRightAnn > 0) rect(xRightAnn, yTop, wRightAnn, yBot - yTop);
@@ -5526,7 +6015,7 @@ for (let i = 0; i < N_BELOW; i++) {
 // ===== FORMATION FLUIDS VISUALIZATION (LEFT SIDE) =====
 // Extends from surface to TD, showing formation fluids in all regions
 if (formationFluidEnabled) {
-  const formFluidBarX = well.x - 60; // Left of well, moved to avoid clash with kill line
+  const formFluidBarX = well.x - 110; // Further left to avoid clashing with depth ticks
   const formFluidBarW = 18;
 
   // Draw background bar (surface to TD)
@@ -5543,7 +6032,7 @@ if (formationFluidEnabled) {
     const waterAmt = waterPhaseFrom_above[i] || 0;
     const totalFormFluid = gasAmt + oilAmt + waterAmt;
 
-    if (totalFormFluid > 0.01) {
+    if (totalFormFluid > 0.001) {
       const yTop = mapDepthToY(dTop_m);
       const yBot = mapDepthToY(dBot_m);
       const cellH = yBot - yTop;
@@ -5551,7 +6040,7 @@ if (formationFluidEnabled) {
       // Stack formation fluids (gas on top, then oil, then water)
       let yOffset = 0;
 
-      if (gasAmt > 0.01) {
+      if (gasAmt > 0.001) {
         const gasH = cellH * (gasAmt / totalFormFluid);
         const gasColor = FORMATION_FLUID_TYPES.GAS.color;
         noStroke(); fill(gasColor[0], gasColor[1], gasColor[2], 220);
@@ -5559,7 +6048,7 @@ if (formationFluidEnabled) {
         yOffset += gasH;
       }
 
-      if (oilAmt > 0.01) {
+      if (oilAmt > 0.001) {
         const oilH = cellH * (oilAmt / totalFormFluid);
         const oilColor = formationFluidType === 'BLACKOIL'
           ? FORMATION_FLUID_TYPES.BLACKOIL.color
@@ -5569,7 +6058,7 @@ if (formationFluidEnabled) {
         yOffset += oilH;
       }
 
-      if (waterAmt > 0.01) {
+      if (waterAmt > 0.001) {
         const waterH = cellH * (waterAmt / totalFormFluid);
         const waterColor = FORMATION_FLUID_TYPES.WATER.color;
         noStroke(); fill(waterColor[0], waterColor[1], waterColor[2], 220);
@@ -5588,7 +6077,7 @@ if (formationFluidEnabled) {
     const waterAmt = waterPhaseFrom_below[i] || 0;
     const totalFormFluid = gasAmt + oilAmt + waterAmt;
 
-    if (totalFormFluid > 0.01) {
+    if (totalFormFluid > 0.001) {
       const yTop = mapDepthToY(dTop_m);
       const yBot = mapDepthToY(dBot_m);
       const cellH = yBot - yTop;
@@ -5596,7 +6085,7 @@ if (formationFluidEnabled) {
       // Stack formation fluids (gas on top, then oil, then water)
       let yOffset = 0;
 
-      if (gasAmt > 0.01) {
+      if (gasAmt > 0.001) {
         const gasH = cellH * (gasAmt / totalFormFluid);
         const gasColor = FORMATION_FLUID_TYPES.GAS.color;
         noStroke(); fill(gasColor[0], gasColor[1], gasColor[2], 220);
@@ -5604,7 +6093,7 @@ if (formationFluidEnabled) {
         yOffset += gasH;
       }
 
-      if (oilAmt > 0.01) {
+      if (oilAmt > 0.001) {
         const oilH = cellH * (oilAmt / totalFormFluid);
         const oilColor = formationFluidType === 'BLACKOIL'
           ? FORMATION_FLUID_TYPES.BLACKOIL.color
@@ -5614,7 +6103,7 @@ if (formationFluidEnabled) {
         yOffset += oilH;
       }
 
-      if (waterAmt > 0.01) {
+      if (waterAmt > 0.001) {
         const waterH = cellH * (waterAmt / totalFormFluid);
         const waterColor = FORMATION_FLUID_TYPES.WATER.color;
         noStroke(); fill(waterColor[0], waterColor[1], waterColor[2], 220);
@@ -6016,7 +6505,7 @@ function drawKickSymbols(){
   if (!formationFluidEnabled || formationFluidDepth_m <= 0) return;
 
   const symbolSize = 20;
-  const xPos = well.x + well.w + 30; // To the right of the well
+  const xPos = well.x - 40; // To the left of the well to avoid chart overlap
 
   const y = mapDepthToY(formationFluidDepth_m);
 
@@ -6126,38 +6615,43 @@ function drawCMLVisual(){
 }
 
 function drawBottomFrames(){
-  stroke(0,0,100); noFill();
-  rect(rheoFrameX, frameY, rheoFrameW, frameHeight, 8);
-  rect(gelFrameX, frameY, gelFrameW, frameHeight, 8);
-  rect(geomFrameX, frameY, geomFrameW, frameHeight, 8);
-  noStroke(); fill(0,0,95); textAlign(CENTER, TOP); textSize(12);
-  text("Rheology Configurations", rheoFrameX + rheoFrameW/2, frameY + frameHeight + 10);
-  text("Gel Configurations", gelFrameX + gelFrameW/2, frameY + frameHeight + 10);
-  text("Well Geometry", geomFrameX + geomFrameW/2, frameY + frameHeight + 10);
-  const badgeX = rheoFrameX + 350;
-  const badgeY = frameY + 38;
-  drawBadge(badgeX, badgeY, `Friction: ${FRICTION_MODE}, Model: ${HYDRAULICS_MODEL} | Rheo: ${ACTIVE_RHEO_MODEL}`);
+  const topPanels = [
+    { x: rheoFrameX,   w: bottomPanelW, label: "Rheology" },
+    { x: configFrameX, w: bottomPanelW, label: "Well Configuration" }
+  ];
+
+  const bottomPanels = [
+    { x: statusFrameX, w: bottomPanelW, label: "Well Status" },
+    { x: lossFrameX,   w: bottomPanelW, label: "Losses" },
+    { x: kickFrameX,   w: bottomPanelW, label: "Kick Control" },
+    { x: bopFrameX,    w: (typeof bopPanelW === 'number' ? bopPanelW : bottomPanelW), label: "BOP & Hydraulics" }
+  ];
+
+  const drawRow = (panels, yBase) => {
+    if (typeof yBase !== 'number') return;
+    stroke(0, 0, 70); strokeWeight(2); noFill();
+    for (const panel of panels){
+      rect(panel.x, yBase, panel.w, frameHeight, 10);
+    }
+
+    noStroke(); fill(0,0,92); textAlign(CENTER, TOP); textSize(12);
+    for (const panel of panels){
+      text(panel.label, panel.x + panel.w/2, yBase + frameHeight + 12);
+    }
+  };
+
+  drawRow(topPanels, frameY);
+  drawRow(bottomPanels, frameY2);
+
+  // Friction status badge anchored to BOP panel on lower row
+  const badgeWidth = (typeof bopPanelW === 'number') ? bopPanelW : bottomPanelW;
+  const badgeX = bopFrameX + badgeWidth/2;
+  const badgeY = (typeof frameY2 === 'number' ? frameY2 : frameY) + 28;
+  drawBadge(badgeX, badgeY, `Friction: ${FRICTION_MODE}`, `Model: ${HYDRAULICS_MODEL} • Rheo: ${ACTIVE_RHEO_MODEL}`);
 }
 
 
 
-
-function drawEnhancedHydraulicsFrame(){
-  stroke(0,0,100); noFill();
-  rect(ehFrameX, ehFrameY, ehFrameW, ehFrameH, 8);
-  noStroke(); fill(0,0,95); textAlign(CENTER, TOP); textSize(12);
-  text("Enhanced Hydraulics controls", ehFrameX + ehFrameW/2, ehFrameY + ehFrameH + 10);
-  textAlign(LEFT, TOP); fill(0,0,95); textSize(12);
-  const st = (k) => EH[k].on ? 'ON' : 'OFF';
-  const sv = (k) => nf(EH[k].s, 1, 2);
-  const ehStatus =
-    `ECC: ${st('ECC')} (s=${sv('ECC')}) | ` +
-    `ROUGH: ${st('ROUGH')} (s=${sv('ROUGH')}) | ` +
-    `KLOSS: ${st('KLOSS')} (s=${sv('KLOSS')}) | ` +
-    `P-only: ${st('PCOR')} (s=${sv('PCOR')}) | Fluid: ${EH.PCOR.fluid}`;
-  text(ehStatus, ehFrameX + 12, ehFrameY + ehFrameH - 22);
-  textAlign(CENTER, CENTER);
-}
 
 function drawDepthGrid(){
   fill(0,0,80); noStroke(); textSize(12);
@@ -6197,49 +6691,56 @@ function drawBadgeSm(cx, cy, line1, line2){
 }
 
 function drawGaugesAndCharts(){
-  // use the SAME spacing as the top gauges
-  const colGap = 40;                            // same as gap between SPP and Booster SPP
-  const baseX  = well.x + well.w + 150;        // same as cxSPP
-
-  // Top gauges (unchanged, but now derived from baseX)
-  const cxSPP = baseX;
+  const layoutCenter = well.x + well.w / 2;
+  const gaugeMargin = 140;
+  const cxSPP = Math.max(R + 48, well.x - (R + gaugeMargin));
+  const cxBo  = Math.min(width - R - 48, well.x + well.w + R + gaugeMargin);
   const cyTop = well.y + 48;
+
   const vSPPraw = surfacePumpPressure();
   lastSPP = updateSPP(vSPPraw);
   drawGauge(cxSPP, cyTop, lastSPP, 16000, "SPP", "psi", R, "left");
   if (levelDeficit_m > 0.01){
     textAlign(LEFT, CENTER); textSize(11); fill(0,0,95);
-    text(`DS level ↓ ${nf(levelDeficit_m,1,1)} m`, cxSPP -30, cyTop + 40);
+    text(`DS level ↓ ${nf(levelDeficit_m,1,1)} m`, cxSPP - 48, cyTop + 40);
     textAlign(CENTER, CENTER);
   }
 
-  const cxBo = baseX + 2*R + colGap;           // Booster aligned to the right of SPP
-  const vBoRaw = boosterPumpPressure();
-  const vBo = updateBoosterSPP(vBoRaw);
+  const vBo = updateBoosterSPP(boosterPumpPressure());
   drawGauge(cxBo, cyTop, vBo, 16000, "Booster SPP", "psi", R, "right");
   if (levelDeficit_bo_m > 0.01){
     textAlign(LEFT, CENTER); textSize(11); fill(0,0,95);
-    text(`Bo level ↓ ${nf(levelDeficit_bo_m,1,1)} m`, cxBo -30 , cyTop + 40);
+    text(`Bo level ↓ ${nf(levelDeficit_bo_m,1,1)} m`, cxBo - 32 , cyTop + 40);
     textAlign(CENTER, CENTER);
   }
 
-  
-  
-  // Depth gauges — centers aligned UNDER the top gauges now
-  const colLeft  = baseX;                       // under SPP
-  const colRight = baseX + 2*R + colGap;        // under Booster
-  drawGauge(colLeft,  mapDepthToY(BOP_DEPTH),  pressureAtDepth(BOP_DEPTH),  16000, " ", "psi", R, "left");
-  drawGauge(colLeft,  mapDepthToY(BOP_DEPTH),  pressureAtDepth(BOP_DEPTH),  16000, " ", "psi", R, "left");
-  drawGauge(colLeft,  mapDepthToY(SHOE_DEPTH), pressureAtDepth(SHOE_DEPTH), 16000, " ", "psi", R, "left");
-  drawGauge(colLeft,  mapDepthToY(TD_DEPTH),   pressureAtDepth(TD_DEPTH),   16000, " ", "psi", R, "left");
+  // Depth gauges anchored beneath the top gauges
+  const depthLevels = [
+    { depth: BOP_DEPTH,  label: "BOP" },
+    { depth: SHOE_DEPTH, label: "Shoe" },
+    { depth: TD_DEPTH,   label: "TD" }
+  ];
 
-  drawGauge(colRight, mapDepthToY(BOP_DEPTH),  ecdWithSBPAtDepth(BOP_DEPTH), 18, "BOP",  "ppg", R, "right");
-  drawGauge(colRight, mapDepthToY(SHOE_DEPTH), ecdWithSBPAtDepth(SHOE_DEPTH),18, "Shoe", "ppg", R, "right");
-  drawGauge(colRight, mapDepthToY(TD_DEPTH),   ecdWithSBPAtDepth(TD_DEPTH),  18, "TD",   "ppg", R, "right");
+  depthLevels.forEach(level => {
+    const yPos = mapDepthToY(level.depth);
+    drawGauge(cxSPP, yPos, pressureAtDepth(level.depth), 16000, level.label, "psi", R, "left");
+    drawGauge(cxBo,  yPos, ecdWithSBPAtDepth(level.depth), 18, level.label, "ppg", R, "right");
+  });
 
-  drawStatusPanelRight(colRight);
+  const chartTop = Math.max(140, well.y - 10);
+  const chartHeight = 420;
 
-  // === Loss-zone markers on depth charts ===
+  const timeRightEdge = cxSPP - R - 96;
+  let timeChartWidth = Math.min(680, Math.max(420, timeRightEdge - 36));
+  if (timeChartWidth < 300) timeChartWidth = Math.max(260, timeRightEdge - 36);
+  const timeChartX = Math.max(24, timeRightEdge - timeChartWidth);
+  drawTimeChart(timeChartX, chartTop, timeChartWidth, chartHeight);
+
+  const depthChartX = cxBo + R + 96;
+  drawCharts(depthChartX, chartTop, chartHeight);
+}
+
+// === Loss-zone markers on depth charts ===
 function drawLossMarkersOnPressure(px, py, w, h, padL, padR, padT, padB, xMinPsi, xMaxPsi, col) {
   if (!LOSSES_ON) return;
   push();
@@ -6308,60 +6809,78 @@ function drawLossMarkersOnECD(px, py, w, h, padL, padR, padT, padB, xMinPpg, xMa
   pop();
 }
 
-  
-  
-  // Charts follow to the right of the right column
-  const chartX = colRight + (R*2) + 20;
-  drawCharts(chartX);
-}
 
 
-function drawStatusPanelRight(colRight){
-  const x = colRight + R -240 ; // More spacing from gauges
-  const y = well.y + 200; // Lower position
-  
-  textAlign(LEFT, TOP); 
-  textSize(12); 
-  fill(0,0,95);
-  
-  text(`Annulus MW above BOP: ${nf(average(annAboveGrid),1,2)} ppg`, x, y);
-  
-  let y2 = y + 20;
-  text(`SBP Applied: ${nf(CURRENT_SBP,1,0)} psi | Mode: ${SBP_MODE.toUpperCase()}`, x, y2);
-  
-  y2 += 20;
+function drawStatusPanelRight(anchorX, anchorY, panelW = bottomPanelW){
+  const readings = [];
+
+  const mwAbove = averageEffectiveDensity(annAboveGrid, true);
+  const mwBelow = averageEffectiveDensity(annBelowGrid, false);
+  readings.push(`Annulus MW above BOP: ${nf(mwAbove,1,2)} ppg`);
+  readings.push(`Annulus MW below BOP: ${nf(mwBelow,1,2)} ppg`);
+
+  const sbpModeLabel = (SBP_MODE || 'manual').toUpperCase();
+  readings.push(`SBP Applied: ${nf(CURRENT_SBP,1,0)} psi • Mode: ${sbpModeLabel}`);
   if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
-    text(`SBP Anchor: ${ANCHOR_DEPTH} m @ ${nf(ANCHOR_ECD,1,2)} ppg`, x, y2);
+    readings.push(`SBP Anchor → ${nf(ANCHOR_DEPTH,1,0)} m @ ${nf(ANCHOR_ECD,1,2)} ppg`);
   }
-  
-  y2 += 15;
-  const topDepth = riserTopDepth();
-  const cmlMode = AUTO_CML_ON ? "AUTO" : "MANUAL";
-  let cmlExtra = "";
+
+  const cmlMode = AUTO_CML_ON ? 'AUTO' : 'MANUAL';
   if (AUTO_CML_ON && CML_AP_DEPTH > 0 && CML_AP_ECD > 0){
-    cmlExtra = ` | Anchor: ${nf(CML_AP_DEPTH,1,0)} m @ ${nf(CML_AP_ECD,1,2)} ppg`;
+    readings.push(`CML ${cmlMode} • Pump ${nf(CML_DEPTH,1,0)} m | Anchor ${nf(CML_AP_DEPTH,1,0)} m @ ${nf(CML_AP_ECD,1,2)} ppg`);
+  } else {
+    readings.push(`CML ${cmlMode} • Pump ${nf(CML_DEPTH,1,0)} m`);
   }
-  text(`CML Mode: ${cmlMode} | Pump @ ${nf(CML_DEPTH,1,0)} m`, x, y2);
-  
-  y2 += 16;
-  text(`Q_out: ${nf(Q_CML,1,0)} gpm | Riser top: ${nf(topDepth,1,1)} m${cmlExtra}`, x, y2);
-  
-  textAlign(CENTER, CENTER);
-  // Overpressure warnings hidden for now
-  // if (LOSSES_ON) {
-  //   for (const z of lossZones) {
-  //     if (!z || !z.enabled) continue;
-  //     const P = pressureAtDepth(z.depth_m);
-  //     if (P > z.fracPressure_psi + 50) { // 50 psi tolerance
-  //       push();
-  //       fill(0, 100, 100); // RED warning
-  //       textSize(12);
-  //       text(`⚠ OVERPRESSURE at ${z.depth_m}m: ${nf(P,1,0)} > ${nf(z.fracPressure_psi,1,0)} psi`,
-  //            x, y + 100);
-  //       pop();
-  //     }
-  //   }
-  // }
+
+  readings.push(`Riser top: ${nf(riserTopDepth(),1,1)} m • Q_out: ${nf(Q_CML,1,0)} gpm`);
+
+  const influxVol = formationFluidVolume_bbl || 0;
+  readings.push(`Kick volume: ${nf(influxVol,1,1)} bbl • Rate: ${nf(formationFluidRate_gpm,1,0)} gpm`);
+
+  const fronts = formationFluidFrontExtents();
+  if (fronts.top != null && fronts.bottom != null){
+    readings.push(`Formation fluid front: top ${nf(fronts.top,1,0)} m • bottom ${nf(fronts.bottom,1,0)} m`);
+  } else {
+    readings.push('Formation fluid front: clear');
+  }
+
+  readings.push(`BOP: ${BOP_CLOSED ? 'CLOSED' : 'OPEN'}`);
+  readings.push(`C&K overlay: ${showCKProfiles ? 'ON' : 'OFF'}`);
+
+  const lineH = 18;
+  const headerH = 34;
+  const paddingX = 16;
+  const paddingY = 14;
+  const w = Math.max(220, panelW);
+  const h = headerH + paddingY + readings.length * lineH + paddingY;
+  const x = anchorX;
+  const y = anchorY;
+
+  push();
+  noStroke();
+  fill(0, 0, 12, 220);
+  rect(x, y, w, h, 12);
+  fill(210, 40, 40, 180);
+  rect(x, y, w, headerH, 12, 12, 4, 4);
+  stroke(0, 0, 60, 160);
+  noFill();
+  rect(x + 1, y + 1, w - 2, h - 2, 10);
+  pop();
+
+  push();
+  textAlign(LEFT, TOP);
+  textSize(12);
+  fill(210, 30, 95);
+  text('Well Status', x + paddingX, y + 10);
+
+  fill(0, 0, 96);
+  let textY = y + headerH + paddingY - 4;
+  const textX = x + paddingX;
+  for (const line of readings){
+    text(line, textX, textY);
+    textY += lineH;
+  }
+  pop();
 }
 
 
@@ -6419,22 +6938,28 @@ function plotSeriesInPanel(px, py, w, h, padL, padR, padT, padB, data, ymin, yma
 }
 
 
-function drawCharts(x0){
-  const top = 150;
-  const h = 420;
-  const wP = 260, wE = 340, gap = 40;
+function drawCharts(xLeft, top = 150, h = 420){
+  const wP = 280, wE = 360, gap = 64;
   const padL = 54, padR = 18, padT = 28, padB = 42;
   const axisCol = color(0, 0, 95);
   const gridCol = color(0, 0, 60, 120);
   const lineColP = color(0, 80, 80);
 
-  const dx = 70;
-
   // -------- Pressure-depth (psi) --------
-  const px = x0 + dx, py = top;
+  const px = xLeft, py = top;
   drawChartPanel(px, py, wP, h, "Pressure (psi)");
   drawChartGrid(px, py, wP, h, padL, padR, padT, padB, gridCol);
-  plotDepthFunction(px, py, wP, h, padL, padR, padT, padB, d => pressureAtDepth(d), 0, 16000, lineColP);
+  const ckColor = color(0, 80, 80);
+  const riserDepth = Math.max(0, Math.min(BOP_DEPTH, MAX_DEPTH));
+  if (riserDepth > 0) {
+    plotDepthSegment(px, py, wP, h, padL, padR, padT, padB, 0, riserDepth, d => pressureAtDepth(d), 0, 16000, lineColP);
+  }
+  if (TD_DEPTH > BOP_DEPTH) {
+    plotDepthSegment(px, py, wP, h, padL, padR, padT, padB, Math.max(BOP_DEPTH, 0), TD_DEPTH, d => pressureAtDepth(d), 0, 16000, lineColP);
+  }
+  if (showCKProfiles && riserDepth > 0) {
+    plotDepthSegment(px, py, wP, h, padL, padR, padT, padB, 0, riserDepth, d => chokeKillPressureAtDepth(d), 0, 16000, ckColor, { dashed: true, weight: 2 });
+  }
   drawAxes(px, py, wP, h, padL, padR, padT, padB, axisCol);
   drawDepthTicks(px, py, wP, h, padL, padR, padT, padB, axisCol);
   drawXTicks(px, py, wP, h, padL, padR, padT, padB, axisCol, 0, 16000, [0, 4000, 8000, 12000, 16000]);
@@ -6442,89 +6967,91 @@ function drawCharts(x0){
   if (showCaptured && capturedP){
     plotDepthOverlay(px, py, wP, h, padL, padR, padT, padB, capturedP, 0, 16000, color(55,80,80));
   }
-// --- Loss markers on PRESSURE chart (yellow star at Pressure×Depth) ---
-{
-  const xL = px + padL, xR = px + wP - padR;
-  const yT = py + padT, yB = py + h - padB;
-  const pMin = 0, pMax = 16000;
 
-  if (LOSSES_ON && Array.isArray(lossZones)) {
-    for (const z of lossZones) {
-      if (!z || !z.enabled || !(z.depth_m > 0) || !(z.fracPressure_psi > 0)) continue;
-
-      const y = map(z.depth_m, 0, MAX_DEPTH, yT, yB, true);
-      const x = map(z.fracPressure_psi, pMin, pMax, xL, xR, true);
-
-      // yellow star
-      if (typeof drawStar === 'function') {
-        drawStar(x, y, 7, 3.5, 5, color(60, 100, 100));
-      } else {
-        // fallback: small yellow cross
-        push(); stroke(color(60,100,100)); strokeWeight(2);
-        line(x-6,y, x+6,y); line(x,y-6, x,y+6); pop();
-      }
-
-      // small label
-      push();
-      noStroke(); fill(0,0,95); textSize(10); textAlign(LEFT, BOTTOM);
-      const q = (z.Qloss_gpm || 0);
-      text(`Loss @ ${nf(z.depth_m,1,0)} m (${q>0 ? `≈${nf(q,1,0)} gpm` : '≈0 gpm'})`, x + 8, y - 2);
-      pop();
-    }
-  }
-}
-
-// --- Kick markers on PRESSURE chart (triangle at Pore Pressure×Depth) ---
-{
-  if (formationFluidEnabled && formationFluidDepth_m > 0) {
+  // --- Loss markers on PRESSURE chart (yellow star at Pressure×Depth) ---
+  {
     const xL = px + padL, xR = px + wP - padR;
     const yT = py + padT, yB = py + h - padB;
     const pMin = 0, pMax = 16000;
 
-    const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
+    if (LOSSES_ON && Array.isArray(lossZones)) {
+      for (const z of lossZones) {
+        if (!z || !z.enabled || !(z.depth_m > 0) || !(z.fracPressure_psi > 0)) continue;
 
-    // In pressure-driven mode, show pore pressure; in manual mode, show BHP
-    let markerPressure_psi;
-    if (kickMode === 'PRESSURE_DRIVEN') {
-      markerPressure_psi = porePressure_psi;
-    } else {
-      markerPressure_psi = pressureAtDepth(formationFluidDepth_m);
+        const y = map(z.depth_m, 0, MAX_DEPTH, yT, yB, true);
+        const x = map(z.fracPressure_psi, pMin, pMax, xL, xR, true);
+
+        if (typeof drawStar === 'function') {
+          drawStar(x, y, 7, 3.5, 5, color(60, 100, 100));
+        } else {
+          push(); stroke(color(60,100,100)); strokeWeight(2);
+          line(x-6,y, x+6,y); line(x,y-6, x,y+6); pop();
+        }
+
+        push();
+        noStroke(); fill(0,0,95); textSize(10); textAlign(LEFT, BOTTOM);
+        const q = (z.Qloss_gpm || 0);
+        text(`Loss @ ${nf(z.depth_m,1,0)} m (${q>0 ? `≈${nf(q,1,0)} gpm` : '≈0 gpm'})`, x + 8, y - 2);
+        pop();
+      }
     }
-
-    const x = map(markerPressure_psi, pMin, pMax, xL, xR, true);
-
-    // Draw triangle
-    push();
-    const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
-    const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
-    fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
-    stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
-    strokeWeight(1.5);
-    const size = 8;
-    beginShape();
-    vertex(x, y - size);           // Top point
-    vertex(x - size * 0.7, y + size * 0.5);  // Bottom left
-    vertex(x + size * 0.7, y + size * 0.5);   // Bottom right
-    endShape(CLOSE);
-
-    // Label
-    noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
-    textSize(10); textAlign(LEFT, BOTTOM);
-    const typeStr = fluidProps ? fluidProps.name : 'Kick';
-    const pressureLabel = kickMode === 'PRESSURE_DRIVEN' ? `P_pore=${nf(porePressure_psi,1,0)} psi` : `BHP=${nf(markerPressure_psi,1,0)} psi`;
-    text(`${typeStr} @ ${nf(formationFluidDepth_m,1,0)} m (${pressureLabel})`, x + 10, y - 2);
-    pop();
   }
-}
 
+  // --- Kick markers on PRESSURE chart (triangle at Pore Pressure×Depth) ---
+  {
+    if (formationFluidEnabled && formationFluidDepth_m > 0) {
+      const xL = px + padL, xR = px + wP - padR;
+      const yT = py + padT, yB = py + h - padB;
+      const pMin = 0, pMax = 16000;
 
+      const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
 
+      let markerPressure_psi;
+      if (kickMode === 'PRESSURE_DRIVEN') {
+        markerPressure_psi = porePressure_psi;
+      } else {
+        markerPressure_psi = pressureAtDepth(formationFluidDepth_m);
+      }
+
+      const x = map(markerPressure_psi, pMin, pMax, xL, xR, true);
+
+      push();
+      const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+      const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
+      fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
+      stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
+      strokeWeight(1.5);
+      const size = 8;
+      beginShape();
+      vertex(x, y - size);
+      vertex(x - size * 0.7, y + size * 0.5);
+      vertex(x + size * 0.7, y + size * 0.5);
+      endShape(CLOSE);
+
+      noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
+      textSize(10); textAlign(LEFT, BOTTOM);
+      const typeStr = fluidProps ? fluidProps.name : 'Kick';
+      const pressureLabel = kickMode === 'PRESSURE_DRIVEN'
+        ? `P_pore=${nf(porePressure_psi,1,0)} psi`
+        : `BHP=${nf(markerPressure_psi,1,0)} psi`;
+      text(`${typeStr} @ ${nf(formationFluidDepth_m,1,0)} m (${pressureLabel})`, x + 10, y - 2);
+      pop();
+    }
+  }
 
   // -------- ECD-depth (ppg) --------
   const ex = px + wP + gap, ey = top;
   drawChartPanel(ex, ey, wE, h, "ECD (ppg)");
   drawChartGrid(ex, ey, wE, h, padL, padR, padT, padB, gridCol);
-  plotDepthFunctionMasked(ex, ey, wE, h, padL, padR, padT, padB, d => ecdWithSBPAtDepth(d), 6, 18, color(0, 80, 80), v => isFinite(v) && v > 6 && v <= 18 );
+  if (riserDepth > 0) {
+    plotDepthSegment(ex, ey, wE, h, padL, padR, padT, padB, 0, riserDepth, d => ecdWithSBPAtDepth(d), 6, 18, color(0, 80, 80));
+  }
+  if (TD_DEPTH > BOP_DEPTH) {
+    plotDepthSegment(ex, ey, wE, h, padL, padR, padT, padB, Math.max(BOP_DEPTH, 0), TD_DEPTH, d => ecdWithSBPAtDepth(d), 6, 18, color(0, 80, 80));
+  }
+  if (showCKProfiles && riserDepth > 0) {
+    plotDepthSegment(ex, ey, wE, h, padL, padR, padT, padB, 0, riserDepth, d => chokeKillEcdAtDepth(d), 6, 18, ckColor, { dashed: true, weight: 2 });
+  }
   drawAxes(ex, ey, wE, h, padL, padR, padT, padB, axisCol);
   drawDepthTicks(ex, ey, wE, h, padL, padR, padT, padB, axisCol);
   drawXTicks(ex, ey, wE, h, padL, padR, padT, padB, axisCol, 6, 18, [6, 9, 12, 15, 18]);
@@ -6533,87 +7060,77 @@ function drawCharts(x0){
     plotDepthOverlayMasked(ex, ey, wE, h, padL, padR, padT, padB, capturedECD, 6, 18, color(55,80,80), v => isFinite(v) && v > 6 && v <= 18 );
   }
 
-// --- Loss markers on ECD chart (yellow star at FG_ppg×Depth) ---
-{
-  const xL = ex + padL, xR = ex + wE - padR;
-  const yT = ey + padT, yB = ey + h - padB;
-  const eMin = 6, eMax = 18;
-
-  if (LOSSES_ON && Array.isArray(lossZones)) {
-    for (const z of lossZones) {
-      if (!z || !z.enabled || !(z.depth_m > 0) || !(z.fracPressure_psi > 0)) continue;
-
-      // fracture gradient in ppg at the selected depth
-      const fg_ppg = z.depth_m > 0 ? (z.fracPressure_psi / (PSI_COEF * z.depth_m)) : NaN;
-      if (!isFinite(fg_ppg)) continue;
-
-      const y = map(z.depth_m, 0, MAX_DEPTH, yT, yB, true);
-      const x = map(fg_ppg, eMin, eMax, xL, xR, true);
-
-      // yellow star
-      if (typeof drawStar === 'function') {
-        drawStar(x, y, 7, 3.5, 5, color(60, 100, 100));
-      } else {
-        // fallback: small yellow cross
-        push(); stroke(color(60,100,100)); strokeWeight(2);
-        line(x-6,y, x+6,y); line(x,y-6, x,y+6); pop();
-      }
-
-      // small label
-      push();
-      noStroke(); fill(0,0,95); textSize(10); textAlign(LEFT, BOTTOM);
-      text(`${nf(fg_ppg,1,2)} ppg @ ${nf(z.depth_m,1,0)} m`, x + 8, y - 2);
-      pop();
-    }
-  }
-}
-
-// --- Kick markers on ECD chart (triangle at formation fluid density×Depth) ---
-{
-  if (formationFluidEnabled && formationFluidDepth_m > 0) {
+  // --- Loss markers on ECD chart (yellow star at FG_ppg×Depth) ---
+  {
     const xL = ex + padL, xR = ex + wE - padR;
     const yT = ey + padT, yB = ey + h - padB;
     const eMin = 6, eMax = 18;
 
-    const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
+    if (LOSSES_ON && Array.isArray(lossZones)) {
+      for (const z of lossZones) {
+        if (!z || !z.enabled || !(z.depth_m > 0) || !(z.fracPressure_psi > 0)) continue;
 
-    // Show formation fluid density in ppg
-    const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
-    const fluid_ppg = fluidProps ? fluidProps.density_ppg : 8.33;
+        const fg_ppg = z.depth_m > 0 ? (z.fracPressure_psi / (PSI_COEF * z.depth_m)) : NaN;
+        if (!isFinite(fg_ppg)) continue;
 
-    const x = map(fluid_ppg, eMin, eMax, xL, xR, true);
+        const y = map(z.depth_m, 0, MAX_DEPTH, yT, yB, true);
+        const x = map(fg_ppg, eMin, eMax, xL, xR, true);
 
-    // Draw triangle
-    push();
-    const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
-    fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
-    stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
-    strokeWeight(1.5);
-    const size = 8;
-    beginShape();
-    vertex(x, y - size);           // Top point
-    vertex(x - size * 0.7, y + size * 0.5);  // Bottom left
-    vertex(x + size * 0.7, y + size * 0.5);   // Bottom right
-    endShape(CLOSE);
+        if (typeof drawStar === 'function') {
+          drawStar(x, y, 7, 3.5, 5, color(60, 100, 100));
+        } else {
+          push(); stroke(color(60,100,100)); strokeWeight(2);
+          line(x-6,y, x+6,y); line(x,y-6, x,y+6); pop();
+        }
 
-    // Label
-    noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
-    textSize(10); textAlign(LEFT, BOTTOM);
-    const typeStr = fluidProps ? fluidProps.name : 'Kick';
-    text(`${typeStr}: ${nf(fluid_ppg,1,2)} ppg @ ${nf(formationFluidDepth_m,1,0)} m`, x + 10, y - 2);
-    pop();
+        push();
+        noStroke(); fill(0,0,95); textSize(10); textAlign(LEFT, BOTTOM);
+        text(`${nf(fg_ppg,1,2)} ppg @ ${nf(z.depth_m,1,0)} m`, x + 8, y - 2);
+        pop();
+      }
+    }
   }
+
+  // --- Kick markers on ECD chart (triangle at formation fluid density×Depth) ---
+  {
+    if (formationFluidEnabled && formationFluidDepth_m > 0) {
+      const xL = ex + padL, xR = ex + wE - padR;
+      const yT = ey + padT, yB = ey + h - padB;
+      const eMin = 6, eMax = 18;
+
+      const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
+
+      const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+      const fluid_ppg = fluidProps ? fluidProps.density_ppg : 8.33;
+
+      const x = map(fluid_ppg, eMin, eMax, xL, xR, true);
+
+      push();
+      const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
+      fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
+      stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
+      strokeWeight(1.5);
+      const size = 8;
+      beginShape();
+      vertex(x, y - size);
+      vertex(x - size * 0.7, y + size * 0.5);
+      vertex(x + size * 0.7, y + size * 0.5);
+      endShape(CLOSE);
+
+      noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
+      textSize(10); textAlign(LEFT, BOTTOM);
+      const typeStr = fluidProps ? fluidProps.name : 'Kick';
+      text(`${typeStr}: ${nf(fluid_ppg,1,2)} ppg @ ${nf(formationFluidDepth_m,1,0)} m`, x + 10, y - 2);
+      pop();
+    }
+  }
+
+  return wP + gap + wE;
 }
 
 function _tsCap(){ return (typeof TS_MAX === 'number' && TS_MAX > 0) ? TS_MAX : 600; }
 // --- Losses time series (gpm) ---
 if (!Array.isArray(window.tsLoss_gpm)) window.tsLoss_gpm = [];
-
-  
-  // -------- TIME SERIES panel --------
-  const timeChartX = ex + wE + 40; // inherits +dx via px/ex
-  drawTimeChart(timeChartX, top, 640, h);
-}
 
 
 
@@ -6659,6 +7176,42 @@ function drawXTicks(x,y,w,h,padL,padR,padT,padB,col,vmin,vmax,ticks){
     line(xx, bottom, xx, bottom+5);
     noStroke(); text(`${t}`, xx, bottom+8); stroke(col);
   }
+}
+
+function plotDepthSegment(x,y,w,h,padL,padR,padT,padB,dStart,dEnd,sampler,xmin,xmax,col,opt={}){
+  if (!isFinite(dStart) || !isFinite(dEnd) || dEnd <= dStart) return;
+  const innerW=w-padL-padR, innerH=h-padT-padB;
+  const left=x+padL, top=y+padT;
+  const steps = Math.max(1, Math.round((dEnd - dStart) / 25));
+
+  push();
+  noFill();
+  stroke(col);
+  strokeWeight(opt.weight || 3);
+  if (opt.dashed && drawingContext && drawingContext.setLineDash){
+    drawingContext.setLineDash(opt.dashPattern || [6,6]);
+  }
+
+  let drawing = false;
+  for (let i = 0; i <= steps; i++){
+    const t = i / Math.max(steps, 1);
+    const depth = dStart + t * (dEnd - dStart);
+    const val = sampler(depth);
+    if (!isFinite(val)) {
+      if (drawing){ endShape(); drawing = false; }
+      continue;
+    }
+    const xx = left + remap(val, xmin, xmax, 0, innerW, true);
+    const yy = top + remap(depth, 0, MAX_DEPTH, 0, innerH, true);
+    if (!drawing){ beginShape(); drawing = true; }
+    vertex(xx, yy);
+  }
+  if (drawing) endShape();
+
+  if (opt.dashed && drawingContext && drawingContext.setLineDash){
+    drawingContext.setLineDash([]);
+  }
+  pop();
 }
 
 function plotDepthFunction(x,y,w,h,padL,padR,padT,padB,f,xmin,xmax,col){
@@ -6942,74 +7495,116 @@ function buildRheologyUI(x, y){
   rheoPanel.statusDiv = createDiv("").position(x, btnY + 34).style("color","#EEE").style("font-size","12px");
 }
 
-function buildEnhancedHydraulicsUI(x, y){
-  const mkToggle = (k, label, row) => {
-    const yy = y + row*46;
-    const btn = createButton(`${label}: ${EH[k].on ? 'ON' : 'OFF'}`)
-      .position(x, yy).size(180, 26);
-    btn.mousePressed(()=>{ 
-      EH[k].on = !EH[k].on; 
-      btn.html(`${label}: ${EH[k].on ? 'ON' : 'OFF'}`); 
+function buildEnhancedHydraulicsUI(parentDiv){
+  const card = createDiv('').parent(parentDiv)
+    .style('margin-top', '16px')
+    .style('padding', '10px')
+    .style('border', '1px solid rgba(140,200,255,0.25)')
+    .style('border-radius', '8px')
+    .style('background', 'rgba(12,26,42,0.6)');
+
+  createDiv('Enhanced Hydraulics').parent(card)
+    .style('font-weight', 'bold')
+    .style('color', '#8cd7ff')
+    .style('margin-bottom', '8px');
+
+  const mkToggleRow = (key, label) => {
+    const row = createDiv('').parent(card)
+      .style('display', 'flex')
+      .style('align-items', 'center')
+      .style('gap', '10px')
+      .style('margin-bottom', '10px');
+
+    const btn = createButton(`${label}: ${EH[key].on ? 'ON' : 'OFF'}`)
+      .parent(row)
+      .style('width', '150px')
+      .style('height', '26px')
+      .style('font-size', '11px')
+      .mousePressed(() => {
+        EH[key].on = !EH[key].on;
+        btn.html(`${label}: ${EH[key].on ? 'ON' : 'OFF'}`);
+      });
+
+    const slider = createSlider(-1, 1, EH[key].s, 0.01)
+      .parent(row)
+      .style('width', '160px');
+
+    slider.input(() => {
+      EH[key].s = slider.value();
     });
-    
-    mkLabel("Adjustment (-1 to +1)", x+190, yy+4);
-    const sld = createSlider(-1, 1, EH[k].s, 0.01)
-      .position(x+330, yy).style('width','200px');
-    sld.input(()=>{ EH[k].s = sld.value(); });
   };
-  
-  mkToggle("ECC", "Eccentric Annulus", 0);
-  mkToggle("ROUGH", "Roughness Effect", 1);
-  mkToggle("KLOSS", "Local K-Losses (SPP)", 2);
-  
-  // P-only corrections (row 3)
-  let row = 3;
-  let yy = y + row*46;
-  const pbtn = createButton(`P-only Corrections: ${EH.PCOR.on ? 'ON' : 'OFF'}`)
-    .position(x, yy).size(180, 26);
-  pbtn.mousePressed(()=>{ 
-    EH.PCOR.on = !EH.PCOR.on; 
-    pbtn.html(`P-only Corrections: ${EH.PCOR.on ? 'ON' : 'OFF'}`); 
-  });
-  
-  mkLabel("Strength (-1 to +1)", x+190, yy+4);
-  const psl = createSlider(-1, 1, EH.PCOR.s, 0.01)
-    .position(x+330, yy).style('width','200px');
-  psl.input(()=>{ EH.PCOR.s = psl.value(); });
-  
-  mkLabel("Fluid Type", x+550, yy+4);
-  const sel = createSelect().position(x+620, yy).size(100, 26);
-  ["WBM","OBM","Diesel"].forEach(f=> sel.option(f));
-  sel.value(EH.PCOR.fluid);
-  sel.changed(()=>{ EH.PCOR.fluid = sel.value(); });
-  
-  // Gravity swap (row 4)
-  row = 4;
-  yy = y + row*46;
-  
-  // ✅ Now just create the button (EH.GRAV already exists globally)
-  const gravBtn = createButton(`Gravity Swap: ${EH.GRAV.on ? 'ON' : 'OFF'}`)
-    .position(x, yy).size(180, 26)
-    .mousePressed(()=>{
-      EH.GRAV.on = !EH.GRAV.on;
-      gravBtn.html(`Gravity Swap: ${EH.GRAV.on ? 'ON' : 'OFF'}`);
+
+  mkToggleRow('ECC', 'Eccentric Annulus');
+  mkToggleRow('ROUGH', 'Roughness');
+  mkToggleRow('KLOSS', 'Local K-Losses');
+
+  const pOnlyRow = createDiv('').parent(card)
+    .style('display', 'grid')
+    .style('grid-template-columns', '160px 1fr 120px')
+    .style('align-items', 'center')
+    .style('gap', '10px')
+    .style('margin-bottom', '10px');
+
+  const pBtn = createButton(`P-only: ${EH.PCOR.on ? 'ON' : 'OFF'}`)
+    .parent(pOnlyRow)
+    .style('height', '26px')
+    .mousePressed(() => {
+      EH.PCOR.on = !EH.PCOR.on;
+      pBtn.html(`P-only: ${EH.PCOR.on ? 'ON' : 'OFF'}`);
     });
-  
-  mkLabel('Density-driven settling (slow)', x+190, yy+4);
+
+  const pSlider = createSlider(-1, 1, EH.PCOR.s, 0.01)
+    .parent(pOnlyRow)
+    .style('width', '160px');
+
+  pSlider.input(() => {
+    EH.PCOR.s = pSlider.value();
+  });
+
+  const fluidSelect = createSelect().parent(pOnlyRow)
+    .style('height', '26px');
+  ['WBM', 'OBM', 'Diesel'].forEach(f => fluidSelect.option(f));
+  fluidSelect.value(EH.PCOR.fluid);
+  fluidSelect.changed(() => {
+    EH.PCOR.fluid = fluidSelect.value();
+  });
+
+  const gravRow = createDiv('').parent(card)
+    .style('display', 'flex')
+    .style('align-items', 'center')
+    .style('gap', '10px');
+
+  createButton(`Gravity Swap: ${EH.GRAV.on ? 'ON' : 'OFF'}`)
+    .parent(gravRow)
+    .style('width', '150px')
+    .style('height', '26px')
+    .mousePressed(function() {
+      EH.GRAV.on = !EH.GRAV.on;
+      this.html(`Gravity Swap: ${EH.GRAV.on ? 'ON' : 'OFF'}`);
+    });
+
+  createDiv('Density-driven settling (slow)').parent(gravRow)
+    .style('font-size', '11px')
+    .style('opacity', '0.8');
 }
 // ------------------------- Build Losses UI -------------------------
 function buildLossesUI() {
+  if (uiLosses.root) {
+    uiLosses.root.remove();
+  }
+  uiLosses.rows = [];
+
   const pos = lossesUIPosition();
 
-  uiLosses.root = createDiv('').position(pos.x, pos.y).style('padding', '8px')
-    .style('border', '1px solid rgba(255,255,255,0.15)')
-    .style('border-radius', '8px')
-    .style('background', 'rgba(0,0,0,0.25)')
-    .style('backdrop-filter', 'blur(6px)')
-    .style('color', '#EEE');
+  const panelWidth = bottomPanelCardWidth();
+
+  uiLosses.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#2f4a5f')
+    .style('width', `${panelWidth}px`);
 
   uiLosses.title = createDiv('Losses (β, ΔP, Coupled)').parent(uiLosses.root)
-    .style('font-weight', 'bold').style('margin-bottom', '6px');
+    .style('font-weight', 'bold')
+    .style('color', '#8cd7ff')
+    .style('margin-bottom', '6px');
 
   uiLosses.toggleBtn = createButton(LOSSES_ON ? 'Losses: ON' : 'Losses: OFF')
     .parent(uiLosses.root)
@@ -7084,279 +7679,350 @@ let uiBOP = {
 };
 
 function bopUIPosition() {
-  const kickPos = kicksUIPosition();
-  const kickWidth = 300;
-  const spacing = 20;
-  const x = kickPos.x + kickWidth + spacing; // To the right of kick frame
-  const y = kickPos.y; // Same vertical position
+  const x = (typeof bopFrameX === 'number') ? bopFrameX + 18 : 780;
+  const yBase = (typeof frameY2 === 'number') ? frameY2 + 40 : (height - 200);
+  const y = Math.min(height - 200, Math.max(20, yBase));
   return { x, y };
 }
 
-function buildBOPWellControlUI() {
-  const pos = bopUIPosition();
+function bottomPanelCardWidth(panelW = bottomPanelW) {
+  const base = (typeof panelW === 'number') ? panelW : 360;
+  const desired = Math.max(base - 28, 260);
+  return Math.min(desired, base - 12, 420);
+}
 
-  uiBOP.root = createDiv('').position(pos.x, pos.y).style('padding', '10px')
-    .style('border', '1px solid rgba(100,200,255,0.3)')
-    .style('border-radius', '8px')
-    .style('background', 'rgba(0,40,60,0.25)')
-    .style('backdrop-filter', 'blur(6px)')
+function styleBottomPanelCard(div, accent = null) {
+  div
+    .style('padding', '12px')
+    .style('border', '1px solid rgba(100,200,255,0.25)')
+    .style('border-radius', '10px')
+    .style('background', 'rgba(10,20,35,0.72)')
+    .style('backdrop-filter', 'blur(4px)')
     .style('color', '#EEE')
-    .style('width', '480px');
+    .style('width', `${bottomPanelCardWidth()}px`)
+    .style('display', 'flex')
+    .style('flex-direction', 'column')
+    .style('gap', '12px');
+
+  if (accent) {
+    div.style('box-shadow', `0 0 0 1px ${accent} inset`);
+  }
+
+  return div;
+}
+
+
+function buildBOPWellControlUI() {
+  if (uiBOP.root) {
+    uiBOP.root.remove();
+  }
+
+  const pos = bopUIPosition();
+  const panelWidth = Math.max(bottomPanelCardWidth(bopPanelW), 640);
+
+  uiBOP.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#1f3b57')
+    .style('width', `${panelWidth}px`);
 
   createDiv('BOP Well Control').parent(uiBOP.root)
-    .style('font-weight', 'bold').style('margin-bottom', '8px').style('color', '#66ccff');
-
-  // BOP State Toggle
-  uiBOP.bopBtn = createButton(BOP_CLOSED ? 'BOP: CLOSED' : 'BOP: OPEN')
-    .parent(uiBOP.root)
-    .style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80')
     .style('font-weight', 'bold')
-    .style('width', '120px')
+    .style('font-size', '14px')
+    .style('margin-bottom', '10px')
+    .style('color', '#7fd5ff');
+
+  const stateRow = createDiv('').parent(uiBOP.root)
+    .style('display', 'flex')
+    .style('align-items', 'center')
+    .style('justify-content', 'space-between')
+    .style('margin-bottom', '12px');
+
+  uiBOP.bopBtn = createButton(BOP_CLOSED ? 'BOP: CLOSED' : 'BOP: OPEN')
+    .parent(stateRow)
+    .style('width', '140px')
     .style('height', '28px')
-    .style('margin-bottom', '12px')
+    .style('font-weight', 'bold')
+    .style('border', 'none')
+    .style('color', '#0b1725')
+    .style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80')
     .mousePressed(() => {
       BOP_CLOSED = !BOP_CLOSED;
       uiBOP.bopBtn.html(BOP_CLOSED ? 'BOP: CLOSED' : 'BOP: OPEN');
       uiBOP.bopBtn.style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80');
-      // Reset closed well pressure boost when opening BOP
       if (!BOP_CLOSED) {
         closedWellPressureBoost_psi = 0;
       }
     });
 
-  // === CHOKE LINE ===
-  createDiv('Choke Line').parent(uiBOP.root)
-    .style('font-size', '13px').style('opacity', '0.9').style('font-weight', 'bold')
-    .style('margin-top', '12px').style('margin-bottom', '8px').style('color', '#88ccff');
+  uiBOP.stateLabel = createDiv(BOP_CLOSED ? 'Annulus isolated to surface' : 'Annulus communicating with riser')
+    .parent(stateRow)
+    .style('font-size', '11px')
+    .style('opacity', '0.85');
 
-  // Choke Flow
-  const chokeFlowDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
-  mkLabel("Flow (gpm)", pos.x + 10, -100, chokeFlowDiv);
-  uiBOP.chokeFlowSlider = createSlider(0, 1000, Q_CHOKE, 10).parent(chokeFlowDiv).style('width', '300px');
-  uiBOP.chokeFlowInput = createInput(nf(Q_CHOKE, 1, 0), 'number').parent(chokeFlowDiv).size(65);
-  uiBOP.chokeFlowInput.style('margin-left', '10px');
-  uiBOP.chokeFlowSlider.input(() => {
+  const overlayRow = createDiv('').parent(uiBOP.root)
+    .style('display', 'flex')
+    .style('justify-content', 'flex-end');
+
+  createButton(showCKProfiles ? 'Plot C&K: ON' : 'Plot C&K: OFF')
+    .parent(overlayRow)
+    .style('width', '150px')
+    .style('height', '26px')
+    .style('font-size', '11px')
+    .style('background', showCKProfiles ? '#4ade80' : 'rgba(255,255,255,0.1)')
+    .mousePressed(function() {
+      showCKProfiles = !showCKProfiles;
+      this.html(showCKProfiles ? 'Plot C&K: ON' : 'Plot C&K: OFF');
+      this.style('background', showCKProfiles ? '#4ade80' : 'rgba(255,255,255,0.1)');
+    });
+
+  const grid = createDiv('').parent(uiBOP.root)
+    .style('display', 'grid')
+    .style('grid-template-columns', 'repeat(2, minmax(260px, 1fr))')
+    .style('gap', '18px 20px')
+    .style('align-items', 'start');
+
+  const makeSliderRow = (parent, label, min, max, value, step, decimals) => {
+    const row = createDiv('').parent(parent)
+      .style('display', 'flex')
+      .style('flex-direction', 'column')
+      .style('gap', '4px')
+      .style('margin-bottom', '10px');
+
+    createDiv(label).parent(row)
+      .style('font-size', '11px')
+      .style('opacity', '0.85');
+
+    const sliderWrap = createDiv('').parent(row)
+      .style('display', 'flex')
+      .style('align-items', 'center')
+      .style('gap', '10px')
+      .style('justify-content', 'space-between');
+
+    const slider = createSlider(min, max, value, step)
+      .parent(sliderWrap)
+      .style('flex', '0 0 160px')
+      .style('width', '160px');
+
+    const input = createInput(nf(value, 1, decimals), 'number')
+      .parent(sliderWrap)
+      .size(60)
+      .style('height', '22px')
+      .style('border-radius', '4px')
+      .style('border', '1px solid rgba(100,200,255,0.25)')
+      .style('background', 'rgba(255,255,255,0.07)')
+      .style('color', '#EEE')
+      .style('text-align', 'right')
+      .style('padding', '0 6px')
+      .style('font-size', '11px');
+
+    return { slider, input, setValue: (val) => { slider.value(val); input.value(nf(val, 1, decimals)); } };
+  };
+
+  const chokeCard = createDiv('').parent(grid)
+    .style('padding', '10px')
+    .style('border-radius', '8px')
+    .style('background', 'rgba(14,28,42,0.65)');
+
+  createDiv('Choke Line').parent(chokeCard)
+    .style('font-weight', 'bold')
+    .style('color', '#88ccff')
+    .style('margin-bottom', '6px');
+
+  const chokeFlow = makeSliderRow(chokeCard, 'Flow (gpm)', 0, 1000, Q_CHOKE, 10, 0);
+  uiBOP.chokeFlowSlider = chokeFlow.slider;
+  uiBOP.chokeFlowInput = chokeFlow.input;
+  chokeFlow.slider.input(() => {
     Q_CHOKE = uiBOP.chokeFlowSlider.value();
     uiBOP.chokeFlowInput.value(nf(Q_CHOKE, 1, 0));
   });
-  uiBOP.chokeFlowInput.input(() => {
+  chokeFlow.input.input(() => {
     Q_CHOKE = Math.max(0, Number(uiBOP.chokeFlowInput.value()) || 0);
     uiBOP.chokeFlowSlider.value(Q_CHOKE);
   });
 
-  // Choke MW
-  const chokeMWDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
-  mkLabel("MW (ppg)", pos.x + 10, -100, chokeMWDiv);
-  uiBOP.chokeMWSlider = createSlider(MW_MIN, MW_MAX, MW_CHOKE, MW_STEP).parent(chokeMWDiv).style('width', '300px');
-  uiBOP.chokeMWInput = createInput(nf(MW_CHOKE, 1, 1), 'number').parent(chokeMWDiv).size(65);
-  uiBOP.chokeMWInput.style('margin-left', '10px');
-  uiBOP.chokeMWSlider.input(() => {
+  const chokeMW = makeSliderRow(chokeCard, 'MW (ppg)', MW_MIN, MW_MAX, MW_CHOKE, MW_STEP, 1);
+  uiBOP.chokeMWSlider = chokeMW.slider;
+  uiBOP.chokeMWInput = chokeMW.input;
+  chokeMW.slider.input(() => {
     MW_CHOKE = uiBOP.chokeMWSlider.value();
     uiBOP.chokeMWInput.value(nf(MW_CHOKE, 1, 1));
   });
-  uiBOP.chokeMWInput.input(() => {
-    MW_CHOKE = Math.max(MW_MIN, Math.min(MW_MAX, Number(uiBOP.chokeMWInput.value()) || MW_CHOKE));
+  chokeMW.input.input(() => {
+    MW_CHOKE = clamp(Number(uiBOP.chokeMWInput.value()) || MW_CHOKE, MW_MIN, MW_MAX);
     uiBOP.chokeMWSlider.value(MW_CHOKE);
   });
 
-  // Choke Pressure
-  const chokePressDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
-  mkLabel("Pressure (psi)", pos.x + 10, -100, chokePressDiv);
-  uiBOP.chokePressSlider = createSlider(0, 5000, CHOKE_PRESSURE_psi, 50).parent(chokePressDiv).style('width', '300px');
-  uiBOP.chokePressInput = createInput(nf(CHOKE_PRESSURE_psi, 1, 0), 'number').parent(chokePressDiv).size(65);
-  uiBOP.chokePressInput.style('margin-left', '10px');
-  uiBOP.chokePressSlider.input(() => {
+  const chokePress = makeSliderRow(chokeCard, 'Pressure (psi)', 0, 5000, CHOKE_PRESSURE_psi, 50, 0);
+  uiBOP.chokePressSlider = chokePress.slider;
+  uiBOP.chokePressInput = chokePress.input;
+  chokePress.slider.input(() => {
     CHOKE_PRESSURE_psi = uiBOP.chokePressSlider.value();
     uiBOP.chokePressInput.value(nf(CHOKE_PRESSURE_psi, 1, 0));
   });
-  uiBOP.chokePressInput.input(() => {
+  chokePress.input.input(() => {
     CHOKE_PRESSURE_psi = Math.max(0, Number(uiBOP.chokePressInput.value()) || 0);
     uiBOP.chokePressSlider.value(CHOKE_PRESSURE_psi);
   });
 
-  // Choke Direction and Open/Close
-  const chokeButtonDiv = createDiv('').parent(uiBOP.root)
+  const chokeBtns = createDiv('').parent(chokeCard)
     .style('display', 'flex')
-    .style('gap', '8px')
-    .style('margin-bottom', '4px');
+    .style('align-items', 'center')
+    .style('gap', '10px')
+    .style('margin-top', '10px');
 
-  // Direction label
-  createDiv('Direction:').parent(chokeButtonDiv)
+  createDiv('Direction:').parent(chokeBtns)
     .style('font-size', '11px')
-    .style('opacity', '0.9')
-    .style('padding-top', '4px')
-    .style('width', '60px');
+    .style('opacity', '0.85');
 
-  // UP button
   uiBOP.chokeDirUpBtn = createButton('UP')
-    .parent(chokeButtonDiv)
-    .style('width', '50px')
+    .parent(chokeBtns)
+    .style('width', '54px')
     .style('height', '26px')
     .style('font-size', '11px')
-    .style('background', CHOKE_DIRECTION === 'UP' ? '#4ade80' : 'rgba(255,255,255,0.1)')
-    .style('font-weight', CHOKE_DIRECTION === 'UP' ? 'bold' : 'normal')
     .mousePressed(() => {
       CHOKE_DIRECTION = 'UP';
       updateChokeDirectionButtons();
       updateChokePressureInputState();
     });
 
-  // DOWN button
   uiBOP.chokeDirDownBtn = createButton('DOWN')
-    .parent(chokeButtonDiv)
-    .style('width', '50px')
+    .parent(chokeBtns)
+    .style('width', '54px')
     .style('height', '26px')
     .style('font-size', '11px')
-    .style('background', CHOKE_DIRECTION === 'DOWN' ? '#4ade80' : 'rgba(255,255,255,0.1)')
-    .style('font-weight', CHOKE_DIRECTION === 'DOWN' ? 'bold' : 'normal')
     .mousePressed(() => {
       CHOKE_DIRECTION = 'DOWN';
       updateChokeDirectionButtons();
       updateChokePressureInputState();
     });
 
-  // Open/Close button
   uiBOP.chokeOpenBtn = createButton(CHOKE_LINE_OPEN ? 'OPEN' : 'CLOSED')
-    .parent(chokeButtonDiv)
+    .parent(chokeBtns)
     .style('width', '90px')
     .style('height', '26px')
     .style('font-size', '11px')
-    .style('background', CHOKE_LINE_OPEN ? '#4ade80' : '#ff6b6b')
     .style('font-weight', 'bold')
+    .style('background', CHOKE_LINE_OPEN ? '#4ade80' : '#ff6b6b')
     .mousePressed(() => {
       CHOKE_LINE_OPEN = !CHOKE_LINE_OPEN;
       uiBOP.chokeOpenBtn.html(CHOKE_LINE_OPEN ? 'OPEN' : 'CLOSED');
       uiBOP.chokeOpenBtn.style('background', CHOKE_LINE_OPEN ? '#4ade80' : '#ff6b6b');
     });
 
-  // === KILL LINE ===
-  createDiv('Kill Line').parent(uiBOP.root)
-    .style('font-size', '13px').style('opacity', '0.9').style('font-weight', 'bold')
-    .style('margin-top', '16px').style('margin-bottom', '8px').style('color', '#88ccff');
+  const killCard = createDiv('').parent(grid)
+    .style('padding', '10px')
+    .style('border-radius', '8px')
+    .style('background', 'rgba(32,24,18,0.65)');
 
-  // Kill Flow
-  const killFlowDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
-  mkLabel("Flow (gpm)", pos.x + 10, -100, killFlowDiv);
-  uiBOP.killFlowSlider = createSlider(0, 1000, Q_KILL, 10).parent(killFlowDiv).style('width', '300px');
-  uiBOP.killFlowInput = createInput(nf(Q_KILL, 1, 0), 'number').parent(killFlowDiv).size(65);
-  uiBOP.killFlowInput.style('margin-left', '10px');
-  uiBOP.killFlowSlider.input(() => {
+  createDiv('Kill Line').parent(killCard)
+    .style('font-weight', 'bold')
+    .style('color', '#ffb677')
+    .style('margin-bottom', '6px');
+
+  const killFlow = makeSliderRow(killCard, 'Flow (gpm)', 0, 1000, Q_KILL, 10, 0);
+  uiBOP.killFlowSlider = killFlow.slider;
+  uiBOP.killFlowInput = killFlow.input;
+  killFlow.slider.input(() => {
     Q_KILL = uiBOP.killFlowSlider.value();
     uiBOP.killFlowInput.value(nf(Q_KILL, 1, 0));
   });
-  uiBOP.killFlowInput.input(() => {
+  killFlow.input.input(() => {
     Q_KILL = Math.max(0, Number(uiBOP.killFlowInput.value()) || 0);
     uiBOP.killFlowSlider.value(Q_KILL);
   });
 
-  // Kill MW
-  const killMWDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
-  mkLabel("MW (ppg)", pos.x + 10, -100, killMWDiv);
-  uiBOP.killMWSlider = createSlider(MW_MIN, MW_MAX, MW_KILL, MW_STEP).parent(killMWDiv).style('width', '300px');
-  uiBOP.killMWInput = createInput(nf(MW_KILL, 1, 1), 'number').parent(killMWDiv).size(65);
-  uiBOP.killMWInput.style('margin-left', '10px');
-  uiBOP.killMWSlider.input(() => {
+  const killMW = makeSliderRow(killCard, 'MW (ppg)', MW_MIN, MW_MAX, MW_KILL, MW_STEP, 1);
+  uiBOP.killMWSlider = killMW.slider;
+  uiBOP.killMWInput = killMW.input;
+  killMW.slider.input(() => {
     MW_KILL = uiBOP.killMWSlider.value();
     uiBOP.killMWInput.value(nf(MW_KILL, 1, 1));
   });
-  uiBOP.killMWInput.input(() => {
-    MW_KILL = Math.max(MW_MIN, Math.min(MW_MAX, Number(uiBOP.killMWInput.value()) || MW_KILL));
+  killMW.input.input(() => {
+    MW_KILL = clamp(Number(uiBOP.killMWInput.value()) || MW_KILL, MW_MIN, MW_MAX);
     uiBOP.killMWSlider.value(MW_KILL);
   });
 
-  // Kill Pressure
-  const killPressDiv = createDiv('').parent(uiBOP.root).style('margin-bottom', '8px');
-  mkLabel("Pressure (psi)", pos.x + 10, -100, killPressDiv);
-  uiBOP.killPressSlider = createSlider(0, 5000, KILL_PRESSURE_psi, 50).parent(killPressDiv).style('width', '300px');
-  uiBOP.killPressInput = createInput(nf(KILL_PRESSURE_psi, 1, 0), 'number').parent(killPressDiv).size(65);
-  uiBOP.killPressInput.style('margin-left', '10px');
-  uiBOP.killPressSlider.input(() => {
+  const killPress = makeSliderRow(killCard, 'Pressure (psi)', 0, 5000, KILL_PRESSURE_psi, 50, 0);
+  uiBOP.killPressSlider = killPress.slider;
+  uiBOP.killPressInput = killPress.input;
+  killPress.slider.input(() => {
     KILL_PRESSURE_psi = uiBOP.killPressSlider.value();
     uiBOP.killPressInput.value(nf(KILL_PRESSURE_psi, 1, 0));
   });
-  uiBOP.killPressInput.input(() => {
+  killPress.input.input(() => {
     KILL_PRESSURE_psi = Math.max(0, Number(uiBOP.killPressInput.value()) || 0);
     uiBOP.killPressSlider.value(KILL_PRESSURE_psi);
   });
 
-  // Kill Direction and Open/Close
-  const killButtonDiv = createDiv('').parent(uiBOP.root)
+  const killBtns = createDiv('').parent(killCard)
     .style('display', 'flex')
-    .style('gap', '8px')
-    .style('margin-bottom', '4px');
+    .style('align-items', 'center')
+    .style('gap', '10px')
+    .style('margin-top', '10px');
 
-  // Direction label
-  createDiv('Direction:').parent(killButtonDiv)
+  createDiv('Direction:').parent(killBtns)
     .style('font-size', '11px')
-    .style('opacity', '0.9')
-    .style('padding-top', '4px')
-    .style('width', '60px');
+    .style('opacity', '0.85');
 
-  // UP button
   uiBOP.killDirUpBtn = createButton('UP')
-    .parent(killButtonDiv)
-    .style('width', '50px')
+    .parent(killBtns)
+    .style('width', '54px')
     .style('height', '26px')
     .style('font-size', '11px')
-    .style('background', KILL_DIRECTION === 'UP' ? '#4ade80' : 'rgba(255,255,255,0.1)')
-    .style('font-weight', KILL_DIRECTION === 'UP' ? 'bold' : 'normal')
     .mousePressed(() => {
       KILL_DIRECTION = 'UP';
       updateKillDirectionButtons();
       updateKillPressureInputState();
     });
 
-  // DOWN button
   uiBOP.killDirDownBtn = createButton('DOWN')
-    .parent(killButtonDiv)
-    .style('width', '50px')
+    .parent(killBtns)
+    .style('width', '54px')
     .style('height', '26px')
     .style('font-size', '11px')
-    .style('background', KILL_DIRECTION === 'DOWN' ? '#4ade80' : 'rgba(255,255,255,0.1)')
-    .style('font-weight', KILL_DIRECTION === 'DOWN' ? 'bold' : 'normal')
     .mousePressed(() => {
       KILL_DIRECTION = 'DOWN';
       updateKillDirectionButtons();
       updateKillPressureInputState();
     });
 
-  // Open/Close button
   uiBOP.killOpenBtn = createButton(KILL_LINE_OPEN ? 'OPEN' : 'CLOSED')
-    .parent(killButtonDiv)
+    .parent(killBtns)
     .style('width', '90px')
     .style('height', '26px')
     .style('font-size', '11px')
-    .style('background', KILL_LINE_OPEN ? '#4ade80' : '#ff6b6b')
     .style('font-weight', 'bold')
+    .style('background', KILL_LINE_OPEN ? '#4ade80' : '#ff6b6b')
     .mousePressed(() => {
       KILL_LINE_OPEN = !KILL_LINE_OPEN;
       uiBOP.killOpenBtn.html(KILL_LINE_OPEN ? 'OPEN' : 'CLOSED');
       uiBOP.killOpenBtn.style('background', KILL_LINE_OPEN ? '#4ade80' : '#ff6b6b');
     });
 
-  // Help text
-  createDiv(
-    `<div style="margin-top:10px;font-size:10px;opacity:.75;line-height:1.3">
-      <b>BOP CLOSED:</b> Riser isolated. Only Choke/Kill lines cross BOP.<br/>
-      <b>UP:</b> User sets backpressure (editable).<br/>
-      <b>DOWN:</b> SPP calculated from friction + imbalance (read-only).
-    </div>`
-  ).parent(uiBOP.root);
+  const hydCard = createDiv('').parent(grid)
+    .style('margin-top', '16px')
+    .style('padding', '10px')
+    .style('border-radius', '8px')
+    .style('background', 'rgba(10,25,35,0.6)');
 
-  // Initialize pressure input states based on initial directions
+  createDiv('Enhanced Hydraulics Controls').parent(hydCard)
+    .style('font-weight', 'bold')
+    .style('color', '#7fd5ff')
+    .style('margin-bottom', '6px');
+
+  buildEnhancedHydraulicsUI(hydCard);
+
+  createDiv('UP: Calculated return flow. DOWN: User-defined pumping. Sliders match top-panel sizing for consistency.')
+    .parent(uiBOP.root)
+    .style('font-size', '10px')
+    .style('opacity', '0.7')
+    .style('margin-top', '10px');
+
+  buildDiagnosticsUI(uiBOP.root);
+
+  updateChokeDirectionButtons();
+  updateKillDirectionButtons();
   updateChokePressureInputState();
   updateKillPressureInputState();
-}
-
-function styleBOPInput(inp) {
-  inp.style('background', 'rgba(255,255,255,0.07)')
-     .style('color', '#EEE')
-     .style('border', '1px solid rgba(100,200,255,0.2)')
-     .style('height', '22px')
-     .style('padding', '0 6px')
-     .style('border-radius', '4px')
-     .style('font-size', '11px')
-     .style('width', '100%');
 }
 
 // Update choke pressure input state based on direction
@@ -7545,21 +8211,49 @@ function refreshLossesUIFromModel(){
 }
 
 // ------------------------- Build Diagnostics UI -------------------------
-function buildDiagnosticsUI() {
-  const pos = lossesUIPosition();
-  const dx = 430;
-  const x = Math.min(width - 300, pos.x + dx);
-  const y = pos.y;
+function buildDiagnosticsUI(parent = null) {
+  if (uiDiag.root) {
+    uiDiag.root.remove();
+    uiDiag.root = null;
+    uiDiag.text = null;
+  }
 
-  uiDiag.root = createDiv('').position(x, y).style('padding', '8px')
-    .style('border', '1px solid rgba(255,255,255,0.15)')
+  if (parent) {
+    const card = createDiv('').parent(parent)
+      .style('padding', '10px')
+      .style('border', '1px solid rgba(255,255,255,0.12)')
+      .style('border-radius', '8px')
+      .style('background', 'rgba(4,12,22,0.55)')
+      .style('display', 'flex')
+      .style('flex-direction', 'column')
+      .style('gap', '6px');
+
+    createDiv('Diagnostics').parent(card)
+      .style('font-weight','bold')
+      .style('color', '#9cd4ff');
+
+    uiDiag.text = createDiv('').parent(card)
+      .style('font-family','monospace')
+      .style('font-size','12px')
+      .style('line-height','1.3');
+
+    uiDiag.root = card;
+    return;
+  }
+
+  const pos = lossesUIPosition();
+  const x = Math.min(width - 320, pos.x + bottomPanelCardWidth() + 24);
+  const y = pos.y + bottomPanelCardWidth() * 0.6;
+
+  uiDiag.root = createDiv('').position(x, y)
+    .style('padding', '8px')
+    .style('border', '1px solid rgba(255,255,255,0.12)')
     .style('border-radius', '8px')
-    .style('background', 'rgba(0,0,0,0.25)')
-    .style('backdrop-filter', 'blur(6px)')
+    .style('background', 'rgba(4,12,22,0.55)')
     .style('color', '#EEE');
 
   createDiv('Diagnostics').parent(uiDiag.root)
-    .style('font-weight','bold').style('margin-bottom','6px');
+    .style('font-weight','bold').style('margin-bottom','4px');
 
   uiDiag.text = createDiv('').parent(uiDiag.root)
     .style('font-family','monospace').style('font-size','12px').style('line-height','1.25');
@@ -7610,20 +8304,23 @@ function updateDiagnosticsUI(dt_s){
 
 // ------------------------- Build Kicks UI -------------------------
 function buildKicksUI() {
+  if (uiKicks.root) {
+    uiKicks.root.remove();
+  }
+
   const pos = kicksUIPosition();
 
-  uiKicks.root = createDiv('').position(pos.x, pos.y).style('padding', '8px')
-    .style('border', '1px solid rgba(255,100,100,0.25)')
-    .style('border-radius', '8px')
-    .style('background', 'rgba(40,0,0,0.25)')
-    .style('backdrop-filter', 'blur(6px)')
-    .style('color', '#EEE')
-    .style('width', '300px')  // Reduced from 380px to fit better
-    .style('max-height', '85vh')  // Prevent frame from exceeding viewport height
-    .style('overflow-y', 'auto');  // Allow scrolling if needed
+  const panelWidth = bottomPanelCardWidth();
+
+  uiKicks.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#5b2f2f')
+    .style('width', `${panelWidth}px`)
+    .style('max-height', '85vh')
+    .style('overflow-y', 'auto');
 
   uiKicks.title = createDiv('Kicks (Formation Fluids)').parent(uiKicks.root)
-    .style('font-weight', 'bold').style('margin-bottom', '6px').style('color', '#ff6b6b');
+    .style('font-weight', 'bold')
+    .style('color', '#ff9280')
+    .style('margin-bottom', '6px');
 
   // Toggle button
   uiKicks.toggleBtn = createButton(formationFluidEnabled ? 'Kicks: ON' : 'Kicks: OFF')
@@ -7680,12 +8377,45 @@ function buildKicksUI() {
   uiKicks.manualDiv = createDiv('').parent(uiKicks.root).style('margin-top', '8px');
   createDiv('Manual Rate:').parent(uiKicks.manualDiv).style('font-size:11px').style('opacity','0.8');
 
-  const manualLabel = createDiv('').parent(uiKicks.manualDiv).style('margin-top', '4px')
-    .html('<label style="font-size:11px">Influx Rate (gpm):</label>');
-  uiKicks.manualRateInput = createInput(String(formationFluidRate_gpm), 'number').parent(manualLabel);
-  styleKicksInput(uiKicks.manualRateInput);
+  const manualRow = createDiv('').parent(uiKicks.manualDiv)
+    .style('display', 'flex')
+    .style('flex-direction', 'column')
+    .style('gap', '4px')
+    .style('margin-top', '6px');
+
+  createDiv('Influx Rate (gpm):').parent(manualRow)
+    .style('font-size', '11px')
+    .style('opacity', '0.85');
+
+  const manualWrap = createDiv('').parent(manualRow)
+    .style('display', 'flex')
+    .style('align-items', 'center')
+    .style('gap', '10px');
+
+  uiKicks.manualRateSlider = createSlider(0, 500, formationFluidRate_gpm, 1)
+    .parent(manualWrap)
+    .style('width', '160px');
+
+  uiKicks.manualRateInput = createInput(String(formationFluidRate_gpm), 'number')
+    .parent(manualWrap)
+    .size(60)
+    .style('height', '22px')
+    .style('border-radius', '4px')
+    .style('border', '1px solid rgba(255,100,100,0.2)')
+    .style('background', 'rgba(255,255,255,0.07)')
+    .style('color', '#EEE')
+    .style('text-align', 'right')
+    .style('padding', '0 6px')
+    .style('font-size', '11px');
+
+  uiKicks.manualRateSlider.input(() => {
+    formationFluidRate_gpm = uiKicks.manualRateSlider.value();
+    uiKicks.manualRateInput.value(nf(formationFluidRate_gpm, 1, 0));
+  });
+
   uiKicks.manualRateInput.input(() => {
     formationFluidRate_gpm = Math.max(0, Number(uiKicks.manualRateInput.value()) || 0);
+    uiKicks.manualRateSlider.value(formationFluidRate_gpm);
   });
 
   // Pressure-driven mode parameters
@@ -8014,62 +8744,6 @@ function buildRheologyUI(x0, y0){
     rheoPanel.R6, rheoPanel.R3, rheoPanel.R1,
     rheoPanel.PV, rheoPanel.YP
   ].forEach(el => { if (el) el.input(() => doRheologyFit()); });
-}
-
-function buildEnhancedHydraulicsUI(x, y){
-  const mkToggle = (k, label, row) => {
-    const yy = y + row*46;
-    const btn = createButton(`${label}: ${EH[k].on ? 'ON' : 'OFF'}`)
-      .position(x, yy).size(180, 26);
-    btn.mousePressed(()=>{ 
-      EH[k].on = !EH[k].on; 
-      btn.html(`${label}: ${EH[k].on ? 'ON' : 'OFF'}`); 
-    });
-    
-    mkLabel("Adjustment (-1 to +1)", x+190, yy+4);
-    const sld = createSlider(-1, 1, EH[k].s, 0.01)
-      .position(x+330, yy).style('width','200px');
-    sld.input(()=>{ EH[k].s = sld.value(); });
-  };
-  
-  mkToggle("ECC", "Eccentric Annulus", 0);
-  mkToggle("ROUGH", "Roughness Effect", 1);
-  mkToggle("KLOSS", "Local K-Losses (SPP)", 2);
-  
-  // P-only corrections (row 3)
-  let row = 3;
-  let yy = y + row*46;
-  const pbtn = createButton(`P-only Corrections: ${EH.PCOR.on ? 'ON' : 'OFF'}`)
-    .position(x, yy).size(180, 26);
-  pbtn.mousePressed(()=>{ 
-    EH.PCOR.on = !EH.PCOR.on; 
-    pbtn.html(`P-only Corrections: ${EH.PCOR.on ? 'ON' : 'OFF'}`); 
-  });
-  
-  mkLabel("Strength (-1 to +1)", x+190, yy+4);
-  const psl = createSlider(-1, 1, EH.PCOR.s, 0.01)
-    .position(x+330, yy).style('width','200px');
-  psl.input(()=>{ EH.PCOR.s = psl.value(); });
-  
-  mkLabel("Fluid Type", x+550, yy+4);
-  const sel = createSelect().position(x+620, yy).size(100, 26);
-  ["WBM","OBM","Diesel"].forEach(f=> sel.option(f));
-  sel.value(EH.PCOR.fluid);
-  sel.changed(()=>{ EH.PCOR.fluid = sel.value(); });
-  
-  // Gravity swap (row 4)
-  row = 4;
-  yy = y + row*46;
-  
-  // ✅ Now just create the button (EH.GRAV already exists globally)
-  const gravBtn = createButton(`Gravity Swap: ${EH.GRAV.on ? 'ON' : 'OFF'}`)
-    .position(x, yy).size(180, 26)
-    .mousePressed(()=>{
-      EH.GRAV.on = !EH.GRAV.on;
-      gravBtn.html(`Gravity Swap: ${EH.GRAV.on ? 'ON' : 'OFF'}`);
-    });
-  
-  mkLabel('Density-driven settling (slow)', x+190, yy+4);
 }
 
 
