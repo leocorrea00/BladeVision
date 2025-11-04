@@ -4878,15 +4878,15 @@ function setup(){
 
 
   // ========== Bottom banner layout ==========
-  bottomPanelPadding = 36;
-  bottomPanelSpacing = 24;
+  bottomPanelPadding = 40;
+  bottomPanelSpacing = 20;
   const bottomPanelCount = 5;
-  frameHeight = 280;
+  frameHeight = 300;
   frameY      = well.y + well.h + 90;
 
   const gaps = bottomPanelCount - 1;
   const availableWidth = W - 2 * bottomPanelPadding - gaps * bottomPanelSpacing;
-  const bopWeight = 2.2;
+  const bopWeight = 2.1;
   const unitWidth = availableWidth / ((bottomPanelCount - 1) + bopWeight);
 
   bottomPanelW = unitWidth;
@@ -5123,9 +5123,8 @@ logDownloadBtn.mousePressed(() => {
   });
   
   buildLossesUI();
-buildDiagnosticsUI();
-buildKicksUI();
-buildBOPWellControlUI();
+  buildKicksUI();
+  buildBOPWellControlUI();
 
   // Initialize formation fluid cells
   initializeFormationFluidCells();
@@ -6287,9 +6286,9 @@ function drawBadgeSm(cx, cy, line1, line2){
 
 function drawGaugesAndCharts(){
   const layoutCenter = well.x + well.w / 2;
-  const gaugeMargin = 60;
-  const cxSPP = Math.max(R + 32, well.x - (R + gaugeMargin));
-  const cxBo  = Math.min(width - R - 32, well.x + well.w + R + gaugeMargin);
+  const gaugeMargin = 140;
+  const cxSPP = Math.max(R + 48, well.x - (R + gaugeMargin));
+  const cxBo  = Math.min(width - R - 48, well.x + well.w + R + gaugeMargin);
   const cyTop = well.y + 48;
 
   const vSPPraw = surfacePumpPressure();
@@ -6325,13 +6324,13 @@ function drawGaugesAndCharts(){
   const chartTop = Math.max(140, well.y - 10);
   const chartHeight = 420;
 
-  const timeRightEdge = cxSPP - R - 48;
-  let timeChartWidth = Math.min(640, Math.max(420, timeRightEdge - 24));
-  if (timeChartWidth < 300) timeChartWidth = Math.max(260, timeRightEdge - 24);
+  const timeRightEdge = cxSPP - R - 96;
+  let timeChartWidth = Math.min(680, Math.max(420, timeRightEdge - 36));
+  if (timeChartWidth < 300) timeChartWidth = Math.max(260, timeRightEdge - 36);
   const timeChartX = Math.max(24, timeRightEdge - timeChartWidth);
   drawTimeChart(timeChartX, chartTop, timeChartWidth, chartHeight);
 
-  const depthChartX = cxBo + R + 48;
+  const depthChartX = cxBo + R + 96;
   const chartsWidth = drawCharts(depthChartX, chartTop, chartHeight);
 
   const statusX = depthChartX + chartsWidth + 36;
@@ -6407,64 +6406,60 @@ function drawLossMarkersOnECD(px, py, w, h, padL, padR, padT, padB, xMinPpg, xMa
   pop();
 }
 
-  
-  
-  // Charts follow to the right of the right column
-  const chartX = colRight + (R*2) + 20;
-  drawCharts(chartX);
-}
 
 
-function drawStatusPanelRight(anchorX, anchorY = well.y + 120, panelW = 280){
+function drawStatusPanelRight(anchorX, anchorY = well.y + 120, panelW = 300){
+  const readings = [];
+  readings.push(`Annulus MW above BOP: ${nf(average(annAboveGrid),1,2)} ppg`);
+  readings.push(`SBP Applied: ${nf(CURRENT_SBP,1,0)} psi • Mode: ${SBP_MODE.toUpperCase()}`);
+  if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
+    readings.push(`SBP Anchor → ${ANCHOR_DEPTH} m @ ${nf(ANCHOR_ECD,1,2)} ppg`);
+  }
+
+  const topDepth = riserTopDepth();
+  const cmlMode = AUTO_CML_ON ? "AUTO" : "MANUAL";
+  if (AUTO_CML_ON && CML_AP_DEPTH > 0 && CML_AP_ECD > 0){
+    readings.push(`CML ${cmlMode} • Pump ${nf(CML_DEPTH,1,0)} m | Anchor ${nf(CML_AP_DEPTH,1,0)} m @ ${nf(CML_AP_ECD,1,2)} ppg`);
+  } else {
+    readings.push(`CML ${cmlMode} • Pump ${nf(CML_DEPTH,1,0)} m`);
+  }
+
+  readings.push(`Q_out: ${nf(Q_CML,1,0)} gpm • Riser top: ${nf(topDepth,1,1)} m`);
+
+  const influxVol = formationFluidVolume_bbl || 0;
+  readings.push(`Kick Vol: ${nf(influxVol,1,1)} bbl • Influx Rate: ${nf(formationFluidRate_gpm,1,0)} gpm`);
+
+  const lineH = 20;
+  const innerPaddingY = 52;
+  const h = innerPaddingY + readings.length * lineH;
   const w = panelW;
-  const h = 176;
   const x = Math.min(anchorX, width - w - 24);
   const y = Math.max(120, anchorY);
 
   push();
   noStroke();
   fill(0, 0, 12, 220);
-  rect(x, y, w, h, 12);
+  rect(x, y, w, h, 14);
+  fill(210, 40, 40, 180);
+  rect(x, y, w, 36, 14, 14, 4, 4);
   stroke(0, 0, 60, 160);
   noFill();
-  rect(x + 1, y + 1, w - 2, h - 2, 10);
+  rect(x + 1, y + 1, w - 2, h - 2, 12);
   pop();
-
-  const textX = x + 16;
-  let textY = y + 18;
-  const lineH = 20;
 
   push();
   textAlign(LEFT, TOP);
   textSize(12);
+  fill(210, 30, 95);
+  text("Well Status", x + 16, y + 12);
+
   fill(0, 0, 96);
-  text(`Annulus MW above BOP: ${nf(average(annAboveGrid),1,2)} ppg`, textX, textY);
-
-  textY += lineH;
-  text(`SBP Applied: ${nf(CURRENT_SBP,1,0)} psi • Mode: ${SBP_MODE.toUpperCase()}`, textX, textY);
-
-  if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
+  let textY = y + 44;
+  const textX = x + 16;
+  for (const line of readings){
+    text(line, textX, textY);
     textY += lineH;
-    text(`SBP Anchor → ${ANCHOR_DEPTH} m @ ${nf(ANCHOR_ECD,1,2)} ppg`, textX, textY);
   }
-
-  const topDepth = riserTopDepth();
-  const cmlMode = AUTO_CML_ON ? "AUTO" : "MANUAL";
-  let cmlExtra = "";
-  if (AUTO_CML_ON && CML_AP_DEPTH > 0 && CML_AP_ECD > 0){
-    cmlExtra = ` | Anchor: ${nf(CML_AP_DEPTH,1,0)} m @ ${nf(CML_AP_ECD,1,2)} ppg`;
-  }
-
-  textY += lineH;
-  text(`CML Mode: ${cmlMode} • Pump depth ${nf(CML_DEPTH,1,0)} m`, textX, textY);
-
-  textY += lineH;
-  text(`Q_out: ${nf(Q_CML,1,0)} gpm | Riser top: ${nf(topDepth,1,1)} m${cmlExtra}`, textX, textY);
-
-  textY += lineH;
-  const influxVol = formationFluidVolume_bbl || 0;
-  text(`Kick Vol: ${nf(influxVol,1,1)} bbl | Influx Rate: ${nf(formationFluidRate_gpm,1,0)} gpm`, textX, textY);
-
   pop();
 }
 
@@ -6524,7 +6519,7 @@ function plotSeriesInPanel(px, py, w, h, padL, padR, padT, padB, data, ymin, yma
 
 
 function drawCharts(xLeft, top = 150, h = 420){
-  const wP = 280, wE = 360, gap = 44;
+  const wP = 280, wE = 360, gap = 64;
   const padL = 54, padR = 18, padT = 28, padB = 42;
   const axisCol = color(0, 0, 95);
   const gridCol = color(0, 0, 60, 120);
@@ -6698,10 +6693,6 @@ function drawCharts(xLeft, top = 150, h = 420){
 function _tsCap(){ return (typeof TS_MAX === 'number' && TS_MAX > 0) ? TS_MAX : 600; }
 // --- Losses time series (gpm) ---
 if (!Array.isArray(window.tsLoss_gpm)) window.tsLoss_gpm = [];
-
-  
-  // -------- TIME SERIES panel --------
-}
 
 
 
@@ -7216,9 +7207,9 @@ function bopUIPosition() {
 }
 
 function bottomPanelCardWidth(panelW = bottomPanelW) {
-  const base = (typeof panelW === 'number') ? panelW : 420;
-  const candidate = Math.min(base - 24, 420);
-  return Math.max(candidate, 320);
+  const base = (typeof panelW === 'number') ? panelW : 360;
+  const desired = Math.max(base - 28, 260);
+  return Math.min(desired, base - 12, 420);
 }
 
 function styleBottomPanelCard(div, accent = null) {
@@ -7229,7 +7220,10 @@ function styleBottomPanelCard(div, accent = null) {
     .style('background', 'rgba(10,20,35,0.72)')
     .style('backdrop-filter', 'blur(4px)')
     .style('color', '#EEE')
-    .style('width', `${bottomPanelCardWidth()}px`);
+    .style('width', `${bottomPanelCardWidth()}px`)
+    .style('display', 'flex')
+    .style('flex-direction', 'column')
+    .style('gap', '12px');
 
   if (accent) {
     div.style('box-shadow', `0 0 0 1px ${accent} inset`);
@@ -7524,6 +7518,8 @@ function buildBOPWellControlUI() {
     .style('opacity', '0.7')
     .style('margin-top', '10px');
 
+  buildDiagnosticsUI(uiBOP.root);
+
   updateChokeDirectionButtons();
   updateKillDirectionButtons();
   updateChokePressureInputState();
@@ -7716,21 +7712,49 @@ function refreshLossesUIFromModel(){
 }
 
 // ------------------------- Build Diagnostics UI -------------------------
-function buildDiagnosticsUI() {
-  const pos = lossesUIPosition();
-  const dx = 430;
-  const x = Math.min(width - 300, pos.x + dx);
-  const y = pos.y;
+function buildDiagnosticsUI(parent = null) {
+  if (uiDiag.root) {
+    uiDiag.root.remove();
+    uiDiag.root = null;
+    uiDiag.text = null;
+  }
 
-  uiDiag.root = createDiv('').position(x, y).style('padding', '8px')
-    .style('border', '1px solid rgba(255,255,255,0.15)')
+  if (parent) {
+    const card = createDiv('').parent(parent)
+      .style('padding', '10px')
+      .style('border', '1px solid rgba(255,255,255,0.12)')
+      .style('border-radius', '8px')
+      .style('background', 'rgba(4,12,22,0.55)')
+      .style('display', 'flex')
+      .style('flex-direction', 'column')
+      .style('gap', '6px');
+
+    createDiv('Diagnostics').parent(card)
+      .style('font-weight','bold')
+      .style('color', '#9cd4ff');
+
+    uiDiag.text = createDiv('').parent(card)
+      .style('font-family','monospace')
+      .style('font-size','12px')
+      .style('line-height','1.3');
+
+    uiDiag.root = card;
+    return;
+  }
+
+  const pos = lossesUIPosition();
+  const x = Math.min(width - 320, pos.x + bottomPanelCardWidth() + 24);
+  const y = pos.y + bottomPanelCardWidth() * 0.6;
+
+  uiDiag.root = createDiv('').position(x, y)
+    .style('padding', '8px')
+    .style('border', '1px solid rgba(255,255,255,0.12)')
     .style('border-radius', '8px')
-    .style('background', 'rgba(0,0,0,0.25)')
-    .style('backdrop-filter', 'blur(6px)')
+    .style('background', 'rgba(4,12,22,0.55)')
     .style('color', '#EEE');
 
   createDiv('Diagnostics').parent(uiDiag.root)
-    .style('font-weight','bold').style('margin-bottom','6px');
+    .style('font-weight','bold').style('margin-bottom','4px');
 
   uiDiag.text = createDiv('').parent(uiDiag.root)
     .style('font-family','monospace').style('font-size','12px').style('line-height','1.25');
