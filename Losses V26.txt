@@ -123,6 +123,16 @@ let waterPhaseFrom_above = [];
 // Track current influx rate for flow routing
 let current_influx_m3s = 0; // Current influx rate in m³/s (updated each frame)
 
+// Queue of formation-fluid "slugs" exiting the annulus at the BOP. Each entry
+// stores fractions (0-1) representing the portion of a cell occupied by gas,
+// oil, and water as that slice moves toward the riser or side lines.
+let formationSlugQueue = [];
+
+// Line mud-weight tracking – stay synced with the drillstring unless the user
+// explicitly overrides the line density from the UI controls.
+let chokeMWSynced = true;
+let killMWSynced = true;
+
 // Gas Expansion Model (for when formationFluidType === 'GAS')
 let GAS_EXPANSION_MODE = 'IDEAL'; // 'IDEAL' or 'REAL'
 let GAS_ENABLED = false; // Enable gas expansion calculations
@@ -1169,6 +1179,74 @@ function initializeFormationFluidCells() {
   oilPhaseFrom_above = new Array(N_ABV).fill(0);
   waterPhaseFrom_below = new Array(N_BELOW).fill(0);
   waterPhaseFrom_above = new Array(N_ABV).fill(0);
+  formationSlugQueue = [];
+}
+
+const EPS_FORMATION = 1e-6;
+
+function enqueueFormationSlug(gasFrac, oilFrac, waterFrac) {
+  const g = clamp(gasFrac || 0, 0, 1);
+  const o = clamp(oilFrac || 0, 0, 1);
+  const w = clamp(waterFrac || 0, 0, 1);
+  if (g + o + w < EPS_FORMATION) return;
+  formationSlugQueue.push({ gas: g, oil: o, water: w });
+}
+
+function pullFormationFromQueue(requestFraction) {
+  const delivered = { gas: 0, oil: 0, water: 0 };
+  let remaining = Math.max(0, requestFraction);
+
+  while (remaining > EPS_FORMATION && formationSlugQueue.length) {
+    const slug = formationSlugQueue[0];
+    const take = Math.min(1, remaining);
+    const keepFactor = 1 - take;
+
+    delivered.gas += slug.gas * take;
+    delivered.oil += slug.oil * take;
+    delivered.water += slug.water * take;
+
+    slug.gas *= keepFactor;
+    slug.oil *= keepFactor;
+    slug.water *= keepFactor;
+
+    if ((slug.gas + slug.oil + slug.water) < EPS_FORMATION) {
+      formationSlugQueue.shift();
+    }
+
+    remaining -= take;
+  }
+
+  return { delivered, remaining };
+}
+
+function pullFormationFromBOP(requestFraction) {
+  const { delivered, remaining } = pullFormationFromQueue(requestFraction);
+  if (remaining <= EPS_FORMATION) {
+    return delivered;
+  }
+
+  const frac = clamp(remaining, 0, 1);
+  if (!gasPhaseFrom_below.length) {
+    return delivered;
+  }
+
+  const gasAvail = clamp(gasPhaseFrom_below[0] || 0, 0, 1);
+  const oilAvail = clamp(oilPhaseFrom_below[0] || 0, 0, 1);
+  const waterAvail = clamp(waterPhaseFrom_below[0] || 0, 0, 1);
+
+  const gasTake = gasAvail * frac;
+  const oilTake = oilAvail * frac;
+  const waterTake = waterAvail * frac;
+
+  gasPhaseFrom_below[0] = Math.max(0, gasAvail - gasTake);
+  oilPhaseFrom_below[0] = Math.max(0, oilAvail - oilTake);
+  waterPhaseFrom_below[0] = Math.max(0, waterAvail - waterTake);
+
+  delivered.gas += gasTake;
+  delivered.oil += oilTake;
+  delivered.water += waterTake;
+
+  return delivered;
 }
 
 function calculateMigrationVelocity_m_s(fluidType, pressure_psi, mudWeight_ppg) {
@@ -1528,6 +1606,7 @@ function stepAdvection(){
   // 2) BOOSTER PIPE (TOP → DOWN)
   // ===============================
   let boosterEffluentMW = MW_BO;  // Track what exits booster pipe at BOP
+  let qBO_up_m3s = 0;
   {
     const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
     if (qBO_m3s > FLOW_THRESHOLD) {
@@ -1545,6 +1624,7 @@ function stepAdvection(){
     }
     // Always use bottom of grid as current effluent
     boosterEffluentMW = boosterGrid[boosterGrid.length - 1] || MW_BO;
+    qBO_up_m3s = Math.max(0, qBO_m3s - qDown_m3s);
   }
   const boosterMW = boosterEffluentMW;  // Compatibility
 
@@ -1602,28 +1682,29 @@ function stepAdvection(){
   }
 
   // (B) UPWARD advection (leftover DS above zone)
-  if (qUp_m3s > FLOW_THRESHOLD) {
-    const v_up = qUp_m3s / Math.max(A_below, 1e-12);
+  const qAnnulusUp_m3s = Math.max(0, qUp_m3s - qBO_up_m3s);
+  if (qAnnulusUp_m3s > FLOW_THRESHOLD) {
+    const v_up = qAnnulusUp_m3s / Math.max(A_below, 1e-12);
     const upStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_up / vref);
 
-    // We shift UP the portion *from the zone upwards*
     accDSup += upStep_m;
-    const cellsFlowing = annBelowGrid.length; // upward through whole below section toward BOP
-    while (accDSup >= CELL_M && cellsFlowing > 0){
-      // Shift UP from bottom to top
+    const cellsFlowing = annBelowGrid.length;
+    while (accDSup >= CELL_M && cellsFlowing > 0) {
+      const leavingGas = clamp(gasPhaseFrom_below[0] || 0, 0, 1);
+      const leavingOil = clamp(oilPhaseFrom_below[0] || 0, 0, 1);
+      const leavingWater = clamp(waterPhaseFrom_below[0] || 0, 0, 1);
+      enqueueFormationSlug(leavingGas, leavingOil, leavingWater);
+
       for (let i = 0; i < annBelowGrid.length - 1; i++) {
         annBelowGrid[i] = annBelowGrid[i + 1];
       }
-      // New fluid from bit enters at bottom
       annBelowGrid[annBelowGrid.length - 1] = dsEffluentMW;
 
-      // Advect formation fluids UP in parallel with mud
       for (let i = 0; i < gasPhaseFrom_below.length - 1; i++) {
         gasPhaseFrom_below[i] = gasPhaseFrom_below[i + 1];
         oilPhaseFrom_below[i] = oilPhaseFrom_below[i + 1];
         waterPhaseFrom_below[i] = waterPhaseFrom_below[i + 1];
       }
-      // No formation fluid enters from drillstring at bottom (clean mud)
       gasPhaseFrom_below[gasPhaseFrom_below.length - 1] = 0;
       oilPhaseFrom_below[oilPhaseFrom_below.length - 1] = 0;
       waterPhaseFrom_below[waterPhaseFrom_below.length - 1] = 0;
@@ -1642,7 +1723,7 @@ function stepAdvection(){
 
     // Calculate booster contribution going UP (not routed down to losses)
     const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
-    const qBO_up = Math.max(0, qBO_m3s - qDown_m3s);  // Booster NOT going down = going UP
+    const qBO_up = qBO_up_m3s;  // Booster NOT going down = going UP
     const qFromAnnBelow = Math.max(0, qUp_m3s - qBO_up);  // Flow from annulus below (DS + TF)
 
     accAbove += aboveStep_m;
@@ -1668,14 +1749,10 @@ function stepAdvection(){
       // Only the fraction coming from annulus below carries formation fluids
       // Booster is clean mud, so dilute the formation fluids by flow rate ratio
       const dilutionFactor = clamp(qFromAnnBelow / Math.max(qTotal, 1e-12), 0, 1);
-      gasPhaseFrom_above.push((gasPhaseFrom_below[0] || 0) * dilutionFactor);
-      oilPhaseFrom_above.push((oilPhaseFrom_below[0] || 0) * dilutionFactor);
-      waterPhaseFrom_above.push((waterPhaseFrom_below[0] || 0) * dilutionFactor);
-
-      const remainFrac = 1 - dilutionFactor;
-      gasPhaseFrom_below[0] = (gasPhaseFrom_below[0] || 0) * remainFrac;
-      oilPhaseFrom_below[0] = (oilPhaseFrom_below[0] || 0) * remainFrac;
-      waterPhaseFrom_below[0] = (waterPhaseFrom_below[0] || 0) * remainFrac;
+      const deliveredSlug = pullFormationFromBOP(dilutionFactor);
+      gasPhaseFrom_above.push(clamp(deliveredSlug.gas, 0, 1));
+      oilPhaseFrom_above.push(clamp(deliveredSlug.oil, 0, 1));
+      waterPhaseFrom_above.push(clamp(deliveredSlug.water, 0, 1));
 
       accAbove -= CELL_M;
     }
@@ -1761,6 +1838,8 @@ function stepAdvection(){
     const v_choke = qChoke_m3s / Math.max(A_choke, 1e-12);
     const chokeStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_choke / vref);
 
+    const annulusCellVolume = Math.max(areaAtDepthTop_(BOP_DEPTH) * CELL_M, 1e-9);
+
     if (CHOKE_DIRECTION === "DOWN") {
       // Fluid flows DOWN: Surface → BOP → Below-BOP annulus
       // Grid: chokeGrid[0] = surface (inlet), chokeGrid[N_ABV-1] = BOP (outlet)
@@ -1805,16 +1884,11 @@ function stepAdvection(){
         // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
         const sourceMW = annBelowGrid[0] || MW_DS;
         const effMW = effectiveCellDensity_ppg(sourceMW, 0, false);
-        let gasFrac = clamp(gasPhaseFrom_below[0] || 0, 0, 1);
-        let oilFrac = clamp(oilPhaseFrom_below[0] || 0, 0, 1);
-        let waterFrac = clamp(waterPhaseFrom_below[0] || 0, 0, 1);
-        const fracSum = gasFrac + oilFrac + waterFrac;
-        if (fracSum > 1e-6 && fracSum > 1) {
-          const scale = 1 / fracSum;
-          gasFrac *= scale;
-          oilFrac *= scale;
-          waterFrac *= scale;
-        }
+        const lineFrac = clamp((A_choke * CELL_M) / annulusCellVolume, 0, 1);
+        const slug = pullFormationFromBOP(lineFrac);
+        const gasFrac = clamp(slug.gas, 0, 1);
+        const oilFrac = clamp(slug.oil, 0, 1);
+        const waterFrac = clamp(slug.water, 0, 1);
         if (chokeGasGrid.length) chokeGasGrid[chokeGasGrid.length - 1] = gasFrac;
         if (chokeOilGrid.length) chokeOilGrid[chokeOilGrid.length - 1] = oilFrac;
         if (chokeWaterGrid.length) chokeWaterGrid[chokeWaterGrid.length - 1] = waterFrac;
@@ -1832,6 +1906,8 @@ function stepAdvection(){
     const A_kill = Math.PI * KILL_LINE_ID_m * KILL_LINE_ID_m / 4;
     const v_kill = qKill_m3s / Math.max(A_kill, 1e-12);
     const killStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_kill / vref);
+
+    const annulusCellVolume = Math.max(areaAtDepthTop_(BOP_DEPTH) * CELL_M, 1e-9);
 
     if (KILL_DIRECTION === "DOWN") {
       // Fluid flows DOWN: Surface → BOP → Below-BOP annulus
@@ -1877,16 +1953,11 @@ function stepAdvection(){
         // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
         const sourceMW = annBelowGrid[0] || MW_DS;
         const effMW = effectiveCellDensity_ppg(sourceMW, 0, false);
-        let gasFrac = clamp(gasPhaseFrom_below[0] || 0, 0, 1);
-        let oilFrac = clamp(oilPhaseFrom_below[0] || 0, 0, 1);
-        let waterFrac = clamp(waterPhaseFrom_below[0] || 0, 0, 1);
-        const fracSum = gasFrac + oilFrac + waterFrac;
-        if (fracSum > 1e-6 && fracSum > 1) {
-          const scale = 1 / fracSum;
-          gasFrac *= scale;
-          oilFrac *= scale;
-          waterFrac *= scale;
-        }
+        const lineFrac = clamp((A_kill * CELL_M) / annulusCellVolume, 0, 1);
+        const slug = pullFormationFromBOP(lineFrac);
+        const gasFrac = clamp(slug.gas, 0, 1);
+        const oilFrac = clamp(slug.oil, 0, 1);
+        const waterFrac = clamp(slug.water, 0, 1);
         if (killGasGrid.length) killGasGrid[killGasGrid.length - 1] = gasFrac;
         if (killOilGrid.length) killOilGrid[killOilGrid.length - 1] = oilFrac;
         if (killWaterGrid.length) killWaterGrid[killWaterGrid.length - 1] = waterFrac;
@@ -7523,6 +7594,11 @@ function buildEnhancedHydraulicsUI(parentDiv){
 }
 // ------------------------- Build Losses UI -------------------------
 function buildLossesUI() {
+  if (uiLosses.root) {
+    uiLosses.root.remove();
+  }
+  uiLosses.rows = [];
+
   const pos = lossesUIPosition();
 
   const panelWidth = bottomPanelCardWidth();
@@ -7642,6 +7718,10 @@ function styleBottomPanelCard(div, accent = null) {
 
 
 function buildBOPWellControlUI() {
+  if (uiBOP.root) {
+    uiBOP.root.remove();
+  }
+
   const pos = bopUIPosition();
   const panelWidth = Math.max(bottomPanelCardWidth(bopPanelW), 640);
 
@@ -7767,10 +7847,12 @@ function buildBOPWellControlUI() {
   uiBOP.chokeMWSlider = chokeMW.slider;
   uiBOP.chokeMWInput = chokeMW.input;
   chokeMW.slider.input(() => {
+    chokeMWSynced = false;
     MW_CHOKE = uiBOP.chokeMWSlider.value();
     uiBOP.chokeMWInput.value(nf(MW_CHOKE, 1, 1));
   });
   chokeMW.input.input(() => {
+    chokeMWSynced = false;
     MW_CHOKE = clamp(Number(uiBOP.chokeMWInput.value()) || MW_CHOKE, MW_MIN, MW_MAX);
     uiBOP.chokeMWSlider.value(MW_CHOKE);
   });
@@ -7858,10 +7940,12 @@ function buildBOPWellControlUI() {
   uiBOP.killMWSlider = killMW.slider;
   uiBOP.killMWInput = killMW.input;
   killMW.slider.input(() => {
+    killMWSynced = false;
     MW_KILL = uiBOP.killMWSlider.value();
     uiBOP.killMWInput.value(nf(MW_KILL, 1, 1));
   });
   killMW.input.input(() => {
+    killMWSynced = false;
     MW_KILL = clamp(Number(uiBOP.killMWInput.value()) || MW_KILL, MW_MIN, MW_MAX);
     uiBOP.killMWSlider.value(MW_KILL);
   });
@@ -8229,6 +8313,10 @@ function updateDiagnosticsUI(dt_s){
 
 // ------------------------- Build Kicks UI -------------------------
 function buildKicksUI() {
+  if (uiKicks.root) {
+    uiKicks.root.remove();
+  }
+
   const pos = kicksUIPosition();
 
   const panelWidth = bottomPanelCardWidth();
@@ -8674,6 +8762,28 @@ function setDSMW(v){
   dsMWSlider?.value(MW_DS); dsMWInput?.value(nf(MW_DS,1,1));
   // seed the DS grid with the new MW at the inlet
   if (dsGrid && dsGrid.length){ dsGrid[0] = MW_DS; }
+
+  if (chokeMWSynced) {
+    MW_CHOKE = MW_DS;
+    if (Array.isArray(chokeGrid)) {
+      for (let i = 0; i < chokeGrid.length; i++) {
+        chokeGrid[i] = MW_CHOKE;
+      }
+    }
+    uiBOP?.chokeMWSlider?.value(MW_CHOKE);
+    uiBOP?.chokeMWInput?.value(nf(MW_CHOKE, 1, 1));
+  }
+
+  if (killMWSynced) {
+    MW_KILL = MW_DS;
+    if (Array.isArray(killGrid)) {
+      for (let i = 0; i < killGrid.length; i++) {
+        killGrid[i] = MW_KILL;
+      }
+    }
+    uiBOP?.killMWSlider?.value(MW_KILL);
+    uiBOP?.killMWInput?.value(nf(MW_KILL, 1, 1));
+  }
 }
 function setBOMW(v){
   MW_BO = clamp(Number(v)||0, MW_MIN, MW_MAX);
