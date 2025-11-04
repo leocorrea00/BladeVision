@@ -237,7 +237,7 @@ let belowOutQ = []; // annBelow top → BOP → feeds annAbove
 let boosterOutQ = []; // Booster bottom → BOP → feeds annAbove
 // --- bottom frames (for Rheology/Gels/Geometry) ---
 let frameY, frameHeight;
-let bottomPanelW, bopPanelW, bottomPanelPadding, bottomPanelSpacing;
+let bottomPanelW, bopPanelW, bottomPanelPadding, bottomPanelSpacing, gelFrameX;
 let rheoFrameX, configFrameX, lossFrameX, kickFrameX, bopFrameX;
 let cmlQSlider, cmlQInput, cmlDepthInput, cmlBtn, cmlAutoBtn;
 let tsFrame = 0;
@@ -4886,7 +4886,7 @@ function setup(){
 
   const gaps = bottomPanelCount - 1;
   const availableWidth = W - 2 * bottomPanelPadding - gaps * bottomPanelSpacing;
-  const bopWeight = 1.8;
+  const bopWeight = 2.2;
   const unitWidth = availableWidth / ((bottomPanelCount - 1) + bopWeight);
 
   bottomPanelW = unitWidth;
@@ -4897,6 +4897,7 @@ function setup(){
   lossFrameX   = configFrameX + bottomPanelW + bottomPanelSpacing;
   kickFrameX   = lossFrameX   + bottomPanelW + bottomPanelSpacing;
   bopFrameX    = kickFrameX   + bottomPanelW + bottomPanelSpacing;
+  gelFrameX    = configFrameX;
 
   // Convert inches to meters
   riser_ID_m    = riser_ID_in    * 0.0254;
@@ -6286,9 +6287,9 @@ function drawBadgeSm(cx, cy, line1, line2){
 
 function drawGaugesAndCharts(){
   const layoutCenter = well.x + well.w / 2;
-  const gaugeGap = (R * 2) + 120;
-  const cxSPP = layoutCenter - gaugeGap / 2;
-  const cxBo  = layoutCenter + gaugeGap / 2;
+  const gaugeMargin = 60;
+  const cxSPP = Math.max(R + 32, well.x - (R + gaugeMargin));
+  const cxBo  = Math.min(width - R - 32, well.x + well.w + R + gaugeMargin);
   const cyTop = well.y + 48;
 
   const vSPPraw = surfacePumpPressure();
@@ -6323,16 +6324,18 @@ function drawGaugesAndCharts(){
 
   const chartTop = Math.max(140, well.y - 10);
   const chartHeight = 420;
-  const lateralGap = 140;
-  const depthChartStart = layoutCenter + well.w / 2 + lateralGap;
-  drawCharts(depthChartStart, chartTop, chartHeight);
 
-  const timeChartWidth = 640;
-  const timeChartX = Math.max(36, layoutCenter - well.w / 2 - lateralGap - timeChartWidth);
+  const timeRightEdge = cxSPP - R - 48;
+  let timeChartWidth = Math.min(640, Math.max(420, timeRightEdge - 24));
+  if (timeChartWidth < 300) timeChartWidth = Math.max(260, timeRightEdge - 24);
+  const timeChartX = Math.max(24, timeRightEdge - timeChartWidth);
   drawTimeChart(timeChartX, chartTop, timeChartWidth, chartHeight);
 
-  const statusX = depthChartStart + 740; // to the right of depth charts
-  drawStatusPanelRight(statusX);
+  const depthChartX = cxBo + R + 48;
+  const chartsWidth = drawCharts(depthChartX, chartTop, chartHeight);
+
+  const statusX = depthChartX + chartsWidth + 36;
+  drawStatusPanelRight(statusX, chartTop);
 }
 
 // === Loss-zone markers on depth charts ===
@@ -6412,37 +6415,57 @@ function drawLossMarkersOnECD(px, py, w, h, padL, padR, padT, padB, xMinPpg, xMa
 }
 
 
-function drawStatusPanelRight(anchorX){
-  const x = anchorX;
-  const y = well.y + 200; // Lower position
-  
-  textAlign(LEFT, TOP); 
-  textSize(12); 
-  fill(0,0,95);
-  
-  text(`Annulus MW above BOP: ${nf(average(annAboveGrid),1,2)} ppg`, x, y);
-  
-  let y2 = y + 20;
-  text(`SBP Applied: ${nf(CURRENT_SBP,1,0)} psi | Mode: ${SBP_MODE.toUpperCase()}`, x, y2);
-  
-  y2 += 20;
+function drawStatusPanelRight(anchorX, anchorY = well.y + 120, panelW = 280){
+  const w = panelW;
+  const h = 176;
+  const x = Math.min(anchorX, width - w - 24);
+  const y = Math.max(120, anchorY);
+
+  push();
+  noStroke();
+  fill(0, 0, 12, 220);
+  rect(x, y, w, h, 12);
+  stroke(0, 0, 60, 160);
+  noFill();
+  rect(x + 1, y + 1, w - 2, h - 2, 10);
+  pop();
+
+  const textX = x + 16;
+  let textY = y + 18;
+  const lineH = 20;
+
+  push();
+  textAlign(LEFT, TOP);
+  textSize(12);
+  fill(0, 0, 96);
+  text(`Annulus MW above BOP: ${nf(average(annAboveGrid),1,2)} ppg`, textX, textY);
+
+  textY += lineH;
+  text(`SBP Applied: ${nf(CURRENT_SBP,1,0)} psi • Mode: ${SBP_MODE.toUpperCase()}`, textX, textY);
+
   if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
-    text(`SBP Anchor: ${ANCHOR_DEPTH} m @ ${nf(ANCHOR_ECD,1,2)} ppg`, x, y2);
+    textY += lineH;
+    text(`SBP Anchor → ${ANCHOR_DEPTH} m @ ${nf(ANCHOR_ECD,1,2)} ppg`, textX, textY);
   }
-  
-  y2 += 15;
+
   const topDepth = riserTopDepth();
   const cmlMode = AUTO_CML_ON ? "AUTO" : "MANUAL";
   let cmlExtra = "";
   if (AUTO_CML_ON && CML_AP_DEPTH > 0 && CML_AP_ECD > 0){
     cmlExtra = ` | Anchor: ${nf(CML_AP_DEPTH,1,0)} m @ ${nf(CML_AP_ECD,1,2)} ppg`;
   }
-  text(`CML Mode: ${cmlMode} | Pump @ ${nf(CML_DEPTH,1,0)} m`, x, y2);
-  
-  y2 += 16;
-  text(`Q_out: ${nf(Q_CML,1,0)} gpm | Riser top: ${nf(topDepth,1,1)} m${cmlExtra}`, x, y2);
-  
-  textAlign(CENTER, CENTER);
+
+  textY += lineH;
+  text(`CML Mode: ${cmlMode} • Pump depth ${nf(CML_DEPTH,1,0)} m`, textX, textY);
+
+  textY += lineH;
+  text(`Q_out: ${nf(Q_CML,1,0)} gpm | Riser top: ${nf(topDepth,1,1)} m${cmlExtra}`, textX, textY);
+
+  textY += lineH;
+  const influxVol = formationFluidVolume_bbl || 0;
+  text(`Kick Vol: ${nf(influxVol,1,1)} bbl | Influx Rate: ${nf(formationFluidRate_gpm,1,0)} gpm`, textX, textY);
+
+  pop();
 }
 
 
@@ -6500,17 +6523,15 @@ function plotSeriesInPanel(px, py, w, h, padL, padR, padT, padB, data, ymin, yma
 }
 
 
-function drawCharts(x0, top = 150, h = 420){
-  const wP = 260, wE = 340, gap = 40;
+function drawCharts(xLeft, top = 150, h = 420){
+  const wP = 280, wE = 360, gap = 44;
   const padL = 54, padR = 18, padT = 28, padB = 42;
   const axisCol = color(0, 0, 95);
   const gridCol = color(0, 0, 60, 120);
   const lineColP = color(0, 80, 80);
 
-  const dx = 70;
-
   // -------- Pressure-depth (psi) --------
-  const px = x0 + dx, py = top;
+  const px = xLeft, py = top;
   drawChartPanel(px, py, wP, h, "Pressure (psi)");
   drawChartGrid(px, py, wP, h, padL, padR, padT, padB, gridCol);
   plotDepthFunction(px, py, wP, h, padL, padR, padT, padB, d => pressureAtDepth(d), 0, 16000, lineColP);
@@ -6521,83 +6542,77 @@ function drawCharts(x0, top = 150, h = 420){
   if (showCaptured && capturedP){
     plotDepthOverlay(px, py, wP, h, padL, padR, padT, padB, capturedP, 0, 16000, color(55,80,80));
   }
-// --- Loss markers on PRESSURE chart (yellow star at Pressure×Depth) ---
-{
-  const xL = px + padL, xR = px + wP - padR;
-  const yT = py + padT, yB = py + h - padB;
-  const pMin = 0, pMax = 16000;
 
-  if (LOSSES_ON && Array.isArray(lossZones)) {
-    for (const z of lossZones) {
-      if (!z || !z.enabled || !(z.depth_m > 0) || !(z.fracPressure_psi > 0)) continue;
-
-      const y = map(z.depth_m, 0, MAX_DEPTH, yT, yB, true);
-      const x = map(z.fracPressure_psi, pMin, pMax, xL, xR, true);
-
-      // yellow star
-      if (typeof drawStar === 'function') {
-        drawStar(x, y, 7, 3.5, 5, color(60, 100, 100));
-      } else {
-        // fallback: small yellow cross
-        push(); stroke(color(60,100,100)); strokeWeight(2);
-        line(x-6,y, x+6,y); line(x,y-6, x,y+6); pop();
-      }
-
-      // small label
-      push();
-      noStroke(); fill(0,0,95); textSize(10); textAlign(LEFT, BOTTOM);
-      const q = (z.Qloss_gpm || 0);
-      text(`Loss @ ${nf(z.depth_m,1,0)} m (${q>0 ? `≈${nf(q,1,0)} gpm` : '≈0 gpm'})`, x + 8, y - 2);
-      pop();
-    }
-  }
-}
-
-// --- Kick markers on PRESSURE chart (triangle at Pore Pressure×Depth) ---
-{
-  if (formationFluidEnabled && formationFluidDepth_m > 0) {
+  // --- Loss markers on PRESSURE chart (yellow star at Pressure×Depth) ---
+  {
     const xL = px + padL, xR = px + wP - padR;
     const yT = py + padT, yB = py + h - padB;
     const pMin = 0, pMax = 16000;
 
-    const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
+    if (LOSSES_ON && Array.isArray(lossZones)) {
+      for (const z of lossZones) {
+        if (!z || !z.enabled || !(z.depth_m > 0) || !(z.fracPressure_psi > 0)) continue;
 
-    // In pressure-driven mode, show pore pressure; in manual mode, show BHP
-    let markerPressure_psi;
-    if (kickMode === 'PRESSURE_DRIVEN') {
-      markerPressure_psi = porePressure_psi;
-    } else {
-      markerPressure_psi = pressureAtDepth(formationFluidDepth_m);
+        const y = map(z.depth_m, 0, MAX_DEPTH, yT, yB, true);
+        const x = map(z.fracPressure_psi, pMin, pMax, xL, xR, true);
+
+        if (typeof drawStar === 'function') {
+          drawStar(x, y, 7, 3.5, 5, color(60, 100, 100));
+        } else {
+          push(); stroke(color(60,100,100)); strokeWeight(2);
+          line(x-6,y, x+6,y); line(x,y-6, x,y+6); pop();
+        }
+
+        push();
+        noStroke(); fill(0,0,95); textSize(10); textAlign(LEFT, BOTTOM);
+        const q = (z.Qloss_gpm || 0);
+        text(`Loss @ ${nf(z.depth_m,1,0)} m (${q>0 ? `≈${nf(q,1,0)} gpm` : '≈0 gpm'})`, x + 8, y - 2);
+        pop();
+      }
     }
-
-    const x = map(markerPressure_psi, pMin, pMax, xL, xR, true);
-
-    // Draw triangle
-    push();
-    const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
-    const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
-    fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
-    stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
-    strokeWeight(1.5);
-    const size = 8;
-    beginShape();
-    vertex(x, y - size);           // Top point
-    vertex(x - size * 0.7, y + size * 0.5);  // Bottom left
-    vertex(x + size * 0.7, y + size * 0.5);   // Bottom right
-    endShape(CLOSE);
-
-    // Label
-    noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
-    textSize(10); textAlign(LEFT, BOTTOM);
-    const typeStr = fluidProps ? fluidProps.name : 'Kick';
-    const pressureLabel = kickMode === 'PRESSURE_DRIVEN' ? `P_pore=${nf(porePressure_psi,1,0)} psi` : `BHP=${nf(markerPressure_psi,1,0)} psi`;
-    text(`${typeStr} @ ${nf(formationFluidDepth_m,1,0)} m (${pressureLabel})`, x + 10, y - 2);
-    pop();
   }
-}
 
+  // --- Kick markers on PRESSURE chart (triangle at Pore Pressure×Depth) ---
+  {
+    if (formationFluidEnabled && formationFluidDepth_m > 0) {
+      const xL = px + padL, xR = px + wP - padR;
+      const yT = py + padT, yB = py + h - padB;
+      const pMin = 0, pMax = 16000;
 
+      const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
 
+      let markerPressure_psi;
+      if (kickMode === 'PRESSURE_DRIVEN') {
+        markerPressure_psi = porePressure_psi;
+      } else {
+        markerPressure_psi = pressureAtDepth(formationFluidDepth_m);
+      }
+
+      const x = map(markerPressure_psi, pMin, pMax, xL, xR, true);
+
+      push();
+      const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+      const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
+      fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
+      stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
+      strokeWeight(1.5);
+      const size = 8;
+      beginShape();
+      vertex(x, y - size);
+      vertex(x - size * 0.7, y + size * 0.5);
+      vertex(x + size * 0.7, y + size * 0.5);
+      endShape(CLOSE);
+
+      noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
+      textSize(10); textAlign(LEFT, BOTTOM);
+      const typeStr = fluidProps ? fluidProps.name : 'Kick';
+      const pressureLabel = kickMode === 'PRESSURE_DRIVEN'
+        ? `P_pore=${nf(porePressure_psi,1,0)} psi`
+        : `BHP=${nf(markerPressure_psi,1,0)} psi`;
+      text(`${typeStr} @ ${nf(formationFluidDepth_m,1,0)} m (${pressureLabel})`, x + 10, y - 2);
+      pop();
+    }
+  }
 
   // -------- ECD-depth (ppg) --------
   const ex = px + wP + gap, ey = top;
@@ -6612,76 +6627,72 @@ function drawCharts(x0, top = 150, h = 420){
     plotDepthOverlayMasked(ex, ey, wE, h, padL, padR, padT, padB, capturedECD, 6, 18, color(55,80,80), v => isFinite(v) && v > 6 && v <= 18 );
   }
 
-// --- Loss markers on ECD chart (yellow star at FG_ppg×Depth) ---
-{
-  const xL = ex + padL, xR = ex + wE - padR;
-  const yT = ey + padT, yB = ey + h - padB;
-  const eMin = 6, eMax = 18;
-
-  if (LOSSES_ON && Array.isArray(lossZones)) {
-    for (const z of lossZones) {
-      if (!z || !z.enabled || !(z.depth_m > 0) || !(z.fracPressure_psi > 0)) continue;
-
-      // fracture gradient in ppg at the selected depth
-      const fg_ppg = z.depth_m > 0 ? (z.fracPressure_psi / (PSI_COEF * z.depth_m)) : NaN;
-      if (!isFinite(fg_ppg)) continue;
-
-      const y = map(z.depth_m, 0, MAX_DEPTH, yT, yB, true);
-      const x = map(fg_ppg, eMin, eMax, xL, xR, true);
-
-      // yellow star
-      if (typeof drawStar === 'function') {
-        drawStar(x, y, 7, 3.5, 5, color(60, 100, 100));
-      } else {
-        // fallback: small yellow cross
-        push(); stroke(color(60,100,100)); strokeWeight(2);
-        line(x-6,y, x+6,y); line(x,y-6, x,y+6); pop();
-      }
-
-      // small label
-      push();
-      noStroke(); fill(0,0,95); textSize(10); textAlign(LEFT, BOTTOM);
-      text(`${nf(fg_ppg,1,2)} ppg @ ${nf(z.depth_m,1,0)} m`, x + 8, y - 2);
-      pop();
-    }
-  }
-}
-
-// --- Kick markers on ECD chart (triangle at formation fluid density×Depth) ---
-{
-  if (formationFluidEnabled && formationFluidDepth_m > 0) {
+  // --- Loss markers on ECD chart (yellow star at FG_ppg×Depth) ---
+  {
     const xL = ex + padL, xR = ex + wE - padR;
     const yT = ey + padT, yB = ey + h - padB;
     const eMin = 6, eMax = 18;
 
-    const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
+    if (LOSSES_ON && Array.isArray(lossZones)) {
+      for (const z of lossZones) {
+        if (!z || !z.enabled || !(z.depth_m > 0) || !(z.fracPressure_psi > 0)) continue;
 
-    // Show formation fluid density in ppg
-    const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
-    const fluid_ppg = fluidProps ? fluidProps.density_ppg : 8.33;
+        const fg_ppg = z.depth_m > 0 ? (z.fracPressure_psi / (PSI_COEF * z.depth_m)) : NaN;
+        if (!isFinite(fg_ppg)) continue;
 
-    const x = map(fluid_ppg, eMin, eMax, xL, xR, true);
+        const y = map(z.depth_m, 0, MAX_DEPTH, yT, yB, true);
+        const x = map(fg_ppg, eMin, eMax, xL, xR, true);
 
-    // Draw triangle
-    push();
-    const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
-    fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
-    stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
-    strokeWeight(1.5);
-    const size = 8;
-    beginShape();
-    vertex(x, y - size);           // Top point
-    vertex(x - size * 0.7, y + size * 0.5);  // Bottom left
-    vertex(x + size * 0.7, y + size * 0.5);   // Bottom right
-    endShape(CLOSE);
+        if (typeof drawStar === 'function') {
+          drawStar(x, y, 7, 3.5, 5, color(60, 100, 100));
+        } else {
+          push(); stroke(color(60,100,100)); strokeWeight(2);
+          line(x-6,y, x+6,y); line(x,y-6, x,y+6); pop();
+        }
 
-    // Label
-    noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
-    textSize(10); textAlign(LEFT, BOTTOM);
-    const typeStr = fluidProps ? fluidProps.name : 'Kick';
-    text(`${typeStr}: ${nf(fluid_ppg,1,2)} ppg @ ${nf(formationFluidDepth_m,1,0)} m`, x + 10, y - 2);
-    pop();
+        push();
+        noStroke(); fill(0,0,95); textSize(10); textAlign(LEFT, BOTTOM);
+        text(`${nf(fg_ppg,1,2)} ppg @ ${nf(z.depth_m,1,0)} m`, x + 8, y - 2);
+        pop();
+      }
+    }
   }
+
+  // --- Kick markers on ECD chart (triangle at formation fluid density×Depth) ---
+  {
+    if (formationFluidEnabled && formationFluidDepth_m > 0) {
+      const xL = ex + padL, xR = ex + wE - padR;
+      const yT = ey + padT, yB = ey + h - padB;
+      const eMin = 6, eMax = 18;
+
+      const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
+
+      const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
+      const fluid_ppg = fluidProps ? fluidProps.density_ppg : 8.33;
+
+      const x = map(fluid_ppg, eMin, eMax, xL, xR, true);
+
+      push();
+      const fluidColor = fluidProps ? fluidProps.color : [0, 100, 100];
+      fill(fluidColor[0], fluidColor[1], fluidColor[2], 180);
+      stroke(fluidColor[0], fluidColor[1], fluidColor[2], 255);
+      strokeWeight(1.5);
+      const size = 8;
+      beginShape();
+      vertex(x, y - size);
+      vertex(x - size * 0.7, y + size * 0.5);
+      vertex(x + size * 0.7, y + size * 0.5);
+      endShape(CLOSE);
+
+      noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
+      textSize(10); textAlign(LEFT, BOTTOM);
+      const typeStr = fluidProps ? fluidProps.name : 'Kick';
+      text(`${typeStr}: ${nf(fluid_ppg,1,2)} ppg @ ${nf(formationFluidDepth_m,1,0)} m`, x + 10, y - 2);
+      pop();
+    }
+  }
+
+  return wP + gap + wE;
 }
 
 function _tsCap(){ return (typeof TS_MAX === 'number' && TS_MAX > 0) ? TS_MAX : 600; }
@@ -7230,7 +7241,7 @@ function styleBottomPanelCard(div, accent = null) {
 
 function buildBOPWellControlUI() {
   const pos = bopUIPosition();
-  const panelWidth = Math.max(bottomPanelCardWidth(bopPanelW), 580);
+  const panelWidth = Math.max(bottomPanelCardWidth(bopPanelW), 640);
 
   uiBOP.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#1f3b57')
     .style('width', `${panelWidth}px`);
@@ -7271,8 +7282,9 @@ function buildBOPWellControlUI() {
 
   const grid = createDiv('').parent(uiBOP.root)
     .style('display', 'grid')
-    .style('grid-template-columns', 'repeat(auto-fit, minmax(260px, 1fr))')
-    .style('gap', '16px');
+    .style('grid-template-columns', 'repeat(2, minmax(260px, 1fr))')
+    .style('gap', '18px 20px')
+    .style('align-items', 'start');
 
   const makeSliderRow = (parent, label, min, max, value, step, decimals) => {
     const row = createDiv('').parent(parent)
@@ -7288,7 +7300,8 @@ function buildBOPWellControlUI() {
     const sliderWrap = createDiv('').parent(row)
       .style('display', 'flex')
       .style('align-items', 'center')
-      .style('gap', '10px');
+      .style('gap', '10px')
+      .style('justify-content', 'space-between');
 
     const slider = createSlider(min, max, value, step)
       .parent(sliderWrap)
@@ -7492,7 +7505,7 @@ function buildBOPWellControlUI() {
       uiBOP.killOpenBtn.style('background', KILL_LINE_OPEN ? '#4ade80' : '#ff6b6b');
     });
 
-  const hydCard = createDiv('').parent(uiBOP.root)
+  const hydCard = createDiv('').parent(grid)
     .style('margin-top', '16px')
     .style('padding', '10px')
     .style('border-radius', '8px')
