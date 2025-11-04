@@ -5016,9 +5016,8 @@ logDownloadBtn.mousePressed(() => {
     return input;
   }
   // ========== Build bottom panels ==========
-  // ========== Build bottom panels ==========
   buildRheologyUI(rheoFrameX + 16, frameY + 40);
-  buildGelAndGeometryUI(gelFrameX + 16, frameY + 40); // Combined panel
+  buildGelAndGeometryUI(configFrameX + 16, frameY + 40); // Well Configuration panel
   doRheologyFit();
     publishRheoToGlobals(); // 
   
