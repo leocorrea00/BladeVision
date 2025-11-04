@@ -163,6 +163,9 @@ let CHOKE_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let chokeGrid = []; // Fluid tracking grid (BOP to surface)
 let accChoke = 0; // Advection accumulator
 let levelDeficit_choke_m = 0; // Level deficit in choke line
+let chokeGasGrid = [];  // Formation gas fraction along choke line
+let chokeOilGrid = [];
+let chokeWaterGrid = [];
 
 // Kill Line (runs from BOP to surface, parallel to riser)
 let KILL_LINE_ID_in = 3.0; // Inner diameter (inches)
@@ -175,6 +178,9 @@ let KILL_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let killGrid = []; // Fluid tracking grid (BOP to surface)
 let accKill = 0; // Advection accumulator
 let levelDeficit_kill_m = 0; // Level deficit in kill line
+let killGasGrid = [];
+let killOilGrid = [];
+let killWaterGrid = [];
 
 // Fluids / flows
 let MW_DS = 9.5; // ppg, drillstring
@@ -533,6 +539,14 @@ function wetLength_openhole_m(){
   const topOH = Math.max(SHOE_DEPTH, annulusTopDepthGlobal());
   return Math.max(0, TD_DEPTH - topOH);
 }
+function wetLength_choke_m(){
+  const deficit = Math.max(0, Math.min(levelDeficit_choke_m || 0, BOP_DEPTH));
+  return Math.max(0, BOP_DEPTH - deficit);
+}
+function wetLength_kill_m(){
+  const deficit = Math.max(0, Math.min(levelDeficit_kill_m || 0, BOP_DEPTH));
+  return Math.max(0, BOP_DEPTH - deficit);
+}
 
 
 const A_riserAnn = () => area_annulus(riser_ID_m,  ds_OD_m);
@@ -548,6 +562,15 @@ function betaFluid(fl) {
 }
 const FLUID_TAG = () => (EH && EH.PCOR && EH.PCOR.fluid) ? EH.PCOR.fluid : 'WBM';
 
+function compressibilityForMudWeight_ppg(mw){
+  if (!isFinite(mw) || mw <= 0) return betaFluid('WBM');
+  if (mw >= 15) return 3.2e-10;
+  if (mw >= 12.5) return 3.6e-10;
+  if (mw >= 11) return 4.2e-10;
+  if (mw >= 9.5) return 4.8e-10;
+  return 5.2e-10;
+}
+
 function systemWetVolumes_m3() {
   return {
     Vriser:   A_riserAnn() * wetLength_riser_m(),
@@ -555,13 +578,53 @@ function systemWetVolumes_m3() {
     Vopen:    A_openAnn()  * wetLength_openhole_m(),
     Vds:      A_DS()       * wetLength_DS_m(),
     Vbooster: A_booster()  * wetLength_booster_m(),
+    Vchoke:   (Math.PI * Math.pow(CHOKE_LINE_ID_m, 2) / 4) * wetLength_choke_m(),
+    Vkill:    (Math.PI * Math.pow(KILL_LINE_ID_m, 2) / 4)  * wetLength_kill_m(),
   };
 }
 function systemCompliance_m3_per_Pa() {
   const fl = FLUID_TAG();
-  const {Vriser,Vcasing,Vopen,Vds,Vbooster} = systemWetVolumes_m3();
-  return betaFluid(fl)*Vriser + betaFluid(fl)*Vcasing + betaFluid(fl)*Vopen
-       + betaFluid(fl)*Vds   + betaFluid(fl)*Vbooster;
+  const betaMain = betaFluid(fl);
+  const {Vriser,Vcasing,Vopen,Vds,Vbooster,Vchoke,Vkill} = systemWetVolumes_m3();
+
+  const chokeUp = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+  const killUp  = KILL_LINE_OPEN  && KILL_DIRECTION  === 'UP';
+  const chokeDown = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'DOWN' && (Q_CHOKE || 0) > 0;
+  const killDown  = KILL_LINE_OPEN  && KILL_DIRECTION  === 'DOWN' && (Q_KILL  || 0) > 0;
+
+  const riserTop = (typeof annulusTopDepthGlobal === 'function')
+    ? annulusTopDepthGlobal()
+    : 0;
+  const riserFull = riserTop <= 0.5;
+  const riserSealed = BOP_CLOSED && MPD_ON && riserFull && !chokeUp && !killUp;
+
+  const belowSealed = BOP_CLOSED && !chokeUp && !killUp;
+
+  let compliance = 0;
+
+  if (belowSealed) {
+    const sealedMain = Math.max(0, Vcasing + Vopen + Vds);
+    compliance += betaMain * sealedMain;
+
+    if (chokeDown && Vchoke > 0) {
+      const mwChoke = chokeGrid.length ? chokeGrid[chokeGrid.length - 1] : MW_CHOKE;
+      compliance += compressibilityForMudWeight_ppg(mwChoke) * Vchoke;
+    }
+    if (killDown && Vkill > 0) {
+      const mwKill = killGrid.length ? killGrid[killGrid.length - 1] : MW_KILL;
+      compliance += compressibilityForMudWeight_ppg(mwKill) * Vkill;
+    }
+  } else {
+    compliance += betaMain * (Vcasing + Vopen + Vds);
+  }
+
+  if (!BOP_CLOSED) {
+    compliance += betaMain * (Vriser + Vbooster);
+  } else if (riserSealed) {
+    compliance += betaMain * (Vriser + Vbooster);
+  }
+
+  return Math.max(compliance, 1e-10);
 }
 function averageSystemPressure_psi() {
   const P0 = (CURRENT_SBP || 0);
@@ -1425,6 +1488,9 @@ function stepAdvection(){
   // Routed internal section flows (magnitudes, in m^3/s) from the router:
   const qUp_m3s   = (typeof __qAnnUp_m3s   === 'number') ? __qAnnUp_m3s   : 0;  // upward above loss zone
   const qDown_m3s = (typeof __qAnnDown_m3s === 'number') ? __qAnnDown_m3s : 0;  // downward toward loss zone
+  const qDownChoke_m3s = Math.max(0, window.__qChokeDown_m3s || 0);
+  const qDownKill_m3s  = Math.max(0, window.__qKillDown_m3s  || 0);
+  const qDownBooster_m3s = Math.max(0, window.__qBoosterDown_m3s || 0);
 
   // Grids & geometry helpers you already have:
   const A_riser = area_annulus(riser_ID_m,   ds_OD_m);
@@ -1481,6 +1547,16 @@ function stepAdvection(){
     boosterEffluentMW = boosterGrid[boosterGrid.length - 1] || MW_BO;
   }
   const boosterMW = boosterEffluentMW;  // Compatibility
+
+  let chokeEffluentMW = chokeGrid.length ? (chokeGrid[chokeGrid.length - 1] || MW_CHOKE) : MW_CHOKE;
+  let chokeEffluentGas = chokeGasGrid.length ? clamp(chokeGasGrid[chokeGasGrid.length - 1] || 0, 0, 1) : 0;
+  let chokeEffluentOil = chokeOilGrid.length ? clamp(chokeOilGrid[chokeOilGrid.length - 1] || 0, 0, 1) : 0;
+  let chokeEffluentWater = chokeWaterGrid.length ? clamp(chokeWaterGrid[chokeWaterGrid.length - 1] || 0, 0, 1) : 0;
+
+  let killEffluentMW = killGrid.length ? (killGrid[killGrid.length - 1] || MW_KILL) : MW_KILL;
+  let killEffluentGas = killGasGrid.length ? clamp(killGasGrid[killGasGrid.length - 1] || 0, 0, 1) : 0;
+  let killEffluentOil = killOilGrid.length ? clamp(killOilGrid[killOilGrid.length - 1] || 0, 0, 1) : 0;
+  let killEffluentWater = killWaterGrid.length ? clamp(killWaterGrid[killWaterGrid.length - 1] || 0, 0, 1) : 0;
 
   // ===============================
   // 3) EXTRACT LOSSES FROM GRIDS
@@ -1691,10 +1767,26 @@ function stepAdvection(){
       accChoke += chokeStep_m;
       while (accChoke >= CELL_M) {
         // Shift DOWN (surface to BOP)
+        const effMW = chokeGrid.length ? (chokeGrid[chokeGrid.length - 1] || MW_CHOKE) : MW_CHOKE;
+        const effGas = chokeGasGrid.length ? (chokeGasGrid[chokeGasGrid.length - 1] || 0) : 0;
+        const effOil = chokeOilGrid.length ? (chokeOilGrid[chokeOilGrid.length - 1] || 0) : 0;
+        const effWater = chokeWaterGrid.length ? (chokeWaterGrid[chokeWaterGrid.length - 1] || 0) : 0;
+
         for (let i = chokeGrid.length - 1; i > 0; i--) {
           chokeGrid[i] = chokeGrid[i - 1];
+          if (chokeGasGrid.length) chokeGasGrid[i] = chokeGasGrid[i - 1] || 0;
+          if (chokeOilGrid.length) chokeOilGrid[i] = chokeOilGrid[i - 1] || 0;
+          if (chokeWaterGrid.length) chokeWaterGrid[i] = chokeWaterGrid[i - 1] || 0;
         }
         chokeGrid[0] = MW_CHOKE; // Fresh fluid enters at surface
+        if (chokeGasGrid.length) chokeGasGrid[0] = 0;
+        if (chokeOilGrid.length) chokeOilGrid[0] = 0;
+        if (chokeWaterGrid.length) chokeWaterGrid[0] = 0;
+
+        chokeEffluentMW = effMW;
+        chokeEffluentGas = clamp(effGas, 0, 1);
+        chokeEffluentOil = clamp(effOil, 0, 1);
+        chokeEffluentWater = clamp(effWater, 0, 1);
         accChoke -= CELL_M;
       }
     } else if (CHOKE_DIRECTION === "UP") {
@@ -1705,11 +1797,27 @@ function stepAdvection(){
         // Shift UP (BOP to surface)
         for (let i = 0; i < chokeGrid.length - 1; i++) {
           chokeGrid[i] = chokeGrid[i + 1];
+          if (chokeGasGrid.length) chokeGasGrid[i] = chokeGasGrid[i + 1] || 0;
+          if (chokeOilGrid.length) chokeOilGrid[i] = chokeOilGrid[i + 1] || 0;
+          if (chokeWaterGrid.length) chokeWaterGrid[i] = chokeWaterGrid[i + 1] || 0;
         }
         // Fluid entering from below-BOP annulus at BOP depth
         // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
         const sourceMW = annBelowGrid[0] || MW_DS;
         const effMW = effectiveCellDensity_ppg(sourceMW, 0, false);
+        let gasFrac = clamp(gasPhaseFrom_below[0] || 0, 0, 1);
+        let oilFrac = clamp(oilPhaseFrom_below[0] || 0, 0, 1);
+        let waterFrac = clamp(waterPhaseFrom_below[0] || 0, 0, 1);
+        const fracSum = gasFrac + oilFrac + waterFrac;
+        if (fracSum > 1e-6 && fracSum > 1) {
+          const scale = 1 / fracSum;
+          gasFrac *= scale;
+          oilFrac *= scale;
+          waterFrac *= scale;
+        }
+        if (chokeGasGrid.length) chokeGasGrid[chokeGasGrid.length - 1] = gasFrac;
+        if (chokeOilGrid.length) chokeOilGrid[chokeOilGrid.length - 1] = oilFrac;
+        if (chokeWaterGrid.length) chokeWaterGrid[chokeWaterGrid.length - 1] = waterFrac;
         chokeGrid[chokeGrid.length - 1] = effMW;
         accChoke -= CELL_M;
       }
@@ -1731,10 +1839,26 @@ function stepAdvection(){
       accKill += killStep_m;
       while (accKill >= CELL_M) {
         // Shift DOWN (surface to BOP)
+        const effMW = killGrid.length ? (killGrid[killGrid.length - 1] || MW_KILL) : MW_KILL;
+        const effGas = killGasGrid.length ? (killGasGrid[killGasGrid.length - 1] || 0) : 0;
+        const effOil = killOilGrid.length ? (killOilGrid[killOilGrid.length - 1] || 0) : 0;
+        const effWater = killWaterGrid.length ? (killWaterGrid[killWaterGrid.length - 1] || 0) : 0;
+
         for (let i = killGrid.length - 1; i > 0; i--) {
           killGrid[i] = killGrid[i - 1];
+          if (killGasGrid.length) killGasGrid[i] = killGasGrid[i - 1] || 0;
+          if (killOilGrid.length) killOilGrid[i] = killOilGrid[i - 1] || 0;
+          if (killWaterGrid.length) killWaterGrid[i] = killWaterGrid[i - 1] || 0;
         }
         killGrid[0] = MW_KILL; // Fresh fluid enters at surface
+        if (killGasGrid.length) killGasGrid[0] = 0;
+        if (killOilGrid.length) killOilGrid[0] = 0;
+        if (killWaterGrid.length) killWaterGrid[0] = 0;
+
+        killEffluentMW = effMW;
+        killEffluentGas = clamp(effGas, 0, 1);
+        killEffluentOil = clamp(effOil, 0, 1);
+        killEffluentWater = clamp(effWater, 0, 1);
         accKill -= CELL_M;
       }
     } else if (KILL_DIRECTION === "UP") {
@@ -1745,15 +1869,61 @@ function stepAdvection(){
         // Shift UP (BOP to surface)
         for (let i = 0; i < killGrid.length - 1; i++) {
           killGrid[i] = killGrid[i + 1];
+          if (killGasGrid.length) killGasGrid[i] = killGasGrid[i + 1] || 0;
+          if (killOilGrid.length) killOilGrid[i] = killOilGrid[i + 1] || 0;
+          if (killWaterGrid.length) killWaterGrid[i] = killWaterGrid[i + 1] || 0;
         }
         // Fluid entering from below-BOP annulus at BOP depth
         // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
         const sourceMW = annBelowGrid[0] || MW_DS;
         const effMW = effectiveCellDensity_ppg(sourceMW, 0, false);
+        let gasFrac = clamp(gasPhaseFrom_below[0] || 0, 0, 1);
+        let oilFrac = clamp(oilPhaseFrom_below[0] || 0, 0, 1);
+        let waterFrac = clamp(waterPhaseFrom_below[0] || 0, 0, 1);
+        const fracSum = gasFrac + oilFrac + waterFrac;
+        if (fracSum > 1e-6 && fracSum > 1) {
+          const scale = 1 / fracSum;
+          gasFrac *= scale;
+          oilFrac *= scale;
+          waterFrac *= scale;
+        }
+        if (killGasGrid.length) killGasGrid[killGasGrid.length - 1] = gasFrac;
+        if (killOilGrid.length) killOilGrid[killOilGrid.length - 1] = oilFrac;
+        if (killWaterGrid.length) killWaterGrid[killWaterGrid.length - 1] = waterFrac;
         killGrid[killGrid.length - 1] = effMW;
         accKill -= CELL_M;
       }
     }
+  }
+
+  if (qDown_m3s > FLOW_THRESHOLD && annBelowGrid.length > 0) {
+    const totalDown = Math.max(qDownBooster_m3s + qDownChoke_m3s + qDownKill_m3s, 1e-9);
+    const mwMix = (
+      qDownBooster_m3s * boosterEffluentMW +
+      qDownChoke_m3s   * chokeEffluentMW +
+      qDownKill_m3s    * killEffluentMW
+    ) / totalDown;
+
+    let gasMix = (qDownChoke_m3s * chokeEffluentGas + qDownKill_m3s * killEffluentGas) / totalDown;
+    let oilMix = (qDownChoke_m3s * chokeEffluentOil + qDownKill_m3s * killEffluentOil) / totalDown;
+    let waterMix = (qDownChoke_m3s * chokeEffluentWater + qDownKill_m3s * killEffluentWater) / totalDown;
+
+    gasMix = clamp(gasMix, 0, 1);
+    oilMix = clamp(oilMix, 0, 1);
+    waterMix = clamp(waterMix, 0, 1);
+
+    const fracSum = gasMix + oilMix + waterMix;
+    if (fracSum > 1e-6 && fracSum > 1) {
+      const scale = 1 / fracSum;
+      gasMix *= scale;
+      oilMix *= scale;
+      waterMix *= scale;
+    }
+
+    annBelowGrid[0] = mwMix;
+    if (gasPhaseFrom_below.length) gasPhaseFrom_below[0] = gasMix;
+    if (oilPhaseFrom_below.length) oilPhaseFrom_below[0] = oilMix;
+    if (waterPhaseFrom_below.length) waterPhaseFrom_below[0] = waterMix;
   }
 
   // ===============================
@@ -3034,6 +3204,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // Choke and Kill line flows
   const qChoke_m3s = (Q_CHOKE || 0) * M3_PER_GPM;
   const qKill_m3s = (Q_KILL || 0) * M3_PER_GPM;
+  const chokeDownRequest = (CHOKE_DIRECTION === 'DOWN' && CHOKE_LINE_OPEN) ? qChoke_m3s : 0;
+  const killDownRequest  = (KILL_DIRECTION  === 'DOWN' && KILL_LINE_OPEN)  ? qKill_m3s  : 0;
 
   const chokeUpActive = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
   const killUpActive = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
@@ -3043,6 +3215,9 @@ function routeAnnulusFlowsWithLosses(dt_s){
   window.__Q_TOTAL_UP_m3s = 0;
   window.__Q_CHOKE_CALCULATED_m3s = 0;
   window.__Q_KILL_CALCULATED_m3s = 0;
+  window.__qChokeDown_m3s = 0;
+  window.__qKillDown_m3s = 0;
+  window.__qBoosterDown_m3s = 0;
 
   if (CHOKE_DIRECTION === 'UP' && !chokeUpActive) {
     Q_CHOKE = 0;
@@ -3067,11 +3242,14 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Inputs: DS return, Kicks, Choke/Kill lines flowing DOWN
     // Outputs: Losses, Choke/Kill lines flowing UP
 
-    let qIn_belowBOP = qDS + qInflux; // DS return + kicks enter below BOP
+    const qChokeDown = Math.max(0, chokeDownRequest);
+    const qKillDown = Math.max(0, killDownRequest);
 
-    // Add choke/kill lines flowing DOWN (pumping into wellbore)
-    if (CHOKE_DIRECTION === "DOWN" && CHOKE_LINE_OPEN) qIn_belowBOP += qChoke_m3s;
-    if (KILL_DIRECTION === "DOWN" && KILL_LINE_OPEN) qIn_belowBOP += qKill_m3s;
+    window.__qChokeDown_m3s = qChokeDown;
+    window.__qKillDown_m3s = qKillDown;
+    window.__qBoosterDown_m3s = 0;
+
+    let qIn_belowBOP = qDS + qInflux + qChokeDown + qKillDown; // DS return + kicks + line injection
 
     // Losses consume fluid from below-BOP annulus
     const qToLoss = Math.min(qDem, Math.max(0, qIn_belowBOP));
@@ -3141,11 +3319,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
     if (wellIsClosed) {
       // Well is closed - fluid has nowhere to go, pressure increases
-      // Convert trapped volume to pressure increase
-      // Using simplified compressibility: ~10 psi per bbl in a typical wellbore
       const dt_s = Math.max(1/120, window.dt_s || 1/60); // time step in seconds
-      const trappedVolume_bbl = netVolumeTrapped_m3s * 6.28981 * dt_s; // m3/s to bbl
-      const pressureIncrease_psi = trappedVolume_bbl * 15; // ~15 psi per bbl trapped
+      const deltaVolume_m3 = netVolumeTrapped_m3s * dt_s;
+      const compliance_m3_per_Pa = Math.max(systemCompliance_m3_per_Pa(), 1e-12);
+      const deltaP_Pa = deltaVolume_m3 / compliance_m3_per_Pa;
+      const pressureIncrease_psi = deltaP_Pa / 6894.757;
       closedWellPressureBoost_psi += pressureIncrease_psi;
     } else {
       // Well has exit path - pressure boost decays back to normal
@@ -3166,7 +3344,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
     window.__qAnnBelow_m3s = Math.max(0, qIn_belowBOP - qToLoss - qToSurface_belowBOP); // Net upward in annulus below BOP
     window.__qAnnAbove_m3s = qNet_riser; // Net flow in riser
     window.__qAnnUp_m3s = qToSurface_belowBOP; // Flow through choke/kill lines
-    window.__qAnnDown_m3s = 0; // No downward flow when BOP closed
+    window.__qAnnDown_m3s = qChokeDown + qKillDown;
 
     // Flow Out calculation - from choke/kill lines
     const targetFO_gpm = Math.max(0, qToSurface_belowBOP * 15850.323);
@@ -3200,7 +3378,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
   // Supply that can feed losses from downhole side (no surface returns here)
   // We allow DS + Booster + TopFill to feed the zone; subtract CML intake
-  let qSupply = Math.max(0, qDS + qBO + qTF - qCML);
+  const qChokeDown = Math.max(0, chokeDownRequest);
+  const qKillDown = Math.max(0, killDownRequest);
+
+  let qSupply = Math.max(0, qDS + qBO + qTF + qChokeDown + qKillDown - qCML);
 
   // Amount that actually goes to the loss zone this step
   const qToLoss = Math.min(qDem, qSupply);
@@ -3317,7 +3498,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const qAnnAbove = qAnnUp;  // DS_left + TF_left + BO_left + qInflux (when riser full or no losses)
 
   // Downward flow component (for advection direction tracking)
-  const qAnnDown = takeBO; // booster flow going DOWN to losses (for advection)
+  window.__qChokeDown_m3s = qChokeDown;
+  window.__qKillDown_m3s = qKillDown;
+  window.__qBoosterDown_m3s = takeBO;
+
+  const qAnnDown = takeBO + qChokeDown + qKillDown; // downward flow towards losses (for advection)
 
   // Publish clean section "signals" (magnitudes, signless)
   window.__qToLoss_m3s   = qToLoss;
@@ -5050,6 +5235,12 @@ function setup(){
   // Initialize choke and kill line grids (BOP to surface, same length as riser)
   chokeGrid = new Array(N_ABV).fill(MW_CHOKE);
   killGrid = new Array(N_ABV).fill(MW_KILL);
+  chokeGasGrid = new Array(N_ABV).fill(0);
+  chokeOilGrid = new Array(N_ABV).fill(0);
+  chokeWaterGrid = new Array(N_ABV).fill(0);
+  killGasGrid = new Array(N_ABV).fill(0);
+  killOilGrid = new Array(N_ABV).fill(0);
+  killWaterGrid = new Array(N_ABV).fill(0);
 
   // Ensure choke and kill lines start completely full
   levelDeficit_choke_m = 0;
