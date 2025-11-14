@@ -2623,13 +2623,20 @@ function calculateUPFlowDistribution(qAvailable_m3s, BHP_source_psi) {
 
   // Estimate initial conductances (inverse resistance)
   for (let p of paths) {
-    // Simplified conductance estimate based on Hagen-Poiseuille for initial guess
-    const D = p.diameter_m;
     const L = p.length_m;
-    // Conductance ~ D^4 / (viscosity * L)
     // Approximate viscosity from K for power law
     const approxVisc = K * Math.pow(1.0, n-1); // at reference shear rate
-    p.conductance = Math.pow(D, 4) / (approxVisc * L + 1e-9);
+
+    // ✅ FIXED: Use correct hydraulic diameter for annulus vs pipe
+    let D_equiv = p.diameter_m; // Default for pipes
+
+    if (p.name === 'RISER') {
+      // Riser is an ANNULUS: use hydraulic diameter (D_outer - D_inner)
+      D_equiv = riser_ID_m - ds_OD_m;
+    }
+
+    // Conductance ~ D^4 / (viscosity * L) for pipes/annulus
+    p.conductance = Math.pow(D_equiv, 4) / (approxVisc * L + 1e-9);
   }
 
   const totalConductance = paths.reduce((sum, p) => sum + p.conductance, 0);
@@ -2654,23 +2661,10 @@ function calculateUPFlowDistribution(qAvailable_m3s, BHP_source_psi) {
       // Calculate friction for this flow rate
       let frictionPsi = 0;
       if (p.name === 'RISER') {
-        // ✅ FIXED: Riser is a PIPE (no drillstring inside above BOP)
-        // Calculate as pipe flow, not annulus flow
+        // Riser is an ANNULUS (drillstring goes through it to surface)
+        const A_riser = area_annulus(riser_ID_m, ds_OD_m);
         const rho = p.avgMW * PPG_TO_KGM3;
-        const A_pipe = Math.PI * riser_ID_m * riser_ID_m / 4;
-        const v_m_s = Q / Math.max(A_pipe, 1e-12);
-        const D_m = riser_ID_m;
-
-        // Use power-law pipe flow friction
-        const shear_rate = (8 * v_m_s) / D_m; // 8V/D for pipe
-        const visc_eff = K * Math.pow(Math.max(shear_rate, 0.1), n - 1);
-        const Re = (rho * v_m_s * D_m) / Math.max(visc_eff, 1e-6);
-
-        // Darcy friction factor (simplified)
-        let f = 16 / Math.max(Re, 1);
-        if (Re > 2100) f = Math.max(0.0001, Math.min(0.316 / Math.pow(Re, 0.25), 0.1));
-
-        const dpdm_Pa = (f * rho * v_m_s * v_m_s) / (2 * D_m);
+        const dpdm_Pa = dP_per_m_annulus_withRPM(Q, rho, riser_ID_m, ds_OD_m, K, n, tauY, 0);
         frictionPsi = (dpdm_Pa * p.length_m) / 6894.757;
       } else if (p.name === 'CHOKE') {
         frictionPsi = chokeFrictionPsiLength(p.length_m, Q);
