@@ -5795,48 +5795,68 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   const yTop = well.y; // Surface
   const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
 
-  // Color based on direction and flow state
-  const killIsFlowing = Q_KILL > 0 && KILL_LINE_OPEN;
-  let killHue, killSat, killBright, killAlpha;
-  if (killIsFlowing) {
-    if (KILL_DIRECTION === "UP") {
-      killHue = 200; killSat = 80; killBright = 90; killAlpha = 200; // Blue
-    } else {
-      killHue = 30; killSat = 90; killBright = 90; killAlpha = 200; // Orange
-    }
-  } else {
-    // No flow or closed - gray dormant
-    killHue = 0; killSat = 0; killBright = 60; killAlpha = 120;
-  }
-
-  // Draw line pipe
-  stroke(killHue, killSat, killBright - 20, killAlpha);
+  // Draw line pipe outline
+  stroke(0, 0, 60, 180);
   strokeWeight(2);
   noFill();
   rect(killLineX - killLineW/2, yTop, killLineW, yBot - yTop, 3);
 
-  // Fill with fluid color if flowing
-  if (killIsFlowing) {
-    noStroke();
-    fill(killHue, killSat, killBright, killAlpha - 20);
-    rect(killLineX - killLineW/2 + 1, yTop, killLineW - 2, yBot - yTop);
+  // Draw fluid tracking cells (always visible, like booster line)
+  const lvl_kill_m = clamp(levelDeficit_kill_m, 0, BOP_DEPTH);
+  const yTopWetKill = mapDepthToY(Math.min(lvl_kill_m, BOP_DEPTH));
 
-    // Draw flow arrows
+  for (let i = 0; i < N_ABV; i++) {
+    const dTop_m = i * CELL_M;
+    const dBot_m = Math.min((i + 1) * CELL_M, BOP_DEPTH);
+    if (dBot_m <= lvl_kill_m) continue;
+    const yTopCell = mapDepthToY(Math.max(dTop_m, lvl_kill_m));
+    const yBotCell = mapDepthToY(dBot_m);
+    const cellMW = killGrid[i] || MW_KILL;
+    const hue = remap(cellMW, MW_MIN, MW_MAX, 170, 355);
+    noStroke();
+    fill(hue, 70, 70, 210);
+    rect(killLineX - killLineW/2 + 1, Math.max(yTopCell, yTopWetKill), killLineW - 2, yBotCell - Math.max(yTopCell, yTopWetKill));
+  }
+
+  // Draw level deficit overlay if present
+  if (levelDeficit_kill_m > 0.01) {
+    const levelY_kill = mapDepthToY(Math.min(levelDeficit_kill_m, BOP_DEPTH));
+    noStroke();
+    fill(0, 0, 0, 80);
+    rect(killLineX - killLineW/2 + 1, well.y, killLineW - 2, levelY_kill - well.y);
+    stroke(55, 80, 90);
+    strokeWeight(2);
+    line(killLineX - killLineW/2 + 3, levelY_kill, killLineX + killLineW/2 - 3, levelY_kill);
+  }
+
+  // Draw flow arrows if flowing
+  const killIsFlowing = Q_KILL > 0 && KILL_LINE_OPEN;
+  if (killIsFlowing) {
+    // Arrow color based on direction
+    let arrowHue, arrowSat;
+    if (KILL_DIRECTION === "DOWN") {
+      arrowHue = 30; arrowSat = 90; // Orange for DOWN (pumping)
+    } else {
+      arrowHue = 200; arrowSat = 80; // Blue for UP (return)
+    }
+
     noFill();
-    stroke(killHue, killSat, 100, 255);
+    stroke(arrowHue, arrowSat, 100, 255);
     strokeWeight(2);
     const numArrows = 3;
     const arrowSpacing = (yBot - yTop) / (numArrows + 1);
     for (let i = 1; i <= numArrows; i++) {
-      const arrowY = KILL_DIRECTION === "UP"
-        ? yBot - i * arrowSpacing
-        : yTop + i * arrowSpacing;
-      const arrowDir = KILL_DIRECTION === "UP" ? -1 : 1;
+      const arrowY = KILL_DIRECTION === "DOWN"
+        ? yTop + i * arrowSpacing
+        : yBot - i * arrowSpacing;
+      const arrowDir = KILL_DIRECTION === "DOWN" ? 1 : -1;
       const arrowSize = 6;
 
+      // Main arrow shaft
       line(killLineX, arrowY - arrowDir * arrowSize, killLineX, arrowY + arrowDir * arrowSize);
-      line(killLineX, arrowY - arrowDir * arrowSize, killLineX - 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
-      line(killLineX, arrowY - arrowDir * arrowSize, killLineX + 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+      // Arrowhead barbs (point in direction of flow)
+      line(killLineX, arrowY + arrowDir * arrowSize, killLineX - 3, arrowY + arrowDir * arrowSize - arrowDir * 3);
+      line(killLineX, arrowY + arrowDir * arrowSize, killLineX + 3, arrowY + arrowDir * arrowSize - arrowDir * 3);
     }
   }
 
@@ -5845,14 +5865,21 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   translate(killLineX - killLineW/2 - 10, (yTop + yBot)/2);
   rotate(-HALF_PI);
   noStroke();
-  fill(killHue, killSat, killBright);
   textSize(10);
   textAlign(CENTER, CENTER);
   if (killIsFlowing) {
+    // Color based on direction
+    if (KILL_DIRECTION === "DOWN") {
+      fill(30, 90, 95); // Orange for DOWN
+    } else {
+      fill(200, 80, 95); // Blue for UP
+    }
     text(`KILL ${nf(Q_KILL, 0, 0)} gpm ${KILL_DIRECTION}`, 0, 0);
   } else if (!KILL_LINE_OPEN) {
+    fill(0, 0, 80);
     text(`KILL LINE (CLOSED)`, 0, 0);
   } else {
+    fill(0, 0, 80);
     text(`KILL LINE`, 0, 0);
   }
   pop();
@@ -5885,48 +5912,68 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   const yTop = well.y; // Surface
   const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
 
-  // Color based on direction and flow state
-  const chokeIsFlowing = Q_CHOKE > 0 && CHOKE_LINE_OPEN;
-  let chokeHue, chokeSat, chokeBright, chokeAlpha;
-  if (chokeIsFlowing) {
-    if (CHOKE_DIRECTION === "UP") {
-      chokeHue = 200; chokeSat = 80; chokeBright = 90; chokeAlpha = 200; // Blue
-    } else {
-      chokeHue = 30; chokeSat = 90; chokeBright = 90; chokeAlpha = 200; // Orange
-    }
-  } else {
-    // No flow or closed - gray dormant
-    chokeHue = 0; chokeSat = 0; chokeBright = 60; chokeAlpha = 120;
-  }
-
-  // Draw line pipe
-  stroke(chokeHue, chokeSat, chokeBright - 20, chokeAlpha);
+  // Draw line pipe outline
+  stroke(0, 0, 60, 180);
   strokeWeight(2);
   noFill();
   rect(chokeLineX - chokeLineW/2, yTop, chokeLineW, yBot - yTop, 3);
 
-  // Fill with fluid color if flowing
-  if (chokeIsFlowing) {
-    noStroke();
-    fill(chokeHue, chokeSat, chokeBright, chokeAlpha - 20);
-    rect(chokeLineX - chokeLineW/2 + 1, yTop, chokeLineW - 2, yBot - yTop);
+  // Draw fluid tracking cells (always visible, like booster line)
+  const lvl_choke_m = clamp(levelDeficit_choke_m, 0, BOP_DEPTH);
+  const yTopWetChoke = mapDepthToY(Math.min(lvl_choke_m, BOP_DEPTH));
 
-    // Draw flow arrows
+  for (let i = 0; i < N_ABV; i++) {
+    const dTop_m = i * CELL_M;
+    const dBot_m = Math.min((i + 1) * CELL_M, BOP_DEPTH);
+    if (dBot_m <= lvl_choke_m) continue;
+    const yTopCell = mapDepthToY(Math.max(dTop_m, lvl_choke_m));
+    const yBotCell = mapDepthToY(dBot_m);
+    const cellMW = chokeGrid[i] || MW_CHOKE;
+    const hue = remap(cellMW, MW_MIN, MW_MAX, 170, 355);
+    noStroke();
+    fill(hue, 70, 70, 210);
+    rect(chokeLineX - chokeLineW/2 + 1, Math.max(yTopCell, yTopWetChoke), chokeLineW - 2, yBotCell - Math.max(yTopCell, yTopWetChoke));
+  }
+
+  // Draw level deficit overlay if present
+  if (levelDeficit_choke_m > 0.01) {
+    const levelY_choke = mapDepthToY(Math.min(levelDeficit_choke_m, BOP_DEPTH));
+    noStroke();
+    fill(0, 0, 0, 80);
+    rect(chokeLineX - chokeLineW/2 + 1, well.y, chokeLineW - 2, levelY_choke - well.y);
+    stroke(55, 80, 90);
+    strokeWeight(2);
+    line(chokeLineX - chokeLineW/2 + 3, levelY_choke, chokeLineX + chokeLineW/2 - 3, levelY_choke);
+  }
+
+  // Draw flow arrows if flowing
+  const chokeIsFlowing = Q_CHOKE > 0 && CHOKE_LINE_OPEN;
+  if (chokeIsFlowing) {
+    // Arrow color based on direction
+    let arrowHue, arrowSat;
+    if (CHOKE_DIRECTION === "DOWN") {
+      arrowHue = 30; arrowSat = 90; // Orange for DOWN (pumping)
+    } else {
+      arrowHue = 200; arrowSat = 80; // Blue for UP (return)
+    }
+
     noFill();
-    stroke(chokeHue, chokeSat, 100, 255);
+    stroke(arrowHue, arrowSat, 100, 255);
     strokeWeight(2);
     const numArrows = 3;
     const arrowSpacing = (yBot - yTop) / (numArrows + 1);
     for (let i = 1; i <= numArrows; i++) {
-      const arrowY = CHOKE_DIRECTION === "UP"
-        ? yBot - i * arrowSpacing
-        : yTop + i * arrowSpacing;
-      const arrowDir = CHOKE_DIRECTION === "UP" ? -1 : 1;
+      const arrowY = CHOKE_DIRECTION === "DOWN"
+        ? yTop + i * arrowSpacing
+        : yBot - i * arrowSpacing;
+      const arrowDir = CHOKE_DIRECTION === "DOWN" ? 1 : -1;
       const arrowSize = 6;
 
+      // Main arrow shaft
       line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX, arrowY + arrowDir * arrowSize);
-      line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX - 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
-      line(chokeLineX, arrowY - arrowDir * arrowSize, chokeLineX + 3, arrowY - arrowDir * arrowSize + arrowDir * 3);
+      // Arrowhead barbs (point in direction of flow)
+      line(chokeLineX, arrowY + arrowDir * arrowSize, chokeLineX - 3, arrowY + arrowDir * arrowSize - arrowDir * 3);
+      line(chokeLineX, arrowY + arrowDir * arrowSize, chokeLineX + 3, arrowY + arrowDir * arrowSize - arrowDir * 3);
     }
   }
 
@@ -5935,14 +5982,21 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
   translate(chokeLineX + chokeLineW/2 + 12, (yTop + yBot)/2);
   rotate(-HALF_PI);
   noStroke();
-  fill(chokeHue, chokeSat, chokeBright);
   textSize(10);
   textAlign(CENTER, CENTER);
   if (chokeIsFlowing) {
+    // Color based on direction
+    if (CHOKE_DIRECTION === "DOWN") {
+      fill(30, 90, 95); // Orange for DOWN
+    } else {
+      fill(200, 80, 95); // Blue for UP
+    }
     text(`CHOKE ${nf(Q_CHOKE, 0, 0)} gpm ${CHOKE_DIRECTION}`, 0, 0);
   } else if (!CHOKE_LINE_OPEN) {
+    fill(0, 0, 80);
     text(`CHOKE LINE (CLOSED)`, 0, 0);
   } else {
+    fill(0, 0, 80);
     text(`CHOKE LINE`, 0, 0);
   }
   pop();
