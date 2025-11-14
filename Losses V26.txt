@@ -4823,7 +4823,7 @@ function setup(){
 
   // ========== Bottom banner layout ==========
   bottomPanelPadding = 36;
-  bottomPanelSpacing = 24;
+  bottomPanelSpacing = 40; // Increased spacing for better visual separation
   const bottomPanelCount = 5;
   frameHeight = 280;
   frameY      = well.y + well.h + 90;
@@ -6350,7 +6350,7 @@ function drawLossMarkersOnECD(px, py, w, h, padL, padR, padT, padB, xMinPpg, xMa
 
 function drawStatusPanelRight(anchorX){
   const x = anchorX;
-  const y = well.y + 200; // Lower position
+  const y = well.y + well.h + 10; // Below the well schematic
   
   textAlign(LEFT, TOP); 
   textSize(12); 
