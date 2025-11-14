@@ -6229,7 +6229,7 @@ function drawBadgeSm(cx, cy, line1, line2){
 
 function drawGaugesAndCharts(){
   const layoutCenter = well.x + well.w / 2;
-  const gaugeGap = (R * 2) + 120;
+  const gaugeGap = (R * 2) + 300; // Increased gap to space gauges outside the well
   const cxSPP = layoutCenter - gaugeGap / 2;
   const cxBo  = layoutCenter + gaugeGap / 2;
   const cyTop = well.y + 48;
@@ -6266,12 +6266,13 @@ function drawGaugesAndCharts(){
 
   const chartTop = Math.max(140, well.y - 10);
   const chartHeight = 420;
-  const lateralGap = 140;
-  const depthChartStart = layoutCenter + well.w / 2 + lateralGap;
+  // Align depth charts to end at the BOP panel right edge
+  const chartsTotalWidth = 70 + 260 + 40 + 340; // dx + wP + gap + wE = 710
+  const depthChartStart = (bopFrameX + bopPanelW) - chartsTotalWidth;
   drawCharts(depthChartStart, chartTop, chartHeight);
 
   const timeChartWidth = 640;
-  const timeChartX = Math.max(36, layoutCenter - well.w / 2 - lateralGap - timeChartWidth);
+  const timeChartX = rheoFrameX; // Align with rheology frame on the left
   drawTimeChart(timeChartX, chartTop, timeChartWidth, chartHeight);
 
   const statusX = depthChartStart + 740; // to the right of depth charts
