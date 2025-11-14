@@ -236,7 +236,7 @@ let bitOutQ = []; // DS → TD (bit exit) → feeds annBelow bottom
 let belowOutQ = []; // annBelow top → BOP → feeds annAbove
 let boosterOutQ = []; // Booster bottom → BOP → feeds annAbove
 // --- bottom frames (for Rheology/Gels/Geometry) ---
-let frameY, frameHeight;
+let frameY, frameHeight, frameY2;
 let bottomPanelW, bopPanelW, bottomPanelPadding, bottomPanelSpacing;
 let rheoFrameX, configFrameX, lossFrameX, kickFrameX, bopFrameX;
 let cmlQSlider, cmlQInput, cmlDepthInput, cmlBtn, cmlAutoBtn;
@@ -470,7 +470,7 @@ function annulusAreaAtDepth(d){
 // Helper to place Losses UI under Rheology pane (fallback to bottom-left)
 function lossesUIPosition() {
   const x = (typeof lossFrameX === 'number') ? lossFrameX + 18 : 40;
-  const yBase = (typeof frameY === 'number') ? frameY + 40 : (height - 200);
+  const yBase = (typeof frameY2 === 'number') ? frameY2 + 40 : (height - 200);
   const y = Math.min(height - 200, Math.max(20, yBase));
   return { x, y };
 }
@@ -478,7 +478,7 @@ function lossesUIPosition() {
 // Helper to place Kicks UI inside the kick frame
 function kicksUIPosition() {
   const x = (typeof kickFrameX === 'number') ? kickFrameX + 18 : 460;
-  const yBase = (typeof frameY === 'number') ? frameY + 40 : (height - 200);
+  const yBase = (typeof frameY2 === 'number') ? frameY2 + 40 : (height - 200);
   const y = Math.min(height - 200, Math.max(20, yBase));
   return { x, y };
 }
@@ -4821,26 +4821,36 @@ function setup(){
   well.x = Math.round((width - well.w) / 2);
 
 
-  // ========== Bottom banner layout ==========
+  // ========== Bottom banner layout - Two Rows ==========
   bottomPanelPadding = 36;
-  bottomPanelSpacing = 40; // Increased spacing for better visual separation
-  const bottomPanelCount = 5;
+  bottomPanelSpacing = 40;
   frameHeight = 280;
-  frameY      = well.y + well.h + 90;
+  const rowSpacing = 60; // Vertical spacing between rows
 
-  const gaps = bottomPanelCount - 1;
-  const availableWidth = W - 2 * bottomPanelPadding - gaps * bottomPanelSpacing;
-  const bopWeight = 1.8;
-  const unitWidth = availableWidth / ((bottomPanelCount - 1) + bopWeight);
-
-  bottomPanelW = unitWidth;
-  bopPanelW = unitWidth * bopWeight;
+  // Row 1: Rheology, Well Configuration
+  frameY = well.y + well.h + 90;
+  const row1PanelCount = 2;
+  const row1Gaps = row1PanelCount - 1;
+  const row1Width = W - 2 * bottomPanelPadding - row1Gaps * bottomPanelSpacing;
+  const row1UnitWidth = row1Width / row1PanelCount;
 
   rheoFrameX   = bottomPanelPadding;
-  configFrameX = rheoFrameX   + bottomPanelW + bottomPanelSpacing;
-  lossFrameX   = configFrameX + bottomPanelW + bottomPanelSpacing;
-  kickFrameX   = lossFrameX   + bottomPanelW + bottomPanelSpacing;
-  bopFrameX    = kickFrameX   + bottomPanelW + bottomPanelSpacing;
+  configFrameX = rheoFrameX + row1UnitWidth + bottomPanelSpacing;
+
+  // Row 2: Losses, Kicks, BOP (with BOP wider)
+  frameY2 = frameY + frameHeight + rowSpacing;
+  const row2PanelCount = 3;
+  const row2Gaps = row2PanelCount - 1;
+  const row2Width = W - 2 * bottomPanelPadding - row2Gaps * bottomPanelSpacing;
+  const bopWeight = 1.8;
+  const row2UnitWidth = row2Width / ((row2PanelCount - 1) + bopWeight);
+
+  bottomPanelW = row1UnitWidth; // For row 1 panels
+  bopPanelW = row2UnitWidth * bopWeight;
+
+  lossFrameX = bottomPanelPadding;
+  kickFrameX = lossFrameX + row2UnitWidth + bottomPanelSpacing;
+  bopFrameX  = kickFrameX + row2UnitWidth + bottomPanelSpacing;
 
   // Convert inches to meters
   riser_ID_m    = riser_ID_in    * 0.0254;
@@ -5461,7 +5471,7 @@ function drawWellAndFluids(){
   noStroke();
 
   const yBOP = mapDepthToY(BOP_DEPTH);
-  const boosterW = 12, boosterX = well.x - 14;
+  const boosterW = 12, boosterX = well.x - 20; // Moved booster further left for better spacing
   stroke(0, 0, 50, 160); strokeWeight(1.5); noFill(); rect(boosterX - boosterW/2, well.y, boosterW, yBOP - well.y, 3);
 
   const yTopWetBo = clipFillY_forBooster();
@@ -5779,9 +5789,9 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
 // Always visible, positioned next to booster line
 {
   const killLineW = 10;
-  const boosterX = well.x - 14;
+  const boosterX = well.x - 20; // Match booster position
   const boosterW = 12;
-  const killLineX = boosterX - boosterW/2 - 8; // Left of booster
+  const killLineX = boosterX - boosterW/2 - 14; // Equal spacing as well-to-booster
   const yTop = well.y; // Surface
   const yBot = mapDepthToY(BOP_DEPTH); // BOP depth
 
@@ -6162,28 +6172,47 @@ function drawCMLVisual(){
 }
 
 function drawBottomFrames(){
-  const panelData = [
-    { x: rheoFrameX,   w: bottomPanelW, label: "Rheology" },
-    { x: configFrameX, w: bottomPanelW, label: "Well Configuration" },
-    { x: lossFrameX,   w: bottomPanelW, label: "Losses" },
-    { x: kickFrameX,   w: bottomPanelW, label: "Kick Control" },
-    { x: bopFrameX,    w: (typeof bopPanelW === 'number' ? bopPanelW : bottomPanelW), label: "BOP & Hydraulics" }
+  // Row 1: Rheology and Well Configuration
+  const row1Panels = [
+    { x: rheoFrameX,   w: bottomPanelW, y: frameY, label: "Rheology" },
+    { x: configFrameX, w: bottomPanelW, y: frameY, label: "Well Configuration" }
+  ];
+
+  // Row 2: Losses, Kicks, BOP
+  const row2Panels = [
+    { x: lossFrameX, w: (typeof bottomPanelW === 'number' ? bottomPanelW : 300), y: frameY2, label: "Losses" },
+    { x: kickFrameX, w: (typeof bottomPanelW === 'number' ? bottomPanelW : 300), y: frameY2, label: "Kick Control" },
+    { x: bopFrameX,  w: (typeof bopPanelW === 'number' ? bopPanelW : 450), y: frameY2, label: "BOP & Hydraulics" }
   ];
 
   stroke(0, 0, 70); strokeWeight(2); noFill();
-  for (const panel of panelData){
-    rect(panel.x, frameY, panel.w, frameHeight, 10);
+
+  // Draw row 1 frames
+  for (const panel of row1Panels){
+    rect(panel.x, panel.y, panel.w, frameHeight, 10);
+  }
+
+  // Draw row 2 frames
+  for (const panel of row2Panels){
+    rect(panel.x, panel.y, panel.w, frameHeight, 10);
   }
 
   noStroke(); fill(0,0,92); textAlign(CENTER, TOP); textSize(12);
-  for (const panel of panelData){
-    text(panel.label, panel.x + panel.w/2, frameY + frameHeight + 12);
+
+  // Draw row 1 labels
+  for (const panel of row1Panels){
+    text(panel.label, panel.x + panel.w/2, panel.y + frameHeight + 12);
   }
 
-  // Friction status badge anchored to BOP panel
-  const badgeWidth = (typeof bopPanelW === 'number') ? bopPanelW : bottomPanelW;
+  // Draw row 2 labels
+  for (const panel of row2Panels){
+    text(panel.label, panel.x + panel.w/2, panel.y + frameHeight + 12);
+  }
+
+  // Friction status badge anchored to BOP panel (row 2)
+  const badgeWidth = (typeof bopPanelW === 'number') ? bopPanelW : 450;
   const badgeX = bopFrameX + badgeWidth/2;
-  const badgeY = frameY + 28;
+  const badgeY = frameY2 + 28;
   drawBadge(badgeX, badgeY, `Friction: ${FRICTION_MODE}`, `Model: ${HYDRAULICS_MODEL} • Rheo: ${ACTIVE_RHEO_MODEL}`);
 }
 
@@ -6229,7 +6258,7 @@ function drawBadgeSm(cx, cy, line1, line2){
 
 function drawGaugesAndCharts(){
   const layoutCenter = well.x + well.w / 2;
-  const gaugeGap = (R * 2) + 300; // Increased gap to space gauges outside the well
+  const gaugeGap = (R * 2) + 450; // Increased gap to push gauges far outside the well
   const cxSPP = layoutCenter - gaugeGap / 2;
   const cxBo  = layoutCenter + gaugeGap / 2;
   const cyTop = well.y + 48;
@@ -7101,7 +7130,7 @@ let uiBOP = {
 
 function bopUIPosition() {
   const x = (typeof bopFrameX === 'number') ? bopFrameX + 18 : 780;
-  const yBase = (typeof frameY === 'number') ? frameY + 40 : (height - 200);
+  const yBase = (typeof frameY2 === 'number') ? frameY2 + 40 : (height - 200);
   const y = Math.min(height - 200, Math.max(20, yBase));
   return { x, y };
 }
