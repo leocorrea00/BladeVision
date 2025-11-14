@@ -1461,49 +1461,75 @@ function stepAdvection(){
   // If qUp_m3s ~ 0, leave annBelowGrid as-is: column below remains static except where DOWN flow was applied.
 
   // =========================================================
-  // 5) RISER (ABOVE BOP): ONLY ADVECT WHEN THERE IS UPFLOW
+  // 5) RISER (ABOVE BOP): ADVECTION AND MIXING
   // =========================================================
-  if (qUp_m3s > FLOW_THRESHOLD) {
-    const v_above = qUp_m3s / Math.max(A_riser, 1e-12);
-    const aboveStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_above / vref);
 
-    // Calculate booster contribution going UP (not routed down to losses)
-    const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
-    const qBO_up = Math.max(0, qBO_m3s - qDown_m3s);  // Booster NOT going down = going UP
+  // Calculate booster contribution going UP (not routed down to losses)
+  const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
+  const qBO_up = Math.max(0, qBO_m3s - qDown_m3s);  // Booster NOT going down = going UP
 
-    // ✅ NEW: Add choke/kill lines flowing DOWN when BOP is OPEN (act like second booster)
-    let qChoke_down = 0, qKill_down = 0;
-    let chokeEffluentMW = MW_CHOKE, killEffluentMW = MW_KILL;
+  // ✅ FIXED: Calculate choke/kill DOWN flows OUTSIDE the upflow block
+  let qChoke_down = 0, qKill_down = 0;
+  let chokeEffluentMW = MW_CHOKE, killEffluentMW = MW_KILL;
 
-    if (!BOP_CLOSED) {
-      // When BOP is open, choke/kill DOWN flows mix into riser at BOP depth
-      if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === "DOWN") {
-        qChoke_down = (Q_CHOKE || 0) / 15850.323;
-        chokeEffluentMW = chokeGrid[chokeGrid.length - 1] || MW_CHOKE; // Bottom of grid = BOP depth
-      }
-      if (KILL_LINE_OPEN && KILL_DIRECTION === "DOWN") {
-        qKill_down = (Q_KILL || 0) / 15850.323;
-        killEffluentMW = killGrid[killGrid.length - 1] || MW_KILL; // Bottom of grid = BOP depth
-      }
+  if (!BOP_CLOSED) {
+    // When BOP is open, choke/kill DOWN flows mix into riser at BOP depth
+    if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === "DOWN") {
+      qChoke_down = (Q_CHOKE || 0) / 15850.323;
+      chokeEffluentMW = chokeGrid[chokeGrid.length - 1] || MW_CHOKE; // Bottom of grid = BOP depth
     }
+    if (KILL_LINE_OPEN && KILL_DIRECTION === "DOWN") {
+      qKill_down = (Q_KILL || 0) / 15850.323;
+      killEffluentMW = killGrid[killGrid.length - 1] || MW_KILL; // Bottom of grid = BOP depth
+    }
+  }
 
-    const qFromAnnBelow = Math.max(0, qUp_m3s - qBO_up);  // Flow from annulus below (DS + TF)
+  const qFromAnnBelow = Math.max(0, qUp_m3s - qBO_up);  // Flow from annulus below (DS + TF)
+
+  // Total flow entering riser at BOP depth
+  const qTotalIntoRiser = qFromAnnBelow + qBO_up + qChoke_down + qKill_down;
+
+  if (qTotalIntoRiser > FLOW_THRESHOLD) {
+    const v_above = qTotalIntoRiser / Math.max(A_riser, 1e-12);
+    const aboveStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_above / vref);
 
     accAbove += aboveStep_m;
     while (accAbove >= CELL_M){
       // Remove from surface, add mixture at BOP (from annulus below + booster + choke/kill going down)
       annAboveGrid.shift();
 
-      const fromBelowMW = annBelowGrid[0] || dsEffluentMW; // incoming upward fluid from annulus
-      const fromBelowEff = effectiveCellDensity_ppg(fromBelowMW, 0, false);
-      const boosterEff = boosterEffluentMW;
+      // ✅ FIXED: Only include flows that are actually non-zero in mixing
+      // Build flow-weighted average (compound average)
+      let mixMW = 0;
+      let qTotal = 0;
 
-      // ✅ NEW: Include choke/kill DOWN flows in mixing calculation
-      const qTotal = Math.max(qFromAnnBelow + qBO_up + qChoke_down + qKill_down, 1e-12);
-      const mixMW = (qFromAnnBelow * fromBelowEff +
-                     qBO_up * boosterEff +
-                     qChoke_down * chokeEffluentMW +
-                     qKill_down * killEffluentMW) / qTotal;
+      if (qFromAnnBelow > FLOW_THRESHOLD) {
+        const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
+        const fromBelowEff = effectiveCellDensity_ppg(fromBelowMW, 0, false);
+        mixMW += qFromAnnBelow * fromBelowEff;
+        qTotal += qFromAnnBelow;
+      }
+
+      if (qBO_up > FLOW_THRESHOLD) {
+        mixMW += qBO_up * boosterEffluentMW;
+        qTotal += qBO_up;
+      }
+
+      if (qChoke_down > FLOW_THRESHOLD) {
+        mixMW += qChoke_down * chokeEffluentMW;
+        qTotal += qChoke_down;
+      }
+
+      if (qKill_down > FLOW_THRESHOLD) {
+        mixMW += qKill_down * killEffluentMW;
+        qTotal += qKill_down;
+      }
+
+      if (qTotal > FLOW_THRESHOLD) {
+        mixMW = mixMW / qTotal;  // Flow-weighted average
+      } else {
+        mixMW = MW_DS;  // Fallback
+      }
 
       annAboveGrid.push(mixMW);
 
@@ -1516,7 +1542,7 @@ function stepAdvection(){
       // Add formation fluids from below-BOP entering at BOP depth
       // Only the fraction coming from annulus below carries formation fluids
       // Booster, choke, and kill are clean mud, so dilute the formation fluids by flow rate ratio
-      const dilutionFactor = clamp(qFromAnnBelow / Math.max(qTotal, 1e-12), 0, 1);
+      const dilutionFactor = clamp(qFromAnnBelow / Math.max(qTotalIntoRiser, 1e-12), 0, 1);
       gasPhaseFrom_above.push((gasPhaseFrom_below[0] || 0) * dilutionFactor);
       oilPhaseFrom_above.push((oilPhaseFrom_below[0] || 0) * dilutionFactor);
       waterPhaseFrom_above.push((waterPhaseFrom_below[0] || 0) * dilutionFactor);
@@ -1531,19 +1557,43 @@ function stepAdvection(){
 
     if (annAboveGrid.length){
       const k = annAboveGrid.length - 1;
-      const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
-      const fromBelowEff = effectiveCellDensity_ppg(fromBelowMW, 0, false);
-      const boosterEff = boosterEffluentMW;
-      // ✅ Include choke/kill in partial cell mixing
-      const qTotal = Math.max(qFromAnnBelow + qBO_up + qChoke_down + qKill_down, 1e-12);
-      const mixMW = (qFromAnnBelow * fromBelowEff +
-                     qBO_up * boosterEff +
-                     qChoke_down * chokeEffluentMW +
-                     qKill_down * killEffluentMW) / qTotal;
+
+      // ✅ FIXED: Same flow-weighted mixing for partial cell
+      let mixMW = 0;
+      let qTotal = 0;
+
+      if (qFromAnnBelow > FLOW_THRESHOLD) {
+        const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
+        const fromBelowEff = effectiveCellDensity_ppg(fromBelowMW, 0, false);
+        mixMW += qFromAnnBelow * fromBelowEff;
+        qTotal += qFromAnnBelow;
+      }
+
+      if (qBO_up > FLOW_THRESHOLD) {
+        mixMW += qBO_up * boosterEffluentMW;
+        qTotal += qBO_up;
+      }
+
+      if (qChoke_down > FLOW_THRESHOLD) {
+        mixMW += qChoke_down * chokeEffluentMW;
+        qTotal += qChoke_down;
+      }
+
+      if (qKill_down > FLOW_THRESHOLD) {
+        mixMW += qKill_down * killEffluentMW;
+        qTotal += qKill_down;
+      }
+
+      if (qTotal > FLOW_THRESHOLD) {
+        mixMW = mixMW / qTotal;
+      } else {
+        mixMW = MW_DS;
+      }
+
       annAboveGrid[k] = (1 - accAbove/CELL_M) * annAboveGrid[k] + (accAbove/CELL_M) * mixMW;
     }
   }
-  // If qUp_m3s ~ 0, leave annAboveGrid unchanged: riser column stays static.
+  // If qTotalIntoRiser ~ 0, leave annAboveGrid unchanged: riser column stays static.
 
   // =========================================================
   // 6) TOP FILL at actual fluid surface (keep your logic)
@@ -2604,10 +2654,23 @@ function calculateUPFlowDistribution(qAvailable_m3s, BHP_source_psi) {
       // Calculate friction for this flow rate
       let frictionPsi = 0;
       if (p.name === 'RISER') {
-        // Use annulus friction calculation
-        const A_riser = area_annulus(riser_ID_m, ds_OD_m);
+        // ✅ FIXED: Riser is a PIPE (no drillstring inside above BOP)
+        // Calculate as pipe flow, not annulus flow
         const rho = p.avgMW * PPG_TO_KGM3;
-        const dpdm_Pa = dP_per_m_annulus_withRPM(Q, rho, riser_ID_m, ds_OD_m, K, n, tauY, 0);
+        const A_pipe = Math.PI * riser_ID_m * riser_ID_m / 4;
+        const v_m_s = Q / Math.max(A_pipe, 1e-12);
+        const D_m = riser_ID_m;
+
+        // Use power-law pipe flow friction
+        const shear_rate = (8 * v_m_s) / D_m; // 8V/D for pipe
+        const visc_eff = K * Math.pow(Math.max(shear_rate, 0.1), n - 1);
+        const Re = (rho * v_m_s * D_m) / Math.max(visc_eff, 1e-6);
+
+        // Darcy friction factor (simplified)
+        let f = 16 / Math.max(Re, 1);
+        if (Re > 2100) f = Math.max(0.0001, Math.min(0.316 / Math.pow(Re, 0.25), 0.1));
+
+        const dpdm_Pa = (f * rho * v_m_s * v_m_s) / (2 * D_m);
         frictionPsi = (dpdm_Pa * p.length_m) / 6894.757;
       } else if (p.name === 'CHOKE') {
         frictionPsi = chokeFrictionPsiLength(p.length_m, Q);
