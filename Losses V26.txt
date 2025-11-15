@@ -257,7 +257,7 @@ let belowOutQ = []; // annBelow top → BOP → feeds annAbove
 let boosterOutQ = []; // Booster bottom → BOP → feeds annAbove
 // --- bottom frames (for Rheology/Gels/Geometry) ---
 let frameY, frameHeight, frameY2;
-let bottomPanelW, bopPanelW, bottomPanelPadding, bottomPanelSpacing;
+let bottomPanelW, bopPanelW, bottomPanelPadding, bottomPanelSpacing, bottomPanelRowSpacing;
 let rheoFrameX, rheoFrameW, gelFrameX, gelFrameW, configFrameX, configFrameW;
 let enhFrameX, enhFrameW, lossFrameX, lossFrameW, kickFrameX, kickFrameW;
 let bopFrameX, bopFrameW, diagFrameX, diagFrameW;
@@ -518,8 +518,7 @@ function kicksUIPosition() {
 
 function enhancedHydraulicsUIPosition() {
   const x = (typeof enhFrameX === 'number') ? enhFrameX + 18 : (width - 420);
-  const yBase = (typeof frameY === 'number') ? frameY + 40 : (height - 360);
-  const y = Math.min(height - 240, Math.max(20, yBase));
+  const y = (typeof frameY === 'number') ? frameY + 40 : (height - 360);
   return { x, y };
 }
 
@@ -2722,7 +2721,9 @@ function activeBopLineSegments(){
   const killActive  = (KILL_DIRECTION === 'UP'  && Q_KILL  > 0 && KILL_LINE_OPEN);
 
   if (chokeActive) {
-    const qChoke_m3s = Q_CHOKE * M3_PER_GPM;
+    const qChoke_m3s = (typeof window !== 'undefined' && typeof window.__Q_CHOKE_CALCULATED_m3s === 'number')
+      ? Math.max(window.__Q_CHOKE_CALCULATED_m3s, 0)
+      : Q_CHOKE * M3_PER_GPM;
     const dryLen = clamp(levelDeficit_choke_m || 0, 0, BOP_DEPTH);
     const wetLen = Math.max(0, BOP_DEPTH - dryLen);
     if (wetLen > 0) {
@@ -2733,13 +2734,16 @@ function activeBopLineSegments(){
         wetLen,
         mw: chokeMW,
         frictionPsi: friction_psi,
-        surfacePressure: CHOKE_PRESSURE_psi
+        surfacePressure: CHOKE_PRESSURE_psi,
+        flow_m3s: qChoke_m3s
       });
     }
   }
 
   if (killActive) {
-    const qKill_m3s = Q_KILL * M3_PER_GPM;
+    const qKill_m3s = (typeof window !== 'undefined' && typeof window.__Q_KILL_CALCULATED_m3s === 'number')
+      ? Math.max(window.__Q_KILL_CALCULATED_m3s, 0)
+      : Q_KILL * M3_PER_GPM;
     const dryLen = clamp(levelDeficit_kill_m || 0, 0, BOP_DEPTH);
     const wetLen = Math.max(0, BOP_DEPTH - dryLen);
     if (wetLen > 0) {
@@ -2750,7 +2754,8 @@ function activeBopLineSegments(){
         wetLen,
         mw: killMW,
         frictionPsi: friction_psi,
-        surfacePressure: KILL_PRESSURE_psi
+        surfacePressure: KILL_PRESSURE_psi,
+        flow_m3s: qKill_m3s
       });
     }
   }
@@ -2758,40 +2763,48 @@ function activeBopLineSegments(){
   return segments;
 }
 
+function dominantBopLineSegment(){
+  if (!BOP_CLOSED) return null;
+  const segments = activeBopLineSegments();
+  if (!segments.length) return null;
+  if (segments.length === 1) return segments[0];
+  return segments.reduce((best, seg) => {
+    if (!best) return seg;
+    const flow = Math.max(seg.flow_m3s || 0, 0);
+    const bestFlow = Math.max(best.flow_m3s || 0, 0);
+    if (flow > bestFlow + 1e-6) return seg;
+    if (Math.abs(flow - bestFlow) < 1e-6) {
+      const head = (seg.surfacePressure || 0) + (seg.frictionPsi || 0);
+      const bestHead = (best.surfacePressure || 0) + (best.frictionPsi || 0);
+      if (head > bestHead) return seg;
+    }
+    return best;
+  }, null);
+}
+
 // === BOP WELLBORE PRESSURE CONTRIBUTION FROM CHOKE/KILL LINES ===
 // When BOP is closed and lines flow UP, this pressure adds to BHP
 function bopLinePressureContribution(){
   if (!BOP_CLOSED) return 0;
-
-  const segments = activeBopLineSegments();
-  if (!segments.length) return 0;
-
-  return segments.reduce((sum, seg) => {
-    const hydro_psi = PSI_COEF * seg.mw * seg.wetLen;
-    return sum + seg.surfacePressure + seg.frictionPsi + hydro_psi;
-  }, 0);
+  const seg = dominantBopLineSegment();
+  if (!seg) return 0;
+  const hydro_psi = PSI_COEF * seg.mw * seg.wetLen;
+  return seg.surfacePressure + seg.frictionPsi + hydro_psi;
 }
 
 function bopLinePressureAboveBOP(depth){
   if (!BOP_CLOSED) return NaN;
-  const segments = activeBopLineSegments();
-  if (!segments.length) return NaN;
+  const seg = dominantBopLineSegment();
+  if (!seg) return NaN;
 
   const targetDepth = Math.max(0, Math.min(depth, BOP_DEPTH));
-  let total = 0;
-
-  for (const seg of segments) {
-    const wetLen = Math.max(seg.wetLen, 0);
-    if (wetLen <= 0) {
-      total += seg.surfacePressure;
-      continue;
-    }
-    const depthInSegment = Math.min(targetDepth, wetLen);
-    const frictionGrad = seg.frictionPsi / Math.max(wetLen, 1e-6);
-    total += seg.surfacePressure + depthInSegment * (PSI_COEF * seg.mw + frictionGrad);
+  const wetLen = Math.max(seg.wetLen, 0);
+  if (wetLen <= 0) {
+    return seg.surfacePressure;
   }
-
-  return total;
+  const depthInSegment = Math.min(targetDepth, wetLen);
+  const frictionGrad = seg.frictionPsi / Math.max(wetLen, 1e-6);
+  return seg.surfacePressure + depthInSegment * (PSI_COEF * seg.mw + frictionGrad);
 }
 
 function bopLineEcdAtDepth(depth){
@@ -5390,21 +5403,23 @@ function setup(){
   // ========== Bottom banner layout - Two Rows ==========
   bottomPanelPadding = 36;
   bottomPanelSpacing = 40;
-  frameHeight = 280;
-  const rowSpacing = 60; // Vertical spacing between rows
+  frameHeight = 320;
+  bottomPanelRowSpacing = 80; // Vertical spacing between rows (taller banner)
 
   // Row 1: Rheology, Gel, Well Configuration, Enhanced Hydraulics
   frameY = well.y + well.h + 90;
-  const row1Weights = { rheo: 1.1, gel: 0.85, well: 1.2, enh: 1.0 };
+  const row1Weights = { rheo: 1.6, gel: 0.85, well: 1.15, enh: 0.9 };
   const row1PanelCount = Object.keys(row1Weights).length;
   const row1Width = W - 2 * bottomPanelPadding - bottomPanelSpacing * (row1PanelCount - 1);
   const row1WeightSum = Object.values(row1Weights).reduce((a, b) => a + b, 0);
   const row1UnitWidth = row1Width / Math.max(row1WeightSum, 1e-6);
 
-  rheoFrameW = row1UnitWidth * row1Weights.rheo;
-  gelFrameW = row1UnitWidth * row1Weights.gel;
-  configFrameW = row1UnitWidth * row1Weights.well;
-  enhFrameW = row1UnitWidth * row1Weights.enh;
+  const ensureWidth = (candidate, minW) => Math.max(candidate, minW);
+
+  rheoFrameW = ensureWidth(row1UnitWidth * row1Weights.rheo, 640);
+  gelFrameW = ensureWidth(row1UnitWidth * row1Weights.gel, 240);
+  configFrameW = ensureWidth(row1UnitWidth * row1Weights.well, 360);
+  enhFrameW = ensureWidth(row1UnitWidth * row1Weights.enh, 320);
 
   rheoFrameX = bottomPanelPadding;
   gelFrameX = rheoFrameX + rheoFrameW + bottomPanelSpacing;
@@ -5412,7 +5427,7 @@ function setup(){
   enhFrameX = configFrameX + configFrameW + bottomPanelSpacing;
 
   // Row 2: Losses, Kicks, BOP (wide), Diagnostics
-  frameY2 = frameY + frameHeight + rowSpacing;
+  frameY2 = frameY + frameHeight + bottomPanelRowSpacing;
   const row2Weights = { loss: 1.0, kick: 1.0, bop: 1.5, diag: 0.85 };
   const row2PanelCount = Object.keys(row2Weights).length;
   const row2Width = W - 2 * bottomPanelPadding - bottomPanelSpacing * (row2PanelCount - 1);
@@ -6791,7 +6806,6 @@ function drawCMLVisual(){
 }
 
 function drawBottomFrames(){
-  // Row 1: Rheology, Gel, Well Configuration, Enhanced Hydraulics
   const row1Panels = [
     { x: rheoFrameX,   w: rheoFrameW,   y: frameY, label: "Rheology" },
     { x: gelFrameX,    w: gelFrameW,    y: frameY, label: "Gel Configuration" },
@@ -6799,7 +6813,6 @@ function drawBottomFrames(){
     { x: enhFrameX,    w: enhFrameW,    y: frameY, label: "Enhanced Hydraulics" }
   ];
 
-  // Row 2: Losses, Kicks, BOP, Diagnostics
   const row2Panels = [
     { x: lossFrameX, w: lossFrameW, y: frameY2, label: "Losses" },
     { x: kickFrameX, w: kickFrameW, y: frameY2, label: "Kick Control" },
@@ -6807,29 +6820,37 @@ function drawBottomFrames(){
     { x: diagFrameX, w: diagFrameW, y: frameY2, label: "Diagnostics" }
   ];
 
-  stroke(0, 0, 70); strokeWeight(2); noFill();
+  const bannerInset = 24;
+  const bannerX = bottomPanelPadding - bannerInset;
+  const bannerW = W - 2 * (bottomPanelPadding - bannerInset);
+  const bannerY = frameY - 40;
+  const bannerH = frameHeight * 2 + bottomPanelRowSpacing + 90;
 
-  // Draw row 1 frames
-  for (const panel of row1Panels){
-    rect(panel.x, panel.y, panel.w, frameHeight, 10);
-  }
+  push();
+  noStroke();
+  fill(210, 10, 15, 140);
+  rect(bannerX, bannerY + 6, bannerW, bannerH, 28);
+  fill(210, 25, 12, 160);
+  rect(bannerX, bannerY, bannerW, bannerH, 28);
+  pop();
 
-  // Draw row 2 frames
-  for (const panel of row2Panels){
-    rect(panel.x, panel.y, panel.w, frameHeight, 10);
-  }
+  const drawPanel = (panel) => {
+    push();
+    const x = panel.x, y = panel.y, w = panel.w, h = frameHeight;
+    stroke(200, 10, 70, 160);
+    strokeWeight(2);
+    fill(210, 20, 12, 190);
+    rect(x, y, w, h, 14);
+    noStroke();
+    fill(0, 0, 95);
+    textAlign(LEFT, TOP);
+    textSize(13);
+    text(panel.label, x + 16, y + 14);
+    pop();
+  };
 
-  noStroke(); fill(0,0,92); textAlign(CENTER, TOP); textSize(12);
-
-  // Draw row 1 labels
-  for (const panel of row1Panels){
-    text(panel.label, panel.x + panel.w/2, panel.y + frameHeight + 12);
-  }
-
-  // Draw row 2 labels
-  for (const panel of row2Panels){
-    text(panel.label, panel.x + panel.w/2, panel.y + frameHeight + 12);
-  }
+  row1Panels.forEach(drawPanel);
+  row2Panels.forEach(drawPanel);
 
   // Friction status badge anchored to BOP panel (row 2)
   const badgeWidth = (typeof bopPanelW === 'number') ? bopPanelW : 450;
@@ -6919,15 +6940,17 @@ function drawGaugesAndCharts(){
   const chartHeight = 420;
   // Align depth charts to end at the BOP panel right edge
   const chartsTotalWidth = 70 + 260 + 40 + 340; // dx + wP + gap + wE = 710
-  const depthChartStart = (bopFrameX + bopPanelW) - chartsTotalWidth;
+  const gaugeRightEdge = Math.max(cxSPP, cxBo) + R;
+  const desiredChartStart = gaugeRightEdge + 40;
+  const maxChartStart = width - chartsTotalWidth - 40;
+  const depthChartStart = constrain(desiredChartStart, 40, Math.max(40, maxChartStart));
   drawCharts(depthChartStart, chartTop, chartHeight);
 
   const timeChartWidth = 640;
   const timeChartX = rheoFrameX; // Align with rheology frame on the left
   drawTimeChart(timeChartX, chartTop, timeChartWidth, chartHeight);
 
-  const statusX = depthChartStart + 740; // to the right of depth charts
-  drawStatusPanelRight(statusX);
+  drawModeStatusPanel();
 }
 
 // === Loss-zone markers on depth charts ===
@@ -6999,37 +7022,45 @@ function drawLossMarkersOnECD(px, py, w, h, padL, padR, padT, padB, xMinPpg, xMa
   pop();
 }
 
-function drawStatusPanelRight(anchorX){
-  const x = anchorX;
-  const y = well.y + well.h + 10; // Below the well schematic
-  
-  textAlign(LEFT, TOP); 
-  textSize(12); 
-  fill(0,0,95);
-  
-  text(`Annulus MW above BOP: ${nf(average(annAboveGrid),1,2)} ppg`, x, y);
-  
-  let y2 = y + 20;
-  text(`SBP Applied: ${nf(sbpAppliedPsi(),1,0)} psi | Mode: ${SBP_MODE.toUpperCase()}`, x, y2);
-  
-  y2 += 20;
-  if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
-    text(`SBP Anchor: ${ANCHOR_DEPTH} m @ ${nf(ANCHOR_ECD,1,2)} ppg`, x, y2);
+function drawModeStatusPanel(){
+  const blockW = Math.min(Math.max(well.w + 120, 380), 560);
+  const blockX = well.x + (well.w - blockW) / 2;
+  const blockY = well.y + well.h + 16;
+  const lineSpacing = 18;
+
+  push();
+  noStroke();
+  fill(210, 15, 12, 170);
+  rect(blockX, blockY, blockW, 92, 12);
+  fill(0, 0, 95);
+  textAlign(LEFT, TOP);
+  textSize(12);
+
+  const mwAbove = average(annAboveGrid);
+  let cursorY = blockY + 10;
+  text(`Annulus MW above BOP: ${nf(mwAbove, 1, 2)} ppg`, blockX + 14, cursorY);
+
+  cursorY += lineSpacing;
+  text(`SBP: ${nf(sbpAppliedPsi(),1,0)} psi (${SBP_MODE.toUpperCase()})`, blockX + 14, cursorY);
+
+  if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0) {
+    cursorY += lineSpacing;
+    text(`SBP Anchor: ${nf(ANCHOR_DEPTH,1,0)} m @ ${nf(ANCHOR_ECD,1,2)} ppg`, blockX + 14, cursorY);
   }
-  
-  y2 += 15;
+
+  const cmlMode = AUTO_CML_ON ? 'AUTO' : 'MANUAL';
   const topDepth = riserTopDepth();
-  const cmlMode = AUTO_CML_ON ? "AUTO" : "MANUAL";
-  let cmlExtra = "";
-  if (AUTO_CML_ON && CML_AP_DEPTH > 0 && CML_AP_ECD > 0){
-    cmlExtra = ` | Anchor: ${nf(CML_AP_DEPTH,1,0)} m @ ${nf(CML_AP_ECD,1,2)} ppg`;
+  let cmlAnchor = '';
+  if (AUTO_CML_ON && CML_AP_DEPTH > 0 && CML_AP_ECD > 0) {
+    cmlAnchor = ` | Anchor ${nf(CML_AP_DEPTH,1,0)} m @ ${nf(CML_AP_ECD,1,2)} ppg`;
   }
-  text(`CML Mode: ${cmlMode} | Pump @ ${nf(CML_DEPTH,1,0)} m`, x, y2);
-  
-  y2 += 16;
-  text(`Q_out: ${nf(Q_CML,1,0)} gpm | Riser top: ${nf(topDepth,1,1)} m${cmlExtra}`, x, y2);
-  
-  textAlign(CENTER, CENTER);
+
+  cursorY += lineSpacing;
+  text(`CML: ${cmlMode} @ ${nf(CML_DEPTH,1,0)} m${cmlAnchor}`, blockX + 14, cursorY);
+
+  cursorY += lineSpacing;
+  text(`Q_out ${nf(Q_CML,1,0)} gpm | Riser top ${nf(topDepth,1,1)} m`, blockX + 14, cursorY);
+  pop();
 }
 
 // === Panel-aware polyline plotter for time-series (newest at left index 0) ===
