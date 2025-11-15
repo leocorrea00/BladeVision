@@ -3154,9 +3154,19 @@ function sppAtLevel(lvl_m){
   const MWann = annulusAvgPPG();
   const MWds = dsAvgPPG();
   const hydroPsi = PSI_COEF * (MWann * TD_DEPTH - MWds * filledLen);
-  const bopLinePsi = BOP_CLOSED ? bopLinePressureContribution() : 0;
-  const closedBoost = BOP_CLOSED ? (closedWellPressureBoost_psi || 0) : 0;
-  return dsFricPsi + annFricPsi + sbpPsi + hydroPsi + bopLinePsi + closedBoost;
+
+  let bopDeltaPsi = 0;
+  if (BOP_CLOSED) {
+    const basePsi = isFinite(trappedAnnulusBasePressure_psi)
+      ? trappedAnnulusBasePressure_psi
+      : (isFinite(lastOpenAnnulusPressure_psi) ? lastOpenAnnulusPressure_psi : 14.7);
+    const currentBopPsi = pressureAtDepth(BOP_DEPTH);
+    if (isFinite(currentBopPsi)) {
+      bopDeltaPsi = Math.max(0, currentBopPsi - basePsi);
+    }
+  }
+
+  return dsFricPsi + annFricPsi + sbpPsi + hydroPsi + bopDeltaPsi;
 }
 
 function boSppAtLevel(lvl_m){
