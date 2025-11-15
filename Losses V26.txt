@@ -47,6 +47,8 @@ const LOSS_ACTIVATION_HYST_PSI = 25;    // Pressure must exceed Pfrac by this to
 const LOSS_DEACTIVATION_HYST_PSI = 15;  // Pressure must fall below Pfrac by this to STOP
 const LOSS_MAX_ACCEL_GPM_S2 = 100;      // Max acceleration (gpm/s²) - REDUCED to prevent spikes
 const LOSS_GLOBAL_RATE_LIMIT = 200;     // Max TOTAL loss change (gpm/s) - REDUCED for stability
+const LOSS_CMD_LPF_TAU_S = 0.9;         // Low-pass smoothing time for zone commands
+const LOSS_CMD_SLEW_GPM_PER_S = 450;    // Slew limit applied to smoothed commands
 
 // === Level Change Rate Limits ===
 const LEVEL_MAX_RISE_RATE_M_S = 5.0;    // Max level rise (m/s)
@@ -218,12 +220,32 @@ let MPD_ON = false;
 let SBP_MODE = "manual"; // "manual" | "anchor"
 let SBP_MANUAL = 0;
 let CURRENT_SBP = 0;
+const SBP_LEVEL_ENABLE_DEPTH_M = 0.25;
+const SBP_LEVEL_DISABLE_DEPTH_M = 1.0;
+const SBP_LEVEL_RISE_EPS_M = 0.05;
+let sbpLevelArmed = false;
+let lastAnnulusTopDepth_m = 0;
 
 function riserFullEnoughForSBP(){
   const topDepth = (typeof annulusTopDepthGlobal === 'function')
     ? annulusTopDepthGlobal()
     : 0;
-  return topDepth <= 0.5; // ~0 when full, small tolerance for noise
+  if (!Number.isFinite(topDepth)) return false;
+
+  const rising = (typeof lastAnnulusTopDepth_m === 'number')
+    ? (topDepth < lastAnnulusTopDepth_m - SBP_LEVEL_RISE_EPS_M)
+    : false;
+
+  if (rising) {
+    sbpLevelArmed = false;
+  } else if (topDepth <= SBP_LEVEL_ENABLE_DEPTH_M) {
+    sbpLevelArmed = true;
+  } else if (topDepth >= SBP_LEVEL_DISABLE_DEPTH_M) {
+    sbpLevelArmed = false;
+  }
+
+  lastAnnulusTopDepth_m = topDepth;
+  return sbpLevelArmed;
 }
 
 function sbpCanPressurizeAnnulus(){
@@ -4286,6 +4308,28 @@ function slewLimit(prev, target, maxPerSec, dt){
   return Math.abs(d) <= maxStep ? target : prev + Math.sign(d) * maxStep;
 }
 
+function smoothLossCommand(z, target_gpm, dt_s, qAvailable_gpm){
+  if (!Number.isFinite(target_gpm)) target_gpm = 0;
+  if (typeof z._Q_cmd !== 'number') {
+    z._Q_cmd = Math.max(0, z._Q_filt || 0);
+  }
+
+  const tau = Math.max(LOSS_CMD_LPF_TAU_S, 1e-3);
+  const alpha = 1 - Math.exp(-dt_s / tau);
+  let cmd = z._Q_cmd + alpha * (target_gpm - z._Q_cmd);
+
+  const maxStep = LOSS_CMD_SLEW_GPM_PER_S * dt_s;
+  if (cmd > z._Q_cmd + maxStep) {
+    cmd = z._Q_cmd + maxStep;
+  } else if (cmd < z._Q_cmd - maxStep) {
+    cmd = z._Q_cmd - maxStep;
+  }
+
+  cmd = Math.max(0, Math.min(qAvailable_gpm, cmd));
+  z._Q_cmd = cmd;
+  return cmd;
+}
+
 // --- filtered loss-demand (define once) ---
 function refreshLossDemandFiltered(dt_s){
   if (!LOSSES_ON || !Array.isArray(lossZones)) return;
@@ -4335,6 +4379,7 @@ function updateAllLossZones(dt_s) {
       z._Q_filt = (z._Q_filt || 0) * decay;
       z._Q_vel = (z._Q_vel || 0) * decay;
       z.Qloss_gpm = z._Q_filt;
+      z._Q_cmd = (z._Q_cmd || 0) * decay;
     }
     if (typeof window !== 'undefined') {
       window.sumLoss_gpm = 0;
@@ -4348,6 +4393,7 @@ function updateAllLossZones(dt_s) {
     if (typeof z._active === 'undefined') z._active = false;
     if (typeof z._Q_filt === 'undefined') z._Q_filt = 0;
     if (typeof z._Q_vel === 'undefined') z._Q_vel = 0;
+    if (typeof z._Q_cmd === 'undefined') z._Q_cmd = z._Q_filt || 0;
   }
 
   // ========================================================================
@@ -4386,6 +4432,7 @@ function updateAllLossZones(dt_s) {
         z.Qloss_gpm = 0;
         z._Q_filt = 0;
         z._Q_vel = 0;
+        z._Q_cmd = 0;
         continue;
       }
       z._active = true;
@@ -4396,6 +4443,7 @@ function updateAllLossZones(dt_s) {
         z._Q_filt *= decay;
         z._Q_vel *= decay;
         z.Qloss_gpm = z._Q_filt;
+        z._Q_cmd = 0;
         continue;
       }
     }
@@ -4425,11 +4473,12 @@ function updateAllLossZones(dt_s) {
 
     // Target flow limited by capacity and availability
     const Q_target = Math.min(Q_capacity_gpm, qAvailable_gpm);
+    const Q_command = smoothLossCommand(z, Q_target, dt_s, qAvailable_gpm);
 
     // === ACCELERATION LIMITING (prevents spikes) ===
     const Q_current = z._Q_filt || 0;
     const Q_vel_current = z._Q_vel || 0;
-    const Q_vel_desired = (Q_target - Q_current) / Math.max(dt_s, 0.01);
+    const Q_vel_desired = (Q_command - Q_current) / Math.max(dt_s, 0.01);
 
     const max_accel = LOSS_MAX_ACCEL_GPM_S2 * dt_s;
     const Q_vel_new = Math.max(
@@ -4438,7 +4487,7 @@ function updateAllLossZones(dt_s) {
     );
 
     let Q_new = Q_current + Q_vel_new * dt_s;
-    Q_new = Math.max(0, Math.min(Q_new, qAvailable_gpm));
+    Q_new = Math.max(0, Math.min(Q_new, Q_command));
 
     // Track change
     const deltaQ = Math.abs(Q_new - z._Q_filt);
@@ -4494,6 +4543,7 @@ function updateAllLossZones(dt_s) {
     z._Q_filt = (z._Q_filt || 0) * decay;
     z._Q_vel = (z._Q_vel || 0) * decay;
     z.Qloss_gpm = z._Q_filt;
+    z._Q_cmd = (z._Q_cmd || 0) * decay;
   }
 
   const sumLoss_gpm = activeZones.reduce((s, z) => s + (z.Qloss_gpm || 0), 0);
