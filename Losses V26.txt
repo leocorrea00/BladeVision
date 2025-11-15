@@ -18,6 +18,39 @@ const N_BELOW = Math.ceil((TD_DEPTH - BOP_DEPTH) / CELL_M);
 // Advection tuning (simple, frame-based)
 const Q_REF = 500;
 const BASE_M_PER_FRAME = CELL_M * 0.5;
+
+// === Simulation Time Scaling ===
+const TIME_SCALE_PRESETS = {
+  FAST:     { label: 'FAST',     factor: 1.0 },
+  STANDARD: { label: 'STANDARD', factor: 0.55 },
+  SLOW:     { label: 'SLOW',     factor: 0.3 }
+};
+const TIME_SCALE_ORDER = ['FAST', 'STANDARD', 'SLOW'];
+let activeTimeScaleKey = 'FAST';
+let timeScaleButtons = {};
+
+function currentTimeScaleFactor(){
+  const preset = TIME_SCALE_PRESETS[activeTimeScaleKey];
+  return preset ? preset.factor : 1.0;
+}
+
+function setTimeScale(key){
+  if (!TIME_SCALE_PRESETS[key]) return;
+  activeTimeScaleKey = key;
+  updateTimeScaleButtonStyles();
+}
+
+function updateTimeScaleButtonStyles(){
+  TIME_SCALE_ORDER.forEach(key => {
+    const btn = timeScaleButtons[key];
+    if (!btn) return;
+    if (key === activeTimeScaleKey){
+      btn.style('background', '#4ade80').style('color', '#000').style('font-weight', 'bold');
+    } else {
+      btn.style('background', '#333').style('color', '#fff').style('font-weight', 'normal');
+    }
+  });
+}
 // --- Rotation coupling tunables ---
 const ROT_COUPLE = 3.0; // scales how strongly rotation adds to effective shear
 const TAYLOR_BOOST = { Ta_c: 1200, C0: 0.18, Cn: 0.6 }; // stronger Taylor boost
@@ -5612,7 +5645,8 @@ function frameSeconds(){
   const qRef_m3s = (Q_REF/15850.323);
   const vRef = qRef_m3s / Math.max(A_riser(), 1e-12); // m/s in riser
   const dx = BASE_M_PER_FRAME; // m advanced per frame at vRef
-  return dx / Math.max(vRef, 1e-9); // seconds per frame
+  const baseDt = dx / Math.max(vRef, 1e-9);
+  return baseDt * currentTimeScaleFactor(); // seconds per frame (scaled)
 }
 // ========================== CAPTURE / OVERLAYS =========================
 function captureState(){
@@ -5848,6 +5882,20 @@ logDownloadBtn.attribute('disabled', '');
 logDownloadBtn.mousePressed(() => {
   saveDiagnosticLog();
 });
+
+  // ========== Time Scale Controls ==========
+  const tsGroupWidth = TIME_SCALE_ORDER.length * 95;
+  const tsX = width - (tsGroupWidth + 40);
+  mkLabel('Time Scale', tsX, rowY2 - 14);
+  TIME_SCALE_ORDER.forEach((key, idx) => {
+    const preset = TIME_SCALE_PRESETS[key];
+    const btn = createButton(preset.label)
+      .size(90, 22)
+      .position(tsX + idx * 95, rowY2);
+    btn.mousePressed(() => setTimeScale(key));
+    timeScaleButtons[key] = btn;
+  });
+  updateTimeScaleButtonStyles();
 
     // small local helper (scoped to setup) to make 2-decimal number inputs
   function makeTwoDecimalInput(label, x, y, initial = 0) {
@@ -6240,6 +6288,7 @@ plotTimeSeriesLine(tsChoke_pct, 0, 100, null);
 // ---- LOSSES → FO → CHOKE → ADVECT → LEVEL ----
 // ---- PHYSICS UPDATE ORDER (Pattern A) ----
 const dt_frame = frameSeconds();
+window.dt_s = dt_frame;
 
 // 1. Calculate U-tube imbalances FIRST
 computeImbalanceFlows();
