@@ -1337,6 +1337,7 @@ function stepAdvection(){
   if (typeof window.accDSup  !== 'number') window.accDSup  = 0; // <-- was undefined before
   if (typeof window.accAbove !== 'number') window.accAbove = 0;
   if (typeof window.accTF    !== 'number') window.accTF    = 0;
+  if (typeof window.accUpShallow !== 'number') window.accUpShallow = 0;
 
   const dt   = frameSeconds();
   const vref = V_REF();
@@ -1418,65 +1419,101 @@ function stepAdvection(){
   // 4) ANNULUS BELOW THE BOP: DOWN + UP PROCESSING
   // ===============================================
   // (A) DOWNWARD advection (booster/topfill routed toward zone)
-  if (qDown_m3s > FLOW_THRESHOLD) {
+  const downReachDepth_m = Math.max(BOP_DEPTH, window.__qAnnDown_reachDepth_m || BOP_DEPTH);
+  const downCells = Math.max(0, Math.floor((downReachDepth_m - BOP_DEPTH) / CELL_M) + 1);
+  const downMixMW = (typeof window.__qAnnDown_mw_ppg === 'number') ? window.__qAnnDown_mw_ppg : boosterEffluentMW;
+
+  if (qDown_m3s > FLOW_THRESHOLD && downCells > 0) {
     const v_down = qDown_m3s / Math.max(A_below, 1e-12);
     const step_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_down / vref);
 
     accBelow += step_m;
+    const limit = Math.max(1, Math.min(annBelowGrid.length, downCells));
     while (accBelow >= CELL_M){
-      // Shift DOWN from BOP to deeper cells
-      for (let i = annBelowGrid.length - 1; i > 0; i--) {
+      // Shift DOWN only through the portion that actually sees downflow
+      for (let i = limit - 1; i > 0; i--) {
         annBelowGrid[i] = annBelowGrid[i - 1];
       }
-      // New fluid from booster exits at BOP and flows DOWN to losses
-      // Note: qDown_m3s = takeBO (only booster goes down from BOP)
-      // Topfill is injected at surface level, not at BOP
-      annBelowGrid[0] = boosterEffluentMW;
+      annBelowGrid[0] = downMixMW;
 
-      // Advect formation fluids DOWN in parallel with mud
-      for (let i = gasPhaseFrom_below.length - 1; i > 0; i--) {
+      for (let i = limit - 1; i > 0; i--) {
         gasPhaseFrom_below[i] = gasPhaseFrom_below[i - 1];
         oilPhaseFrom_below[i] = oilPhaseFrom_below[i - 1];
         waterPhaseFrom_below[i] = waterPhaseFrom_below[i - 1];
       }
-      // No formation fluid enters from booster (clean mud)
       gasPhaseFrom_below[0] = 0;
       oilPhaseFrom_below[0] = 0;
       waterPhaseFrom_below[0] = 0;
 
       accBelow -= CELL_M;
     }
+  } else {
+    accBelow = 0;
   }
 
-  // (B) UPWARD advection (leftover DS above zone)
-  if (qUp_m3s > FLOW_THRESHOLD) {
-    const v_up = qUp_m3s / Math.max(A_below, 1e-12);
-    const upStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_up / vref);
+  const qBitFlux_m3s = Math.max(0, window.__dsFlux_m3s || (((Q_DS || 0) / 15850.323) + (typeof current_influx_m3s === 'number' ? current_influx_m3s : 0)));
+  const dsStopDepth_m = Math.max(BOP_DEPTH, window.__dsUpflowStopDepth_m || BOP_DEPTH);
+  const deepStartIdx = Math.min(
+    Math.max(0, Math.floor((dsStopDepth_m - BOP_DEPTH) / CELL_M)),
+    annBelowGrid.length - 1
+  );
 
-    // We shift UP the portion *from the zone upwards*
+  if (qBitFlux_m3s > FLOW_THRESHOLD) {
+    const v_up_bit = qBitFlux_m3s / Math.max(A_below, 1e-12);
+    const upStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_up_bit / vref);
+
     accDSup += upStep_m;
-    const cellsFlowing = annBelowGrid.length; // upward through whole below section toward BOP
-    while (accDSup >= CELL_M && cellsFlowing > 0){
-      // Shift UP from bottom to top
-      for (let i = 0; i < annBelowGrid.length - 1; i++) {
+    while (accDSup >= CELL_M){
+      for (let i = deepStartIdx; i < annBelowGrid.length - 1; i++) {
         annBelowGrid[i] = annBelowGrid[i + 1];
       }
-      // New fluid from bit enters at bottom
       annBelowGrid[annBelowGrid.length - 1] = dsEffluentMW;
 
-      // Advect formation fluids UP in parallel with mud
-      for (let i = 0; i < gasPhaseFrom_below.length - 1; i++) {
+      for (let i = deepStartIdx; i < gasPhaseFrom_below.length - 1; i++) {
         gasPhaseFrom_below[i] = gasPhaseFrom_below[i + 1];
         oilPhaseFrom_below[i] = oilPhaseFrom_below[i + 1];
         waterPhaseFrom_below[i] = waterPhaseFrom_below[i + 1];
       }
-      // No formation fluid enters from drillstring at bottom (clean mud)
       gasPhaseFrom_below[gasPhaseFrom_below.length - 1] = 0;
       oilPhaseFrom_below[oilPhaseFrom_below.length - 1] = 0;
       waterPhaseFrom_below[waterPhaseFrom_below.length - 1] = 0;
 
       accDSup -= CELL_M;
     }
+  } else {
+    accDSup = 0;
+  }
+
+  const qUpResidual_m3s = (deepStartIdx > 0) ? Math.max(0, qUp_m3s) : 0;
+  if (qUpResidual_m3s > FLOW_THRESHOLD && deepStartIdx > 0) {
+    const v_up_resid = qUpResidual_m3s / Math.max(A_below, 1e-12);
+    const upStepRes = TIME_ACCEL * BASE_M_PER_FRAME * (v_up_resid / vref);
+
+    window.accUpShallow += upStepRes;
+    while (window.accUpShallow >= CELL_M) {
+      for (let i = 0; i < deepStartIdx - 1; i++) {
+        annBelowGrid[i] = annBelowGrid[i + 1];
+      }
+      const insertIdx = deepStartIdx - 1;
+      if (insertIdx >= 0) {
+        annBelowGrid[insertIdx] = annBelowGrid[deepStartIdx];
+      }
+
+      for (let i = 0; i < deepStartIdx - 1; i++) {
+        gasPhaseFrom_below[i] = gasPhaseFrom_below[i + 1];
+        oilPhaseFrom_below[i] = oilPhaseFrom_below[i + 1];
+        waterPhaseFrom_below[i] = waterPhaseFrom_below[i + 1];
+      }
+      if (insertIdx >= 0) {
+        gasPhaseFrom_below[insertIdx] = gasPhaseFrom_below[deepStartIdx];
+        oilPhaseFrom_below[insertIdx] = oilPhaseFrom_below[deepStartIdx];
+        waterPhaseFrom_below[insertIdx] = waterPhaseFrom_below[deepStartIdx];
+      }
+
+      window.accUpShallow -= CELL_M;
+    }
+  } else {
+    window.accUpShallow = 0;
   }
   // If qUp_m3s ~ 0, leave annBelowGrid as-is: column below remains static except where DOWN flow was applied.
 
@@ -3011,6 +3048,26 @@ function routeAnnulusFlowsWithLosses(dt_s){
   window.__qBOP_boosterIntoRiser_m3s = 0;
   window.__qBOP_chokeDownIntoRiser_m3s = 0;
   window.__qBOP_killDownIntoRiser_m3s = 0;
+  window.__qAnnDown_reachDepth_m = BOP_DEPTH;
+  window.__qAnnDown_mw_ppg = null;
+  window.__qAnnDown_breakdown = { booster: 0, choke: 0, kill: 0, topfill: 0 };
+  window.__dsUpflowStopDepth_m = BOP_DEPTH;
+  window.__dsFlux_m3s = Math.max(0, ((Q_DS || 0) * M3_PER_GPM) + qInflux);
+  window.__lossAllocation = {
+    fromDS: 0,
+    fromBooster: 0,
+    fromChoke: 0,
+    fromKill: 0,
+    fromTopFill: 0
+  };
+
+  if (Array.isArray(lossZones)) {
+    for (const z of lossZones) {
+      if (!z) continue;
+      z._downSupply_m3s = 0;
+      z._dsSupply_m3s = 0;
+    }
+  }
 
   const chokeUpActive = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
   const killUpActive = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
@@ -3086,10 +3143,6 @@ function routeAnnulusFlowsWithLosses(dt_s){
     window.__Q_CHOKE_CALCULATED_m3s = qChoke_actual;
     window.__Q_KILL_CALCULATED_m3s = qKill_actual;
 
-    // All upflow while BOP is closed originates from the annulus below
-    publishBopNodeContrib(qToSurface_belowBOP, 0, 0, 0);
-    window.__qBOP_annulusToRiser_m3s = 0;
-
     // Check if requested pressures can be achieved (for user feedback)
     if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP' && qChoke_actual > 1e-6) {
       // Calculate actual pressure at surface with calculated flow
@@ -3117,6 +3170,9 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
     // Flow reaching surface through choke/kill lines
     const qToSurface_belowBOP = qChoke_actual + qKill_actual;
+    // All upflow while BOP is closed originates from the annulus below
+    publishBopNodeContrib(qToSurface_belowBOP, 0, 0, 0);
+    window.__qBOP_annulusToRiser_m3s = 0;
     window.__Q_TOTAL_UP_m3s = qToSurface_belowBOP;
 
     // === CLOSED WELL PHYSICS ===
@@ -3246,6 +3302,88 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const Choke_left = Math.max(0, qChoke_down - takeChoke);
   const Kill_left = Math.max(0, qKill_down - takeKill);
 
+  const qDownTotal = takeBO + takeChoke + takeKill + takeTF;
+
+  const boosterEffluentMW = (boosterGrid && boosterGrid.length)
+    ? (boosterGrid[boosterGrid.length - 1] || MW_BO)
+    : MW_BO;
+  const chokeEffluentMW = (chokeGrid && chokeGrid.length)
+    ? (chokeGrid[chokeGrid.length - 1] || MW_CHOKE)
+    : MW_CHOKE;
+  const killEffluentMW = (killGrid && killGrid.length)
+    ? (killGrid[killGrid.length - 1] || MW_KILL)
+    : MW_KILL;
+  const riserAtBopMW = (annAboveGrid && annAboveGrid.length)
+    ? (annAboveGrid[annAboveGrid.length - 1] || MW_DS)
+    : MW_DS;
+
+  let downMixMW_ppg = null;
+  if (qDownTotal > 1e-9) {
+    const weighted = (takeBO * boosterEffluentMW)
+      + (takeChoke * chokeEffluentMW)
+      + (takeKill * killEffluentMW)
+      + (takeTF * riserAtBopMW);
+    downMixMW_ppg = weighted / qDownTotal;
+  }
+
+  window.__qAnnDown_mw_ppg = (downMixMW_ppg != null && isFinite(downMixMW_ppg)) ? downMixMW_ppg : null;
+  window.__qAnnDown_breakdown = { booster: takeBO, choke: takeChoke, kill: takeKill, topfill: takeTF };
+  window.__lossAllocation = {
+    fromDS: takeDS,
+    fromBooster: takeBO,
+    fromChoke: takeChoke,
+    fromKill: takeKill,
+    fromTopFill: takeTF
+  };
+
+  const zonesBelow = Array.isArray(lossZones)
+    ? lossZones.filter(z => z && z.enabled && z.depth_m > BOP_DEPTH && (z.Qloss_gpm || 0) > 0)
+    : [];
+
+  zonesBelow.sort((a, b) => a.depth_m - b.depth_m);
+  let downReachDepth_m = BOP_DEPTH;
+  let downRemaining = qDownTotal;
+  for (const z of zonesBelow) {
+    const zoneLoss_m3s = Math.max(0, (z.Qloss_gpm || 0) * M3_PER_GPM);
+    if (zoneLoss_m3s <= 0 || downRemaining <= 1e-9) {
+      z._downSupply_m3s = 0;
+      continue;
+    }
+    const share = Math.min(downRemaining, zoneLoss_m3s);
+    z._downSupply_m3s = share;
+    downRemaining -= share;
+    if (share > 1e-9) {
+      downReachDepth_m = Math.max(downReachDepth_m, z.depth_m);
+    }
+  }
+
+  const qDS_m3s = (Q_DS || 0) * M3_PER_GPM;
+  const qBitFlux_m3s = Math.max(0, qDS_m3s + qInflux);
+  let dsStopDepth_m = BOP_DEPTH;
+  let dsRemaining = takeDS;
+  const zonesBelowDesc = [...zonesBelow].sort((a, b) => b.depth_m - a.depth_m);
+  for (const z of zonesBelowDesc) {
+    const zoneLoss_m3s = Math.max(0, (z.Qloss_gpm || 0) * M3_PER_GPM);
+    const unmet = Math.max(0, zoneLoss_m3s - (z._downSupply_m3s || 0));
+    if (unmet <= 0 || dsRemaining <= 1e-9) {
+      z._dsSupply_m3s = z._dsSupply_m3s || 0;
+      continue;
+    }
+    const share = Math.min(dsRemaining, unmet);
+    z._dsSupply_m3s = share;
+    dsRemaining -= share;
+  }
+  if (takeDS >= qDS_m3s - 1e-9) {
+    const dsZones = zonesBelow.filter(z => (z._dsSupply_m3s || 0) > 1e-9);
+    if (dsZones.length) {
+      dsStopDepth_m = Math.min(...dsZones.map(z => z.depth_m));
+    }
+  }
+
+  window.__qAnnDown_reachDepth_m = downReachDepth_m;
+  window.__dsUpflowStopDepth_m = dsStopDepth_m;
+  window.__dsFlux_m3s = qBitFlux_m3s;
+
   // ✅ KICK INFLUX: Add formation fluid influx to upward flow
   // Kicks enter the wellbore and flow upward, contributing to surface returns
 
@@ -3364,7 +3502,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const qAnnAbove = qAnnUp;  // DS_left + TF_left + BO_left + qInflux (when riser full or no losses)
 
   // Downward flow component (for advection direction tracking)
-  const qAnnDown = takeBO; // booster flow going DOWN to losses (for advection)
+  const qAnnDown = qDownTotal; // total downward supply feeding losses
 
   // Publish clean section "signals" (magnitudes, signless)
   window.__qToLoss_m3s   = qToLoss;
@@ -3751,7 +3889,14 @@ function zoneLoss_gpm(z, dt_s = 0.1){
   // ============================================================================
   // NEW PHYSICS: Use iterative equilibrium solver
   // ============================================================================
-  const qIn_m3s = ((Q_DS || 0) + (Q_BO || 0) - (Q_CML || 0)) / 15850.323;
+  const qTopFill_m3s = (TOPFILL_ON ? (Q_TOPFILL || 0) : 0) / 15850.323;
+  const qChokeDown_m3s = (CHOKE_LINE_OPEN && CHOKE_DIRECTION === "DOWN") ? ((Q_CHOKE || 0) / 15850.323) : 0;
+  const qKillDown_m3s = (KILL_LINE_OPEN && KILL_DIRECTION === "DOWN") ? ((Q_KILL || 0) / 15850.323) : 0;
+  const qInflux_m3s = Math.max(0, (typeof current_influx_m3s === 'number') ? current_influx_m3s : 0);
+  const qIn_m3s = Math.max(0,
+    ((Q_DS || 0) + (Q_BO || 0) - (Q_CML || 0)) / 15850.323
+    + qTopFill_m3s + qChokeDown_m3s + qKillDown_m3s + qInflux_m3s
+  );
   const qLoss_equilibrium_m3s = solveZoneLossEquilibrium(z, qIn_m3s, dt_s);
   const Q_target_gpm = qLoss_equilibrium_m3s * 15850.323;
 
@@ -6246,7 +6391,10 @@ function drawFractureSymbols(){
     if (!z || !z.enabled || !(z.depth_m > 0)) continue;
     
     const y = mapDepthToY(z.depth_m);
-    const isActive = (z.Qloss_gpm || 0) > 10; // Active if losing >10 gpm
+    const zoneFracPsi = z.fracPressure_psi || 0;
+    const bhpAtZone = pressureAtDepth(z.depth_m);
+    const overbalancePsi = bhpAtZone - zoneFracPsi;
+    const isActive = overbalancePsi > 1; // Treat as active whenever BHP exceeds fracture pressure
     
     push();
     translate(xPos, y);
