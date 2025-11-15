@@ -3661,7 +3661,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
     const weighted = (takeBO * boosterEffluentMW)
       + (takeChoke * chokeEffluentMW)
       + (takeKill * killEffluentMW)
-      + (takeTF * riserAtBopMW);
+      + (takeTF * MW_TOPFILL);
     downMixMW_ppg = weighted / qDownTotal;
   }
 
@@ -3736,9 +3736,13 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // If pressure doesn't allow downward flow (BHP < Pfrac at loss zone),
   // the zone deactivates (dP < 0 triggers hysteresis), qToLoss → 0, takeBO/takeChoke/takeKill → 0,
   // and leftovers route upward via this logic. This increases riser hydrostatic until new equilibrium.
-  const boosterUpToSurface = (riserFull || takeBO === 0 ? BO_left : 0);
-  const chokeDownUpToSurface = (riserFull || takeChoke === 0 ? Choke_left : 0);
-  const killDownUpToSurface = (riserFull || takeKill === 0 ? Kill_left : 0);
+  // Any portion of the down-going supply that wasn't consumed by losses
+  // is what actually backs up into the riser.  Treat those leftovers as
+  // true upward contributors so the riser fills with the fluid that was
+  // pumped, not with whatever mud happened to be there previously.
+  const boosterUpToSurface = BO_left;
+  const chokeDownUpToSurface = Choke_left;
+  const killDownUpToSurface = Kill_left;
 
   let qAnnUp = DS_left + TF_left + boosterUpToSurface +
                chokeDownUpToSurface + killDownUpToSurface + qInflux;
