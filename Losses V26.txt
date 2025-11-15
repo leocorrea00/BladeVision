@@ -4998,6 +4998,125 @@ function slewLimit(prev, target, maxPerSec, dt){
   return prev + Math.sign(d) * maxStep;
 }
 
+// --- BOP-closed line volume buffers ---------------------------------------
+function pipeArea_m2(diameter_m){
+  const dia = Math.max(Number(diameter_m) || 0, 0);
+  if (dia <= 0) return 0;
+  return Math.PI * dia * dia / 4;
+}
+
+function closedBopLineBuffers(){
+  if (!BOP_CLOSED) return [];
+  const buffers = [];
+  const addBuffer = (name, isOpen, diameter_m, readFn, writeFn) => {
+    if (!isOpen) return;
+    const area = pipeArea_m2(diameter_m);
+    if (area <= 0) return;
+    const current = clamp(Number(readFn()) || 0, 0, BOP_DEPTH);
+    buffers.push({
+      name,
+      area,
+      deficit: current,
+      setDeficit: (val) => writeFn(clamp(val, 0, BOP_DEPTH))
+    });
+  };
+
+  addBuffer('choke', CHOKE_LINE_OPEN, CHOKE_LINE_ID_m,
+    () => levelDeficit_choke_m,
+    (v) => { levelDeficit_choke_m = v; });
+
+  addBuffer('kill', KILL_LINE_OPEN, KILL_LINE_ID_m,
+    () => levelDeficit_kill_m,
+    (v) => { levelDeficit_kill_m = v; });
+
+  return buffers;
+}
+
+function bufferWetLength(buf){
+  return Math.max(0, BOP_DEPTH - (Number(buf.deficit) || 0));
+}
+
+function drainClosedLineBuffers(buffers, volume_m3){
+  let remaining = Math.max(0, volume_m3);
+  let removed = 0;
+  const EPS = 1e-12;
+  while (remaining > EPS){
+    const active = buffers.filter(buf => bufferWetLength(buf) > EPS);
+    if (!active.length) break;
+    const totalArea = active.reduce((sum, buf) => sum + buf.area, 0);
+    if (totalArea <= EPS) break;
+    const maxDrop = Math.min(...active.map(bufferWetLength));
+    const volToMaxDrop = totalArea * maxDrop;
+    if (remaining >= volToMaxDrop - EPS){
+      for (const buf of active){
+        buf.deficit = Math.min(BOP_DEPTH, (buf.deficit || 0) + maxDrop);
+      }
+      removed += volToMaxDrop;
+      remaining -= volToMaxDrop;
+    } else {
+      const drop = remaining / totalArea;
+      for (const buf of active){
+        buf.deficit = Math.min(BOP_DEPTH, (buf.deficit || 0) + drop);
+      }
+      removed += remaining;
+      remaining = 0;
+    }
+  }
+  return removed;
+}
+
+function fillClosedLineBuffers(buffers, volume_m3){
+  let remaining = Math.max(0, volume_m3);
+  let added = 0;
+  const EPS = 1e-12;
+  while (remaining > EPS){
+    const active = buffers.filter(buf => (buf.deficit || 0) > EPS);
+    if (!active.length) break;
+    const totalArea = active.reduce((sum, buf) => sum + buf.area, 0);
+    if (totalArea <= EPS) break;
+    const minDeficit = Math.min(...active.map(buf => buf.deficit || 0));
+    const volToFull = totalArea * minDeficit;
+    if (remaining >= volToFull - EPS){
+      for (const buf of active){
+        buf.deficit = Math.max(0, (buf.deficit || 0) - minDeficit);
+      }
+      added += volToFull;
+      remaining -= volToFull;
+    } else {
+      const rise = remaining / totalArea;
+      for (const buf of active){
+        buf.deficit = Math.max(0, (buf.deficit || 0) - rise);
+      }
+      added += remaining;
+      remaining = 0;
+    }
+  }
+  return added;
+}
+
+function applyVolumeChangeToClosedLineBuffers(deltaVolume_m3){
+  if (!BOP_CLOSED || Math.abs(deltaVolume_m3) < 1e-12) return deltaVolume_m3;
+  const buffers = closedBopLineBuffers();
+  if (!buffers.length) return deltaVolume_m3;
+
+  let remaining = Math.abs(deltaVolume_m3);
+  if (deltaVolume_m3 < 0){
+    const drained = drainClosedLineBuffers(buffers, remaining);
+    remaining = Math.max(0, remaining - drained);
+    deltaVolume_m3 = -remaining;
+  } else if (deltaVolume_m3 > 0){
+    const filled = fillClosedLineBuffers(buffers, remaining);
+    remaining = Math.max(0, remaining - filled);
+    deltaVolume_m3 = remaining;
+  }
+
+  for (const buf of buffers){
+    buf.setDeficit(buf.deficit || 0);
+  }
+
+  return deltaVolume_m3;
+}
+
 
 // ---- DROP-IN: replace your current updateRiserLevelWithLosses entirely ----
 
@@ -5090,6 +5209,7 @@ function updateRiserLevelWithLosses(dt_s) {
     const qNet = qIn_total - qOut_total;
 
     let dV = qNet * dt_s;
+    dV = applyVolumeChangeToClosedLineBuffers(dV);
     let newTop = topDepthNow;
 
     // Move level up/down
@@ -5147,6 +5267,7 @@ function updateRiserLevelWithLosses(dt_s) {
   const qNet_total_m3s = qIn_total_m3s - qOut_total_m3s - qDeficit_m3s;
 
   let dV_total = qNet_total_m3s * dt_s;
+  dV_total = applyVolumeChangeToClosedLineBuffers(dV_total);
   let newTop = topDepthNow;
 
   let guard = 0;
