@@ -2737,7 +2737,11 @@ function pressureAtDepth(d, opts = {}){
   const sbpApplies = !(BOP_CLOSED && belowBOP);
   const P_sbp = sbpApplies ? sbpPsi : 0;
 
-  const P_bop_lines = (includeBopLines && belowBOP) ? bopLinePressureContribution() : 0;
+  const bopLineSegment = (includeBopLines && belowBOP) ? dominantBopLineSegment() : null;
+  const bopLineActive = !!bopLineSegment;
+  const P_bop_lines = bopLineActive
+    ? (bopLineSegment.surfacePressure + bopLineSegment.frictionPsi + PSI_COEF * bopLineSegment.mw * bopLineSegment.wetLen)
+    : 0;
   const closedApplies = includeClosed && BOP_CLOSED && belowBOP;
   const P_closed_well = closedApplies ? (closedWellPressureBoost_psi || 0) : 0;
 
@@ -2750,7 +2754,8 @@ function pressureAtDepth(d, opts = {}){
   // Above fluid level
   if (d <= fluidTop) {
     if (bopIsolated) {
-      return basePsi + P_bop_lines + P_closed_well;
+      const boundaryPsi = bopLineActive ? P_bop_lines : basePsi;
+      return boundaryPsi + P_closed_well;
     }
     return 14.7;
   }
@@ -2765,8 +2770,10 @@ function pressureAtDepth(d, opts = {}){
     P_fric = Math.max(0, P_fric - refFric);
   }
 
-  let total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
-  if (bopIsolated) {
+  let total = P_hydro + P_fric + P_sbp + P_closed_well;
+  if (bopLineActive) {
+    total += P_bop_lines;
+  } else if (bopIsolated) {
     total += basePsi;
   }
   return total;
