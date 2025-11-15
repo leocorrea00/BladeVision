@@ -258,7 +258,9 @@ let boosterOutQ = []; // Booster bottom → BOP → feeds annAbove
 // --- bottom frames (for Rheology/Gels/Geometry) ---
 let frameY, frameHeight, frameY2;
 let bottomPanelW, bopPanelW, bottomPanelPadding, bottomPanelSpacing;
-let rheoFrameX, configFrameX, lossFrameX, kickFrameX, bopFrameX;
+let rheoFrameX, rheoFrameW, gelFrameX, gelFrameW, configFrameX, configFrameW;
+let enhFrameX, enhFrameW, lossFrameX, lossFrameW, kickFrameX, kickFrameW;
+let bopFrameX, bopFrameW, diagFrameX, diagFrameW;
 let cmlQSlider, cmlQInput, cmlDepthInput, cmlBtn, cmlAutoBtn;
 let tsFrame = 0;
 // Booster SPP smoothing (top-level)
@@ -509,6 +511,20 @@ function lossesUIPosition() {
 // Helper to place Kicks UI inside the kick frame
 function kicksUIPosition() {
   const x = (typeof kickFrameX === 'number') ? kickFrameX + 18 : 460;
+  const yBase = (typeof frameY2 === 'number') ? frameY2 + 40 : (height - 200);
+  const y = Math.min(height - 200, Math.max(20, yBase));
+  return { x, y };
+}
+
+function enhancedHydraulicsUIPosition() {
+  const x = (typeof enhFrameX === 'number') ? enhFrameX + 18 : (width - 420);
+  const yBase = (typeof frameY === 'number') ? frameY + 40 : (height - 360);
+  const y = Math.min(height - 240, Math.max(20, yBase));
+  return { x, y };
+}
+
+function diagnosticsUIPosition() {
+  const x = (typeof diagFrameX === 'number') ? diagFrameX + 18 : (width - 320);
   const yBase = (typeof frameY2 === 'number') ? frameY2 + 40 : (height - 200);
   const y = Math.min(height - 200, Math.max(20, yBase));
   return { x, y };
@@ -5377,30 +5393,44 @@ function setup(){
   frameHeight = 280;
   const rowSpacing = 60; // Vertical spacing between rows
 
-  // Row 1: Rheology, Well Configuration
+  // Row 1: Rheology, Gel, Well Configuration, Enhanced Hydraulics
   frameY = well.y + well.h + 90;
-  const row1PanelCount = 2;
-  const row1Gaps = row1PanelCount - 1;
-  const row1Width = W - 2 * bottomPanelPadding - row1Gaps * bottomPanelSpacing;
-  const row1UnitWidth = row1Width / row1PanelCount;
+  const row1Weights = { rheo: 1.1, gel: 0.85, well: 1.2, enh: 1.0 };
+  const row1PanelCount = Object.keys(row1Weights).length;
+  const row1Width = W - 2 * bottomPanelPadding - bottomPanelSpacing * (row1PanelCount - 1);
+  const row1WeightSum = Object.values(row1Weights).reduce((a, b) => a + b, 0);
+  const row1UnitWidth = row1Width / Math.max(row1WeightSum, 1e-6);
 
-  rheoFrameX   = bottomPanelPadding;
-  configFrameX = rheoFrameX + row1UnitWidth + bottomPanelSpacing;
+  rheoFrameW = row1UnitWidth * row1Weights.rheo;
+  gelFrameW = row1UnitWidth * row1Weights.gel;
+  configFrameW = row1UnitWidth * row1Weights.well;
+  enhFrameW = row1UnitWidth * row1Weights.enh;
 
-  // Row 2: Losses, Kicks, BOP (with BOP wider)
+  rheoFrameX = bottomPanelPadding;
+  gelFrameX = rheoFrameX + rheoFrameW + bottomPanelSpacing;
+  configFrameX = gelFrameX + gelFrameW + bottomPanelSpacing;
+  enhFrameX = configFrameX + configFrameW + bottomPanelSpacing;
+
+  // Row 2: Losses, Kicks, BOP (wide), Diagnostics
   frameY2 = frameY + frameHeight + rowSpacing;
-  const row2PanelCount = 3;
-  const row2Gaps = row2PanelCount - 1;
-  const row2Width = W - 2 * bottomPanelPadding - row2Gaps * bottomPanelSpacing;
-  const bopWeight = 1.8;
-  const row2UnitWidth = row2Width / ((row2PanelCount - 1) + bopWeight);
+  const row2Weights = { loss: 1.0, kick: 1.0, bop: 1.5, diag: 0.85 };
+  const row2PanelCount = Object.keys(row2Weights).length;
+  const row2Width = W - 2 * bottomPanelPadding - bottomPanelSpacing * (row2PanelCount - 1);
+  const row2WeightSum = Object.values(row2Weights).reduce((a, b) => a + b, 0);
+  const row2UnitWidth = row2Width / Math.max(row2WeightSum, 1e-6);
 
-  bottomPanelW = row1UnitWidth; // For row 1 panels
-  bopPanelW = row2UnitWidth * bopWeight;
+  lossFrameW = row2UnitWidth * row2Weights.loss;
+  kickFrameW = row2UnitWidth * row2Weights.kick;
+  bopFrameW = row2UnitWidth * row2Weights.bop;
+  diagFrameW = row2UnitWidth * row2Weights.diag;
 
   lossFrameX = bottomPanelPadding;
-  kickFrameX = lossFrameX + row2UnitWidth + bottomPanelSpacing;
-  bopFrameX  = kickFrameX + row2UnitWidth + bottomPanelSpacing;
+  kickFrameX = lossFrameX + lossFrameW + bottomPanelSpacing;
+  bopFrameX = kickFrameX + kickFrameW + bottomPanelSpacing;
+  diagFrameX = bopFrameX + bopFrameW + bottomPanelSpacing;
+
+  bottomPanelW = Math.min(lossFrameW, kickFrameW); // Reference width for row 2 cards
+  bopPanelW = bopFrameW;
 
   // Convert inches to meters
   riser_ID_m    = riser_ID_in    * 0.0254;
@@ -5577,9 +5607,11 @@ logDownloadBtn.mousePressed(() => {
   }
   // ========== Build bottom panels ==========
   buildRheologyUI(rheoFrameX + 16, frameY + 40);
-  buildGelAndGeometryUI(configFrameX + 16, frameY + 40); // Well Configuration panel
+  buildGelUI(gelFrameX + 16, frameY + 40);
+  buildWellConfigurationUI(configFrameX + 16, frameY + 40);
+  buildEnhancedHydraulicsPanel();
   doRheologyFit();
-    publishRheoToGlobals(); // 
+    publishRheoToGlobals(); //
   
   // Value bindings
   dsMWSlider.input(() => setDSMW(dsMWSlider.value()));
@@ -5625,23 +5657,22 @@ logDownloadBtn.mousePressed(() => {
   });
   
   buildLossesUI();
-buildDiagnosticsUI();
-buildKicksUI();
-buildBOPWellControlUI();
+  buildKicksUI();
+  buildBOPWellControlUI();
+  buildDiagnosticsUI();
 
   // Initialize formation fluid cells
   initializeFormationFluidCells();
 }
 
-function buildGelAndGeometryUI(x, y){
-  // Gel section (top)
+function buildGelUI(x, y){
   mkLabel("Gel τ (Pa)", x, y-18);
   const gelIn = createInput(String(gel_Pa), 'number').position(x, y).size(70);
   gelIn.input(() => { gel_Pa = num(gelIn.value()); });
-  
+
   const gelBtn = createButton(use_gel ? 'Gel: ON' : 'Gel: OFF').position(x+80, y).size(70,22);
   gelBtn.mousePressed(() => { use_gel = !use_gel; gelBtn.html(use_gel ? 'Gel: ON' : 'Gel: OFF'); });
-  
+
   let y2 = y + 40;
   mkLabel("G10s", x, y2-16);
   rheoPanel.G10s = createInput(String(rheoDefaults.G10s),'number').position(x, y2).size(65);
@@ -5649,44 +5680,46 @@ function buildGelAndGeometryUI(x, y){
   rheoPanel.G10m = createInput(String(rheoDefaults.G10m),'number').position(x+75, y2).size(65);
   mkLabel("G30m", x+150, y2-16);
   rheoPanel.G30m = createInput(String(rheoDefaults.G30m),'number').position(x+150, y2).size(65);
-  
-  // Geometry section (below gel)
-  y2 -= 40;
-  mkLabel("Riser ID", x +360, y2-16);
-  const risIn = createInput(String(riser_ID_in),'number').position(x+360, y2).size(70);
+}
+
+function buildWellConfigurationUI(x, y){
+  const colGap = 160;
+  const col2X = x + colGap;
+  let yRow = y;
+
+  mkLabel("Riser ID (in)", x, yRow-16);
+  const risIn = createInput(String(riser_ID_in),'number').position(x, yRow).size(70);
   risIn.input(() => { riser_ID_in = num(risIn.value()); riser_ID_m = riser_ID_in * 0.0254; });
-  
-  mkLabel("DS OD", x+500, y2-16);
-  const dsoIn = createInput(String(ds_OD_in),'number').position(x+500, y2).size(70);
+
+  mkLabel("DS OD (in)", col2X, yRow-16);
+  const dsoIn = createInput(String(ds_OD_in),'number').position(col2X, yRow).size(70);
   dsoIn.input(() => { ds_OD_in = num(dsoIn.value()); ds_OD_m = ds_OD_in * 0.0254; });
-  
-  y2 += 40;
-  mkLabel("Casing ID", x+360, y2-16);
-  const casIn = createInput(String(casing_ID_in),'number').position(x+360, y2).size(70);
+
+  yRow += 40;
+  mkLabel("Casing ID (in)", x, yRow-16);
+  const casIn = createInput(String(casing_ID_in),'number').position(x, yRow).size(70);
   casIn.input(() => { casing_ID_in = num(casIn.value()); casing_ID_m = casing_ID_in * 0.0254; });
-  
-  mkLabel("OH OD", x+500, y2-16);
-  const ohIn = createInput(String(openhole_OD_in),'number').position(x+500, y2).size(70);
+
+  mkLabel("OH OD (in)", col2X, yRow-16);
+  const ohIn = createInput(String(openhole_OD_in),'number').position(col2X, yRow).size(70);
   ohIn.input(() => { openhole_OD_in = num(ohIn.value()); openhole_ODm = openhole_OD_in * 0.0254; });
-  
-  y2 += 40;
-  mkLabel("DS ID", x+360, y2-16);
-  const dsiIn = createInput(String(ds_ID_in),'number').position(x+360, y2).size(70);
+
+  yRow += 40;
+  mkLabel("DS ID (in)", x, yRow-16);
+  const dsiIn = createInput(String(ds_ID_in),'number').position(x, yRow).size(70);
   dsiIn.input(() => { ds_ID_in = num(dsiIn.value()); ds_ID_m = ds_ID_in * 0.0254; });
 
-  // === BOP WELL CONTROL LINES (Booster, Choke, Kill) ===
-  y2 += 40;
-  mkLabel("Booster ID (in)", x+360, y2-16);
-  const boosterIdIn = createInput(String(booster_ID_in),'number').position(x+360, y2).size(70);
+  mkLabel("Booster ID (in)", col2X, yRow-16);
+  const boosterIdIn = createInput(String(booster_ID_in),'number').position(col2X, yRow).size(70);
   boosterIdIn.input(() => { booster_ID_in = num(boosterIdIn.value()); booster_ID_m = booster_ID_in * 0.0254; });
 
-  mkLabel("Choke ID (in)", x+500, y2-16);
-  const chokeIdIn = createInput(String(CHOKE_LINE_ID_in),'number').position(x+500, y2).size(70);
+  yRow += 40;
+  mkLabel("Choke ID (in)", x, yRow-16);
+  const chokeIdIn = createInput(String(CHOKE_LINE_ID_in),'number').position(x, yRow).size(70);
   chokeIdIn.input(() => { CHOKE_LINE_ID_in = num(chokeIdIn.value()); CHOKE_LINE_ID_m = CHOKE_LINE_ID_in * 0.0254; });
 
-  y2 += 40;
-  mkLabel("Kill ID (in)", x+360, y2-16);
-  const killIdIn = createInput(String(KILL_LINE_ID_in),'number').position(x+360, y2).size(70);
+  mkLabel("Kill ID (in)", col2X, yRow-16);
+  const killIdIn = createInput(String(KILL_LINE_ID_in),'number').position(col2X, yRow).size(70);
   killIdIn.input(() => { KILL_LINE_ID_in = num(killIdIn.value()); KILL_LINE_ID_m = KILL_LINE_ID_in * 0.0254; });
 }
 
@@ -6758,17 +6791,20 @@ function drawCMLVisual(){
 }
 
 function drawBottomFrames(){
-  // Row 1: Rheology and Well Configuration
+  // Row 1: Rheology, Gel, Well Configuration, Enhanced Hydraulics
   const row1Panels = [
-    { x: rheoFrameX,   w: bottomPanelW, y: frameY, label: "Rheology" },
-    { x: configFrameX, w: bottomPanelW, y: frameY, label: "Well Configuration" }
+    { x: rheoFrameX,   w: rheoFrameW,   y: frameY, label: "Rheology" },
+    { x: gelFrameX,    w: gelFrameW,    y: frameY, label: "Gel Configuration" },
+    { x: configFrameX, w: configFrameW, y: frameY, label: "Well Configuration" },
+    { x: enhFrameX,    w: enhFrameW,    y: frameY, label: "Enhanced Hydraulics" }
   ];
 
-  // Row 2: Losses, Kicks, BOP
+  // Row 2: Losses, Kicks, BOP, Diagnostics
   const row2Panels = [
-    { x: lossFrameX, w: (typeof bottomPanelW === 'number' ? bottomPanelW : 300), y: frameY2, label: "Losses" },
-    { x: kickFrameX, w: (typeof bottomPanelW === 'number' ? bottomPanelW : 300), y: frameY2, label: "Kick Control" },
-    { x: bopFrameX,  w: (typeof bopPanelW === 'number' ? bopPanelW : 450), y: frameY2, label: "BOP & Hydraulics" }
+    { x: lossFrameX, w: lossFrameW, y: frameY2, label: "Losses" },
+    { x: kickFrameX, w: kickFrameW, y: frameY2, label: "Kick Control" },
+    { x: bopFrameX,  w: bopFrameW,  y: frameY2, label: "BOP Well Control" },
+    { x: diagFrameX, w: diagFrameW, y: frameY2, label: "Diagnostics" }
   ];
 
   stroke(0, 0, 70); strokeWeight(2); noFill();
@@ -7603,20 +7639,15 @@ function buildRheologyUI(x, y){
 }
 
 function buildEnhancedHydraulicsUI(parentDiv){
-  const card = createDiv('').parent(parentDiv)
-    .style('margin-top', '16px')
-    .style('padding', '10px')
-    .style('border', '1px solid rgba(140,200,255,0.25)')
-    .style('border-radius', '8px')
-    .style('background', 'rgba(12,26,42,0.6)');
+  if (!parentDiv) return;
 
-  createDiv('Enhanced Hydraulics').parent(card)
-    .style('font-weight', 'bold')
-    .style('color', '#8cd7ff')
-    .style('margin-bottom', '8px');
+  parentDiv
+    .style('display', 'flex')
+    .style('flex-direction', 'column')
+    .style('gap', '8px');
 
   const mkToggleRow = (key, label) => {
-    const row = createDiv('').parent(card)
+    const row = createDiv('').parent(parentDiv)
       .style('display', 'flex')
       .style('align-items', 'center')
       .style('gap', '10px')
@@ -7645,7 +7676,7 @@ function buildEnhancedHydraulicsUI(parentDiv){
   mkToggleRow('ROUGH', 'Roughness');
   mkToggleRow('KLOSS', 'Local K-Losses');
 
-  const pOnlyRow = createDiv('').parent(card)
+  const pOnlyRow = createDiv('').parent(parentDiv)
     .style('display', 'grid')
     .style('grid-template-columns', '160px 1fr 120px')
     .style('align-items', 'center')
@@ -7676,7 +7707,7 @@ function buildEnhancedHydraulicsUI(parentDiv){
     EH.PCOR.fluid = fluidSelect.value();
   });
 
-  const gravRow = createDiv('').parent(card)
+  const gravRow = createDiv('').parent(parentDiv)
     .style('display', 'flex')
     .style('align-items', 'center')
     .style('gap', '10px');
@@ -7694,13 +7725,27 @@ function buildEnhancedHydraulicsUI(parentDiv){
     .style('font-size', '11px')
     .style('opacity', '0.8');
 }
+
+function buildEnhancedHydraulicsPanel() {
+  const pos = enhancedHydraulicsUIPosition();
+  const panelWidth = bottomPanelCardWidth(enhFrameW);
+  const root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#1c3248', enhFrameW)
+    .style('width', `${panelWidth}px`);
+
+  createDiv('Enhanced Hydraulics Controls').parent(root)
+    .style('font-weight', 'bold')
+    .style('color', '#8cd7ff')
+    .style('margin-bottom', '8px');
+
+  buildEnhancedHydraulicsUI(root);
+}
 // ------------------------- Build Losses UI -------------------------
 function buildLossesUI() {
   const pos = lossesUIPosition();
 
-  const panelWidth = bottomPanelCardWidth();
+  const panelWidth = bottomPanelCardWidth(lossFrameW);
 
-  uiLosses.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#2f4a5f')
+  uiLosses.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#2f4a5f', lossFrameW)
     .style('width', `${panelWidth}px`);
 
   uiLosses.title = createDiv('Losses (β, ΔP, Coupled)').parent(uiLosses.root)
@@ -7793,7 +7838,8 @@ function bottomPanelCardWidth(panelW = bottomPanelW) {
   return Math.max(candidate, 320);
 }
 
-function styleBottomPanelCard(div, accent = null) {
+function styleBottomPanelCard(div, accent = null, panelW = bottomPanelW) {
+  const widthPx = bottomPanelCardWidth(panelW);
   div
     .style('padding', '12px')
     .style('border', '1px solid rgba(100,200,255,0.25)')
@@ -7801,7 +7847,7 @@ function styleBottomPanelCard(div, accent = null) {
     .style('background', 'rgba(10,20,35,0.72)')
     .style('backdrop-filter', 'blur(4px)')
     .style('color', '#EEE')
-    .style('width', `${bottomPanelCardWidth()}px`);
+    .style('width', `${widthPx}px`);
 
   if (accent) {
     div.style('box-shadow', `0 0 0 1px ${accent} inset`);
@@ -7815,7 +7861,7 @@ function buildBOPWellControlUI() {
   const pos = bopUIPosition();
   const panelWidth = Math.max(bottomPanelCardWidth(bopPanelW), 580);
 
-  uiBOP.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#1f3b57')
+  uiBOP.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#1f3b57', bopPanelW)
     .style('width', `${panelWidth}px`);
 
   createDiv('BOP Well Control').parent(uiBOP.root)
@@ -8075,19 +8121,6 @@ function buildBOPWellControlUI() {
       uiBOP.killOpenBtn.style('background', KILL_LINE_OPEN ? '#4ade80' : '#ff6b6b');
     });
 
-  const hydCard = createDiv('').parent(uiBOP.root)
-    .style('margin-top', '16px')
-    .style('padding', '10px')
-    .style('border-radius', '8px')
-    .style('background', 'rgba(10,25,35,0.6)');
-
-  createDiv('Enhanced Hydraulics Controls').parent(hydCard)
-    .style('font-weight', 'bold')
-    .style('color', '#7fd5ff')
-    .style('margin-bottom', '6px');
-
-  buildEnhancedHydraulicsUI(hydCard);
-
   createDiv('UP: Calculated return flow. DOWN: User-defined pumping. Sliders match top-panel sizing for consistency.')
     .parent(uiBOP.root)
     .style('font-size', '10px')
@@ -8333,23 +8366,20 @@ function refreshLossesUIFromModel(){
 
 // ------------------------- Build Diagnostics UI -------------------------
 function buildDiagnosticsUI() {
-  const pos = lossesUIPosition();
-  const dx = 430;
-  const x = Math.min(width - 300, pos.x + dx);
-  const y = pos.y;
+  const pos = diagnosticsUIPosition();
+  const panelWidth = bottomPanelCardWidth(diagFrameW);
 
-  uiDiag.root = createDiv('').position(x, y).style('padding', '8px')
-    .style('border', '1px solid rgba(255,255,255,0.15)')
-    .style('border-radius', '8px')
-    .style('background', 'rgba(0,0,0,0.25)')
-    .style('backdrop-filter', 'blur(6px)')
-    .style('color', '#EEE');
+  uiDiag.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#2a3140', diagFrameW)
+    .style('width', `${panelWidth}px`);
 
   createDiv('Diagnostics').parent(uiDiag.root)
-    .style('font-weight','bold').style('margin-bottom','6px');
+    .style('font-weight','bold')
+    .style('margin-bottom','6px');
 
   uiDiag.text = createDiv('').parent(uiDiag.root)
-    .style('font-family','monospace').style('font-size','12px').style('line-height','1.25');
+    .style('font-family','monospace')
+    .style('font-size','12px')
+    .style('line-height','1.25');
 }
 
 
@@ -8419,9 +8449,9 @@ function updateDiagnosticsUI(dt_s){
 function buildKicksUI() {
   const pos = kicksUIPosition();
 
-  const panelWidth = bottomPanelCardWidth();
+  const panelWidth = bottomPanelCardWidth(kickFrameW);
 
-  uiKicks.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#5b2f2f')
+  uiKicks.root = styleBottomPanelCard(createDiv('').position(pos.x, pos.y), '#5b2f2f', kickFrameW)
     .style('width', `${panelWidth}px`)
     .style('max-height', '85vh')
     .style('overflow-y', 'auto');
