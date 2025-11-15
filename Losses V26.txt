@@ -1502,11 +1502,18 @@ function stepAdvection(){
 
   const qAnnulusToRiser = Math.max(0, window.__qBOP_annulusToRiser_m3s || 0);
   const qAnnulusTotalUp = Math.max(0, window.__qBOP_annulusUpTotal_m3s || qAnnulusToRiser);
-  const qBO_up = Math.max(0, window.__qBOP_boosterUp_m3s || 0);
-  const qChokeMixUp = Math.max(0, window.__qBOP_chokeDownUp_m3s || 0);
-  const qKillMixUp = Math.max(0, window.__qBOP_killDownUp_m3s || 0);
+  const qBO_up_total = Math.max(0, window.__qBOP_boosterUp_m3s || 0);
+  const qChokeMixUp_total = Math.max(0, window.__qBOP_chokeDownUp_m3s || 0);
+  const qKillMixUp_total = Math.max(0, window.__qBOP_killDownUp_m3s || 0);
   const qBopTotalUp = Math.max(0, window.__qBOP_totalUp_m3s ||
-    (qAnnulusTotalUp + qBO_up + qChokeMixUp + qKillMixUp));
+    (qAnnulusTotalUp + qBO_up_total + qChokeMixUp_total + qKillMixUp_total));
+
+  const qBoosterIntoRiser = Math.max(0,
+    window.__qBOP_boosterIntoRiser_m3s ?? (BOP_CLOSED ? 0 : qBO_up_total));
+  const qChokeMixIntoRiser = Math.max(0,
+    window.__qBOP_chokeDownIntoRiser_m3s ?? (BOP_CLOSED ? 0 : qChokeMixUp_total));
+  const qKillMixIntoRiser = Math.max(0,
+    window.__qBOP_killDownIntoRiser_m3s ?? (BOP_CLOSED ? 0 : qKillMixUp_total));
   const qFromAnnBelow = qAnnulusToRiser;
 
   const annulusTopMW = annBelowGrid[0] || dsEffluentMW;
@@ -1514,15 +1521,16 @@ function stepAdvection(){
   if (qBopTotalUp > FLOW_THRESHOLD) {
     let bopMix = 0;
     if (qAnnulusTotalUp > FLOW_THRESHOLD) bopMix += qAnnulusTotalUp * annulusTopMW;
-    if (qBO_up > FLOW_THRESHOLD) bopMix += qBO_up * boosterEffluentMW;
-    if (qChokeMixUp > FLOW_THRESHOLD) bopMix += qChokeMixUp * chokeEffluentMW;
-    if (qKillMixUp > FLOW_THRESHOLD) bopMix += qKillMixUp * killEffluentMW;
+    if (qBO_up_total > FLOW_THRESHOLD) bopMix += qBO_up_total * boosterEffluentMW;
+    if (qChokeMixUp_total > FLOW_THRESHOLD) bopMix += qChokeMixUp_total * chokeEffluentMW;
+    if (qKillMixUp_total > FLOW_THRESHOLD) bopMix += qKillMixUp_total * killEffluentMW;
     bopNodeMW = bopMix / qBopTotalUp;
   }
   window.__bopNodeMW_ppg = bopNodeMW;
 
   // Total flow entering riser at BOP depth
-  const qTotalIntoRiser = qFromAnnBelow + qBO_up + qChokeMixUp + qKillMixUp;
+  const qTotalIntoRiser = qFromAnnBelow + qBoosterIntoRiser +
+    qChokeMixIntoRiser + qKillMixIntoRiser;
 
   if (qTotalIntoRiser > FLOW_THRESHOLD) {
     const v_above = qTotalIntoRiser / Math.max(A_riser, 1e-12);
@@ -1543,19 +1551,19 @@ function stepAdvection(){
         qTotal += qFromAnnBelow;
       }
 
-      if (qBO_up > FLOW_THRESHOLD) {
-        mixMW += qBO_up * boosterEffluentMW;
-        qTotal += qBO_up;
+      if (qBoosterIntoRiser > FLOW_THRESHOLD) {
+        mixMW += qBoosterIntoRiser * boosterEffluentMW;
+        qTotal += qBoosterIntoRiser;
       }
 
-      if (qChokeMixUp > FLOW_THRESHOLD) {
-        mixMW += qChokeMixUp * chokeEffluentMW;
-        qTotal += qChokeMixUp;
+      if (qChokeMixIntoRiser > FLOW_THRESHOLD) {
+        mixMW += qChokeMixIntoRiser * chokeEffluentMW;
+        qTotal += qChokeMixIntoRiser;
       }
 
-      if (qKillMixUp > FLOW_THRESHOLD) {
-        mixMW += qKillMixUp * killEffluentMW;
-        qTotal += qKillMixUp;
+      if (qKillMixIntoRiser > FLOW_THRESHOLD) {
+        mixMW += qKillMixIntoRiser * killEffluentMW;
+        qTotal += qKillMixIntoRiser;
       }
 
       if (qTotal > FLOW_THRESHOLD) {
@@ -1602,20 +1610,20 @@ function stepAdvection(){
         qTotal += qFromAnnBelow;
       }
 
-      if (qBO_up > FLOW_THRESHOLD) {
-        mixMW += qBO_up * boosterEffluentMW;
-        qTotal += qBO_up;
-      }
+        if (qBoosterIntoRiser > FLOW_THRESHOLD) {
+          mixMW += qBoosterIntoRiser * boosterEffluentMW;
+          qTotal += qBoosterIntoRiser;
+        }
 
-      if (qChokeMixUp > FLOW_THRESHOLD) {
-        mixMW += qChokeMixUp * chokeEffluentMW;
-        qTotal += qChokeMixUp;
-      }
+        if (qChokeMixIntoRiser > FLOW_THRESHOLD) {
+          mixMW += qChokeMixIntoRiser * chokeEffluentMW;
+          qTotal += qChokeMixIntoRiser;
+        }
 
-      if (qKillMixUp > FLOW_THRESHOLD) {
-        mixMW += qKillMixUp * killEffluentMW;
-        qTotal += qKillMixUp;
-      }
+        if (qKillMixIntoRiser > FLOW_THRESHOLD) {
+          mixMW += qKillMixIntoRiser * killEffluentMW;
+          qTotal += qKillMixIntoRiser;
+        }
 
       if (qTotal > FLOW_THRESHOLD) {
         mixMW = mixMW / qTotal;
@@ -2973,6 +2981,9 @@ function publishBopNodeContrib(annUp=0, boosterUp=0, chokeDownUp=0, killDownUp=0
   window.__qBOP_chokeDownUp_m3s    = ch;
   window.__qBOP_killDownUp_m3s     = ki;
   window.__qBOP_totalUp_m3s        = ann + bo + ch + ki;
+  window.__qBOP_boosterIntoRiser_m3s = 0;
+  window.__qBOP_chokeDownIntoRiser_m3s = 0;
+  window.__qBOP_killDownIntoRiser_m3s = 0;
 }
 
 function routeAnnulusFlowsWithLosses(dt_s){
@@ -2997,6 +3008,9 @@ function routeAnnulusFlowsWithLosses(dt_s){
   window.__qRiserUp_m3s = 0;
   window.__qChokeUp_m3s = 0;
   window.__qKillUp_m3s = 0;
+  window.__qBOP_boosterIntoRiser_m3s = 0;
+  window.__qBOP_chokeDownIntoRiser_m3s = 0;
+  window.__qBOP_killDownIntoRiser_m3s = 0;
 
   const chokeUpActive = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
   const killUpActive = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
@@ -3279,9 +3293,19 @@ function routeAnnulusFlowsWithLosses(dt_s){
     window.__qRiserUp_m3s = Q_riser_actual;
     window.__qChokeUp_m3s = hasChokeUP ? Q_choke_actual : 0;
     window.__qKillUp_m3s = hasKillUP ? Q_kill_actual : 0;
-    window.__qBOP_annulusToRiser_m3s = Math.max(0,
-      Q_riser_actual - boosterUpToSurface -
-      chokeDownUpToSurface - killDownUpToSurface);
+
+    const totalOutletFlow = Math.max(Q_riser_actual + Q_choke_actual + Q_kill_actual, 0);
+    const riserShare = totalOutletFlow > 1e-9 ? (Q_riser_actual / totalOutletFlow) : 0;
+
+    const annulusToRiser = Math.max(0, qAnnulusToSurface * riserShare);
+    const boosterToRiser = Math.max(0, boosterUpToSurface * riserShare);
+    const chokeDownToRiser = Math.max(0, chokeDownUpToSurface * riserShare);
+    const killDownToRiser = Math.max(0, killDownUpToSurface * riserShare);
+
+    window.__qBOP_annulusToRiser_m3s = annulusToRiser;
+    window.__qBOP_boosterIntoRiser_m3s = boosterToRiser;
+    window.__qBOP_chokeDownIntoRiser_m3s = chokeDownToRiser;
+    window.__qBOP_killDownIntoRiser_m3s = killDownToRiser;
 
     // Store calculated choke/kill flows
     window.__Q_CHOKE_CALCULATED_m3s = Q_choke_actual;
@@ -3323,9 +3347,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
     window.__qRiserUp_m3s = qAnnUp;
     window.__qChokeUp_m3s = 0;
     window.__qKillUp_m3s = 0;
-    window.__qBOP_annulusToRiser_m3s = Math.max(0,
-      qAnnUp - boosterUpToSurface -
-      chokeDownUpToSurface - killDownUpToSurface);
+    window.__qBOP_annulusToRiser_m3s = qAnnulusToSurface;
+    window.__qBOP_boosterIntoRiser_m3s = boosterUpToSurface;
+    window.__qBOP_chokeDownIntoRiser_m3s = chokeDownUpToSurface;
+    window.__qBOP_killDownIntoRiser_m3s = killDownUpToSurface;
   }
 
   // ✅ CRITICAL FIX: Separate flows for friction calculation
