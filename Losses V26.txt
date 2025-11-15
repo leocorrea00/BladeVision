@@ -1505,8 +1505,7 @@ function stepAdvection(){
 
       if (qFromAnnBelow > FLOW_THRESHOLD) {
         const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
-        const fromBelowEff = effectiveCellDensity_ppg(fromBelowMW, 0, false);
-        mixMW += qFromAnnBelow * fromBelowEff;
+        mixMW += qFromAnnBelow * fromBelowMW;
         qTotal += qFromAnnBelow;
       }
 
@@ -1564,8 +1563,7 @@ function stepAdvection(){
 
       if (qFromAnnBelow > FLOW_THRESHOLD) {
         const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
-        const fromBelowEff = effectiveCellDensity_ppg(fromBelowMW, 0, false);
-        mixMW += qFromAnnBelow * fromBelowEff;
+        mixMW += qFromAnnBelow * fromBelowMW;
         qTotal += qFromAnnBelow;
       }
 
@@ -4241,69 +4239,55 @@ function updateRiserLevelWithLosses(dt_s) {
   // WITH ACTIVE LOSSES: Spatial mass balance
   // ========================================================================
 
-  // The deepest active loss zone determines the lower boundary
-  const deepestLossZone = activeLossZones[0];
-  const deepestLossDepth = deepestLossZone.depth_m;
-
-  // Below deepest loss zone: Always full (DS fluid enters at TD, flows up)
-  // At loss zones: Fluid exits spatially
-  // Above highest loss zone: Calculate fluid top
-
-  // Total losses
+  // Total losses currently exiting into the formation
   const qLoss_total_m3s = activeLossZones.reduce((sum, z) => sum + to_m3s(z.Qloss_gpm || 0), 0);
 
-  // Net flow above the deepest loss zone
-  // If all fluid exits at losses, nothing reaches surface
-  const qReachingSurface = Math.max(0, qDS_m3s + qBO_m3s + qTF_m3s - qCML_m3s - qLoss_total_m3s);
-  const qNet_above = qReachingSurface - qOutSurface_m3s;
+  const qIn_total_m3s = qDS_m3s + qBO_m3s + qTF_m3s;
+  const qOut_total_m3s = qLoss_total_m3s + qOutSurface_m3s + qCML_m3s;
+  const qNet_total_m3s = qIn_total_m3s - qOut_total_m3s;
 
-  // Calculate new fluid top
-  let dV_above = qNet_above * dt_s;
+  let dV_total = qNet_total_m3s * dt_s;
   let newTop = topDepthNow;
 
-  // If losses consume everything, fluid top should drop towards highest loss zone
-  if (qLoss_total_m3s >= (qDS_m3s + qBO_m3s + qTF_m3s - qCML_m3s)) {
-    // Find highest active loss zone
-    const highestLossZone = activeLossZones[activeLossZones.length - 1];
-    const targetTop = highestLossZone.depth_m;
+  let guard = 0;
+  while (Math.abs(dV_total) > 1e-12 && guard++ < 4) {
+    const A = Math.max(areaAtDepthTop_(newTop), 1e-12);
+    const dH = dV_total / A;
+    const proposedTop = clamp(newTop - dH, 0, TD_DEPTH);
+    const nextBoundary = (dH < 0)
+      ? nextBoundaryAfter_(proposedTop, false)
+      : nextBoundaryAfter_(proposedTop, true);
 
-    // Move towards target
-    const deltaToTarget = targetTop - topDepthNow;
-    const moveRate = Math.min(LEVEL_MAX_DROP_RATE_M_S * dt_s, Math.abs(deltaToTarget));
-    newTop = topDepthNow + (deltaToTarget > 0 ? moveRate : -moveRate);
-  } else {
-    // Some fluid reaches surface, use volumetric balance
-    let guard = 0;
-    while (Math.abs(dV_above) > 1e-12 && guard++ < 4) {
-      const A = Math.max(areaAtDepthTop_(newTop), 1e-12);
-      const dH = dV_above / A;
-      const proposedTop = newTop - dH;
+    newTop = proposedTop;
 
-      // Don't go below highest loss zone
-      const highestLossDepth = activeLossZones[activeLossZones.length - 1].depth_m;
-      newTop = Math.max(0, Math.min(proposedTop, TD_DEPTH));
-
-      if (newTop > highestLossDepth) {
-        newTop = proposedTop;
-        break;
+    if (Math.abs(newTop - nextBoundary) < 0.1) {
+      const dV_toBoundary = A * Math.abs(newTop - nextBoundary);
+      if (Math.abs(dV_total) > dV_toBoundary) {
+        dV_total -= (dH < 0 ? -dV_toBoundary : dV_toBoundary);
+        newTop = nextBoundary;
       } else {
-        newTop = highestLossDepth;
         break;
       }
+    } else {
+      break;
     }
-
-    // Rate limiting
-    const deltaTop = newTop - topDepthNow;
-    const maxChange = (deltaTop < 0 ? LEVEL_MAX_DROP_RATE_M_S : LEVEL_MAX_RISE_RATE_M_S) * dt_s;
-    newTop = topDepthNow + clamp(deltaTop, -maxChange, maxChange);
   }
+
+  // Prevent the wet top from dropping deeper than the shallowest active loss zone
+  const highestLossDepth = activeLossZones[activeLossZones.length - 1].depth_m;
+  newTop = Math.min(newTop, highestLossDepth);
+
+  // Rate limiting for stability
+  const deltaTop = newTop - topDepthNow;
+  const maxChange = (deltaTop < 0 ? LEVEL_MAX_DROP_RATE_M_S : LEVEL_MAX_RISE_RATE_M_S) * dt_s;
+  newTop = topDepthNow + clamp(deltaTop, -maxChange, maxChange);
 
   LOSS_TOP_DEPTH_m = clamp(newTop, 0, TD_DEPTH);
   if (typeof ANN_TOP_DEPTH_m !== 'undefined') ANN_TOP_DEPTH_m = LOSS_TOP_DEPTH_m;
 
   // Diagnostics
   if (typeof window !== 'undefined') {
-    window.qResid_gpm = qNet_above * GPM_PER_M3S;
+    window.qResid_gpm = qNet_total_m3s * GPM_PER_M3S;
   }
 }
 
@@ -5459,6 +5443,7 @@ if (MPD_ON){
   updateCMLLevelAndControl();
   // Update BOP flow displays based on direction (UP = calculated/read-only, DOWN = user-editable)
   updateBOPFlowDisplays();
+  updateBOPMWDisplays();
   // Well visuals and charts
   drawWellAndFluids();
   drawFractureSymbols();
@@ -7619,6 +7604,7 @@ function buildBOPWellControlUI() {
   updateKillDirectionButtons();
   updateChokePressureInputState();
   updateKillPressureInputState();
+  updateBOPMWDisplays();
 }
 
 // Update choke pressure input state based on direction
@@ -7795,6 +7781,49 @@ function updateBOPFlowDisplays() {
   }
 }
 
+// Update mud-weight inputs: editable only when pumping down
+function updateBOPMWDisplays() {
+  if (!uiBOP.chokeMWInput || !uiBOP.killMWInput) return;
+
+  const updateLine = (direction, grid, mwValue, inputEl, sliderEl) => {
+    if (!inputEl) return;
+    const avgMW = (grid && grid.length > 0) ? average(grid) : mwValue;
+
+    if (direction === 'DOWN') {
+      const wasReadOnly = inputEl.elt ? inputEl.elt.hasAttribute('readonly') : false;
+      const sliderWasDisabled = sliderEl && sliderEl.elt ? sliderEl.elt.hasAttribute('disabled') : false;
+      inputEl.removeAttribute('readonly');
+      inputEl.style('background', 'rgba(255,255,255,0.07)');
+      inputEl.style('cursor', 'text');
+      inputEl.style('opacity', '1');
+      if (sliderEl) {
+        sliderEl.removeAttribute('disabled');
+        sliderEl.style('opacity', '1');
+      }
+      if (wasReadOnly) {
+        inputEl.value(nf(mwValue, 1, 1));
+      }
+      if (sliderEl && sliderWasDisabled) {
+        sliderEl.value(mwValue);
+      }
+    } else {
+      inputEl.attribute('readonly', true);
+      inputEl.style('background', 'rgba(100,150,200,0.15)');
+      inputEl.style('cursor', 'not-allowed');
+      inputEl.style('opacity', '0.7');
+      inputEl.value(nf(avgMW, 1, 2));
+      if (sliderEl) {
+        sliderEl.attribute('disabled', true);
+        sliderEl.style('opacity', '0.5');
+        sliderEl.value(avgMW);
+      }
+    }
+  };
+
+  updateLine(CHOKE_DIRECTION, chokeGrid, MW_CHOKE, uiBOP.chokeMWInput, uiBOP.chokeMWSlider);
+  updateLine(KILL_DIRECTION, killGrid, MW_KILL, uiBOP.killMWInput, uiBOP.killMWSlider);
+}
+
 function refreshLossesUIFromModel(){
   if (!uiLosses.root) return;
   for (let i=0;i<3;i++){
@@ -7855,21 +7884,41 @@ function updateDiagnosticsUI(dt_s){
   const qTopFill_gpm = (TOPFILL_ON ? (Q_TOPFILL || 0) : 0);
   const qIn_gpm = (Q_DS || 0) + (Q_BO || 0) + qTopFill_gpm;
 
+  const qDS_gpm = Q_DS || 0;
+  const qBO_gpm = Q_BO || 0;
+  const riserMW_ppg = averageEffectiveDensity(annAboveGrid, true);
+  const chokeMW_ppg = (chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE);
+  const killMW_ppg = (killGrid.length > 0 ? average(killGrid) : MW_KILL);
+  const chokeFlow_gpm = (CHOKE_DIRECTION === 'UP')
+    ? ((window.__Q_CHOKE_CALCULATED_m3s || 0) * 15850.323)
+    : (CHOKE_LINE_OPEN ? (Q_CHOKE || 0) : 0);
+  const killFlow_gpm = (KILL_DIRECTION === 'UP')
+    ? ((window.__Q_KILL_CALCULATED_m3s || 0) * 15850.323)
+    : (KILL_LINE_OPEN ? (Q_KILL || 0) : 0);
+  const bopState = BOP_CLOSED ? 'CLOSED' : 'OPEN';
+  const chokeState = `${CHOKE_LINE_OPEN ? 'OPEN' : 'CLOSED'} / ${CHOKE_DIRECTION}`;
+  const killState = `${KILL_LINE_OPEN ? 'OPEN' : 'CLOSED'} / ${KILL_DIRECTION}`;
+
   // Prefer residual published by the level solver; else compute locally
   const resid_gpm = (typeof window !== 'undefined' && typeof window.qResid_gpm === 'number')
     ? window.qResid_gpm
     : (qIn_gpm - (qOutSurf_gpm + qCML_gpm + loss_gpm) - qComp_gpm);
 
   const fmt = v => (+v).toFixed(1);
+  const fmt2 = v => (+v).toFixed(2);
 
-  uiDiag.text.html(
-    `FO (gpm): ${fmt(FLOW_OUT_gpm)}<br/>` +
-    `ΣLoss (gpm): ${fmt(loss_gpm)}<br/>` +
-    `Q_CML_eff (gpm): ${fmt(qCML_gpm)}<br/>` +
-    `Q_comp (gpm): ${fmt(qComp_gpm)}<br/>` +
-    `Riser Top (m): ${fmt(topDepth)}<br/>` +
+  const diagLines = [
+    `BOP: ${bopState}`,
+    `Riser Level (m): ${fmt(topDepth)} | MW: ${fmt2(riserMW_ppg)} ppg`,
+    `Choke Line (${chokeState}) → Flow: ${fmt(chokeFlow_gpm)} gpm | MW: ${fmt2(chokeMW_ppg)} ppg`,
+    `Kill Line (${killState}) → Flow: ${fmt(killFlow_gpm)} gpm | MW: ${fmt2(killMW_ppg)} ppg`,
+    `DS/Booster/TopFill In (gpm): ${fmt(qDS_gpm)} / ${fmt(qBO_gpm)} / ${fmt(qTopFill_gpm)}`,
+    `FO (gpm): ${fmt(FLOW_OUT_gpm)} | ΣLoss (gpm): ${fmt(loss_gpm)}`,
+    `Q_CML_eff (gpm): ${fmt(qCML_gpm)} | Q_comp (gpm): ${fmt(qComp_gpm)}`,
     `MassBal Resid (gpm): ${fmt(resid_gpm)}`
-  );
+  ];
+
+  uiDiag.text.html(diagLines.join('<br/>'));
 }
 
 // ------------------------- Build Kicks UI -------------------------
