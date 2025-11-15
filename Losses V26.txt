@@ -11,6 +11,7 @@ const MW_MIN = 7.0, MW_MAX = 18.0, MW_STEP = 0.1;
 const Q_MIN = 0, Q_MAX = 2000, Q_STEP = 10;
 // Discretization (for fluid tracking)
 const CELL_M = 25;
+const CELL_HEIGHT = CELL_M; // convenience alias for legacy code paths
 const N_DS = Math.ceil(TD_DEPTH / CELL_M);
 const N_ABV = Math.ceil(BOP_DEPTH / CELL_M);
 const N_BELOW = Math.ceil((TD_DEPTH - BOP_DEPTH) / CELL_M);
@@ -316,6 +317,17 @@ let SPP_smooth = 0;
 function updateSPP(targetSPP){
   SPP_smooth = SPP_smooth + SPP_ALPHA*(targetSPP - SPP_smooth);
   return SPP_smooth;
+}
+
+// --- Friction smoothing helpers (prevents laminar↔turbulent ping-pong) ---
+const FRICTION_SMOOTH_ALPHA = 0.35;
+const frictionSmoothState = {};
+function smoothFrictionPsi(key, targetPsi){
+  if (!isFinite(targetPsi)) return 0;
+  const prev = (key in frictionSmoothState) ? frictionSmoothState[key] : targetPsi;
+  const next = prev + FRICTION_SMOOTH_ALPHA * (targetPsi - prev);
+  frictionSmoothState[key] = next;
+  return next;
 }
 
 // Add near top with other globals (around line 50):
@@ -1220,6 +1232,14 @@ function migrateKickFluids(dt_s) {
   }
 }
 
+function mixFormationFluidIntoGrid(grid, index, fluidDensity_ppg, fraction){
+  if (!Array.isArray(grid) || index < 0 || index >= grid.length) return;
+  const f = clamp(fraction, 0, 1);
+  if (f <= 0) return;
+  const base = isFinite(grid[index]) ? grid[index] : MW_DS;
+  grid[index] = base * (1 - f) + fluidDensity_ppg * f;
+}
+
 function updateFormationFluidMigration(dt_s) {
   // Reset influx rate
   current_influx_m3s = 0;
@@ -1228,6 +1248,9 @@ function updateFormationFluidMigration(dt_s) {
 
   const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
   if (!fluidProps) return;
+
+  const expansion_m3s = Math.max(0, window.__gasExpansion_m3s || 0);
+  window.__gasExpansion_m3s = 0;
 
   // Calculate influx rate based on mode
   let influxRate_gpm = 0;
@@ -1242,10 +1265,10 @@ function updateFormationFluidMigration(dt_s) {
 
   // Store current influx rate for flow routing (even if zero)
   const influx_m3s = influxRate_gpm / 15850.323;
-  current_influx_m3s = influx_m3s;
+  current_influx_m3s = influx_m3s + expansion_m3s;
 
   if (influxRate_gpm <= 0) {
-    // Even with no influx, migrate existing kick fluids
+    // Even with no influx, migrate existing kick fluids and propagate expansion effects
     migrateKickFluids(dt_s);
     return;
   }
@@ -1269,6 +1292,10 @@ function updateFormationFluidMigration(dt_s) {
       } else if (formationFluidType === 'WATER') {
         waterPhaseFrom_below[cellIndex] = Math.min((waterPhaseFrom_below[cellIndex] || 0) + fraction, 1.0);
       }
+
+      mixFormationFluidIntoGrid(annBelowGrid, cellIndex,
+        fluidProps.density_ppg || MW_DS,
+        Math.min(fraction, 0.95));
     }
   } else {
     // Above BOP (riser)
@@ -1285,6 +1312,10 @@ function updateFormationFluidMigration(dt_s) {
       } else if (formationFluidType === 'WATER') {
         waterPhaseFrom_above[cellIndex] = Math.min((waterPhaseFrom_above[cellIndex] || 0) + fraction, 1.0);
       }
+
+      mixFormationFluidIntoGrid(annAboveGrid, cellIndex,
+        fluidProps.density_ppg || MW_DS,
+        Math.min(fraction, 0.95));
     }
   }
 
@@ -2175,13 +2206,15 @@ function calculateGasExpansionFactor(depth_m, isAboveBOP) {
 function applyGasExpansion(dt_s) {
   if (!GAS_ENABLED || formationFluidType !== 'GAS' || dt_s < 1e-6) return;
 
+  let expansionVolume_m3 = 0;
+
   // Process below-BOP cells
   for (let i = 0; i < gasPhaseFrom_below.length; i++) {
     const gasFraction = gasPhaseFrom_below[i];
     if (gasFraction < 0.001) continue; // Skip cells with negligible gas
 
     // Calculate cell depth (bottom-up indexing)
-    const cellDepth = BOP_DEPTH + (gasPhaseFrom_below.length - 1 - i) * CELL_HEIGHT;
+    const cellDepth = BOP_DEPTH + i * CELL_M;
 
     // Get expansion factor
     const expansionFactor = calculateGasExpansionFactor(cellDepth, false);
@@ -2200,6 +2233,10 @@ function applyGasExpansion(dt_s) {
     } else {
       gasPhaseFrom_below[i] = expandedFraction;
     }
+
+    const cellVolume = areaAtDepthTop_(cellDepth) * CELL_M;
+    const delta = Math.max(0, gasPhaseFrom_below[i] - gasFraction);
+    if (delta > 1e-6) expansionVolume_m3 += delta * cellVolume;
   }
 
   // Process above-BOP cells (riser)
@@ -2208,7 +2245,7 @@ function applyGasExpansion(dt_s) {
     if (gasFraction < 0.001) continue;
 
     // Calculate cell depth (top-down indexing, 0 = surface)
-    const cellDepth = i * CELL_HEIGHT;
+    const cellDepth = i * CELL_M;
 
     const expansionFactor = calculateGasExpansionFactor(cellDepth, true);
     const expandedFraction = Math.min(1.0, gasFraction * expansionFactor);
@@ -2221,7 +2258,15 @@ function applyGasExpansion(dt_s) {
     } else {
       gasPhaseFrom_above[i] = expandedFraction;
     }
+
+    const cellVolume = areaAtDepthTop_(cellDepth) * CELL_M;
+    const delta = Math.max(0, gasPhaseFrom_above[i] - gasFraction);
+    if (delta > 1e-6) expansionVolume_m3 += delta * cellVolume;
   }
+
+  window.__gasExpansion_m3s = expansionVolume_m3 > 1e-6
+    ? expansionVolume_m3 / Math.max(dt_s, 1e-6)
+    : 0;
 }
 
 // ====================== PRESSURE / ECD PROFILES =======================
@@ -2497,7 +2542,7 @@ function pressureAtDepth_noSBP_withCML(d){
 // --- Total annulus pressure (psi): hydro + friction + SBP ---
 // Find pressureAtDepth (around line 1340) - ensure it looks like this:
 
-function pressureAtDepth(d){
+function pressureAtDepth(d, opts = {}){
   if (d < 0) return 0;
   if (d > TD_DEPTH) d = TD_DEPTH;
 
@@ -2527,10 +2572,16 @@ function pressureAtDepth(d){
   const P_sbp = sbpAppliedPsi();
 
   // BOP Line Contribution (when BOP closed and choke/kill lines flowing UP)
-  const P_bop_lines = bopLinePressureContribution();
+  const includeBopLines = (typeof opts.includeBopLines === 'boolean') ? opts.includeBopLines : true;
+  const includeClosed = (typeof opts.includeClosedWell === 'boolean') ? opts.includeClosedWell : true;
+  const belowBOP = d >= BOP_DEPTH;
+
+  const P_bop_lines = (includeBopLines && belowBOP) ? bopLinePressureContribution() : 0;
 
   // Closed Well Pressure Boost (when pumping to closed well with no exit)
-  const P_closed_well = BOP_CLOSED ? (closedWellPressureBoost_psi || 0) : 0;
+  const P_closed_well = (includeClosed && BOP_CLOSED && belowBOP)
+    ? (closedWellPressureBoost_psi || 0)
+    : 0;
 
   const total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
   return total;
@@ -2548,12 +2599,14 @@ function ecdWithSBPAtDepth(d){
 function dsFrictionPsiLength(len_m){
   const { qDS } = flows_m3s();
   const pa_per_m = dPperM_drillstring(qDS);
-  return (pa_per_m * Math.max(len_m, 0)) * PSI_PER_PASCAL;
+  const rawPsi = (pa_per_m * Math.max(len_m, 0)) * PSI_PER_PASCAL;
+  return smoothFrictionPsi('ds', rawPsi);
 }
 function boosterFrictionPsiLength(len_m){
   const { qBO } = flows_m3s();
   const pa_per_m = dPperM_booster(qBO);
-  return (pa_per_m * Math.max(len_m, 0)) * PSI_PER_PASCAL;
+  const rawPsi = (pa_per_m * Math.max(len_m, 0)) * PSI_PER_PASCAL;
+  return smoothFrictionPsi('booster', rawPsi);
 }
 
 // === CHOKE LINE FRICTION ===
@@ -2572,7 +2625,9 @@ function chokeFrictionPsiLength(len_m, flowRate_m3s){
   // This ensures proper laminar/turbulent transition for pipe flow
   const dpdm_Pa = dP_per_m_pipe_withRPM(flowRate_m3s, rho_kgm3, D_m, K, n, tauY, 0); // No RPM in choke line
   const PA_TO_PSI = 1.0 / 6894.757;
-  return dpdm_Pa * len_m * PA_TO_PSI;
+  const rawPsi = dpdm_Pa * len_m * PA_TO_PSI;
+  const dirKey = (CHOKE_DIRECTION === 'DOWN') ? 'choke_down' : 'choke_up';
+  return smoothFrictionPsi(dirKey, rawPsi);
 }
 
 // === KILL LINE FRICTION ===
@@ -2591,7 +2646,9 @@ function killFrictionPsiLength(len_m, flowRate_m3s){
   // This ensures proper laminar/turbulent transition for pipe flow
   const dpdm_Pa = dP_per_m_pipe_withRPM(flowRate_m3s, rho_kgm3, D_m, K, n, tauY, 0); // No RPM in kill line
   const PA_TO_PSI = 1.0 / 6894.757;
-  return dpdm_Pa * len_m * PA_TO_PSI;
+  const rawPsi = dpdm_Pa * len_m * PA_TO_PSI;
+  const dirKey = (KILL_DIRECTION === 'DOWN') ? 'kill_down' : 'kill_up';
+  return smoothFrictionPsi(dirKey, rawPsi);
 }
 
 // === BOP WELLBORE PRESSURE CONTRIBUTION FROM CHOKE/KILL LINES ===
@@ -2606,16 +2663,19 @@ function bopLinePressureContribution(){
   if (CHOKE_DIRECTION === "UP" && Q_CHOKE > 0 && CHOKE_LINE_OPEN) {
     const qChoke_m3s = Q_CHOKE / 15850.323;
     const friction_psi = chokeFrictionPsiLength(BOP_DEPTH, qChoke_m3s);
-    // When flowing UP: Friction + Applied Choke Pressure adds to BHP
-    totalContribution += friction_psi + CHOKE_PRESSURE_psi;
+    const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
+    const hydro_psi = PSI_COEF * chokeMW * BOP_DEPTH;
+    // When flowing UP: Hydro + friction + applied surface pressure adds to BHP
+    totalContribution += hydro_psi + friction_psi + CHOKE_PRESSURE_psi;
   }
 
   // Kill Line
   if (KILL_DIRECTION === "UP" && Q_KILL > 0 && KILL_LINE_OPEN) {
     const qKill_m3s = Q_KILL / 15850.323;
     const friction_psi = killFrictionPsiLength(BOP_DEPTH, qKill_m3s);
-    // When flowing UP: Friction + Applied Kill Pressure adds to BHP
-    totalContribution += friction_psi + KILL_PRESSURE_psi;
+    const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
+    const hydro_psi = PSI_COEF * killMW * BOP_DEPTH;
+    totalContribution += hydro_psi + friction_psi + KILL_PRESSURE_psi;
   }
 
   return totalContribution;
@@ -3173,6 +3233,9 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // All upflow while BOP is closed originates from the annulus below
     publishBopNodeContrib(qToSurface_belowBOP, 0, 0, 0);
     window.__qBOP_annulusToRiser_m3s = 0;
+    window.__qBOP_boosterIntoRiser_m3s = Math.max(0, qBO);
+    window.__qBOP_chokeDownIntoRiser_m3s = 0;
+    window.__qBOP_killDownIntoRiser_m3s = 0;
     window.__Q_TOTAL_UP_m3s = qToSurface_belowBOP;
 
     // === CLOSED WELL PHYSICS ===
@@ -3657,7 +3720,8 @@ function calculateFractureFriction_psi(qFrac_m3s, zone) {
     const C_frac = zone.Qref_gpm / Math.pow(zone.DPref_psi, n);
     const denom = Math.max(C_frac, 1e-6);
     const ratio = Math.max(qFrac_gpm, 0) / denom;
-    return Math.pow(ratio, 1 / n);
+    const raw = Math.pow(ratio, 1 / n);
+    return smoothFrictionPsi(`loss_${zone.id || zone.depth_m || 0}`, raw);
   }
 
   // Fallback: treat fracture as a low-resistance annulus section (~20%)
@@ -3666,7 +3730,8 @@ function calculateFractureFriction_psi(qFrac_m3s, zone) {
   window.__qAnnAbove_m3s = qFrac_m3s;
   const P_fric_ann_equiv = frictionPsi_withCML_rheo(depth_m);
   window.__qAnnAbove_m3s = qAbove_save;
-  return P_fric_ann_equiv * 0.2;
+  const fallback = P_fric_ann_equiv * 0.2;
+  return smoothFrictionPsi(`loss_${zone.id || zone.depth_m || 0}`, fallback);
 }
 
 // Fast friction approximation for losses solver (trades accuracy for speed)
@@ -6860,7 +6925,22 @@ function drawCharts(x0, top = 150, h = 420){
   const px = x0 + dx, py = top;
   drawChartPanel(px, py, wP, h, "Pressure (psi)");
   drawChartGrid(px, py, wP, h, padL, padR, padT, padB, gridCol);
-  plotDepthFunction(px, py, wP, h, padL, padR, padT, padB, d => pressureAtDepth(d), 0, 16000, lineColP);
+  if (BOP_CLOSED) {
+    const appliedColor = lineColP;
+    const riserDashColor = color(hue(lineColP), saturation(lineColP), brightness(lineColP), 150);
+    const wellPressureFn = (d) => (d >= BOP_DEPTH ? pressureAtDepth(d) : NaN);
+    plotDepthFunctionAdvanced(px, py, wP, h, padL, padR, padT, padB,
+      wellPressureFn, 0, 16000, appliedColor, { depthMin: BOP_DEPTH, strokeWeight: 3.2 });
+
+    const riserPressureFn = (d) => (d <= BOP_DEPTH
+      ? pressureAtDepth(d, { includeBopLines: false, includeClosedWell: false })
+      : NaN);
+    plotDepthFunctionAdvanced(px, py, wP, h, padL, padR, padT, padB,
+      riserPressureFn, 0, 16000, riserDashColor,
+      { depthMax: BOP_DEPTH, dashed: true, strokeWeight: 2.2 });
+  } else {
+    plotDepthFunction(px, py, wP, h, padL, padR, padT, padB, d => pressureAtDepth(d), 0, 16000, lineColP);
+  }
   drawAxes(px, py, wP, h, padL, padR, padT, padB, axisCol);
   drawDepthTicks(px, py, wP, h, padL, padR, padT, padB, axisCol);
   drawXTicks(px, py, wP, h, padL, padR, padT, padB, axisCol, 0, 16000, [0, 4000, 8000, 12000, 16000]);
@@ -7085,23 +7165,48 @@ function drawXTicks(x,y,w,h,padL,padR,padT,padB,col,vmin,vmax,ticks){
   }
 }
 
-function plotDepthFunction(x,y,w,h,padL,padR,padT,padB,f,xmin,xmax,col){
+function plotDepthFunctionAdvanced(x,y,w,h,padL,padR,padT,padB,f,xmin,xmax,col, options = {}){
   const innerW=w-padL-padR, innerH=h-padT-padB;
   const left=x+padL, top=y+padT, right=x+w-padR, bottom=y+h-padB;
-  
-  noFill(); stroke(col); strokeWeight(3); beginShape();
-  for (let d=0; d<=MAX_DEPTH; d+=25){
+  const depthMin = (typeof options.depthMin === 'number') ? options.depthMin : 0;
+  const depthMax = (typeof options.depthMax === 'number') ? options.depthMax : MAX_DEPTH;
+  const step = options.step || 25;
+  const strokeW = options.strokeWeight || 3;
+  const dashed = !!options.dashed;
+  const dashPattern = options.dashPattern || [8, 6];
+
+  const ctx = drawingContext;
+  if (dashed && ctx && ctx.setLineDash) ctx.setLineDash(dashPattern);
+
+  stroke(col); strokeWeight(strokeW); noFill();
+  let drawing = false;
+  for (let d=0; d<=MAX_DEPTH; d+=step){
+    if (d < depthMin - 1e-3 || d > depthMax + 1e-3) {
+      if (drawing){ endShape(); drawing = false; }
+      continue;
+    }
     const val = f(d);
+    if (!isFinite(val)) {
+      if (drawing){ endShape(); drawing = false; }
+      continue;
+    }
     const xx = left + remap(val, xmin, xmax, 0, innerW, true);
-    const yy = top + remap(d, 0, MAX_DEPTH, 0, innerH, true); // 0 at top
+    const yy = top + remap(d, 0, MAX_DEPTH, 0, innerH, true);
+    if (!drawing){ beginShape(); drawing = true; }
     vertex(xx, yy);
   }
-  endShape();
-  
+  if (drawing) endShape();
+
+  if (dashed && ctx && ctx.setLineDash) ctx.setLineDash([]);
+
   // TD line
   const yTD = top + innerH; // At bottom
-  stroke(0,0,95); strokeWeight(2.5); 
+  stroke(0,0,95); strokeWeight(2.5);
   line(left, yTD, right, yTD);
+}
+
+function plotDepthFunction(x,y,w,h,padL,padR,padT,padB,f,xmin,xmax,col){
+  plotDepthFunctionAdvanced(x,y,w,h,padL,padR,padT,padB,f,xmin,xmax,col);
 }
 
 function plotDepthFunctionMasked(x,y,w,h,padL,padR,padT,padB,f,xmin,xmax,col, valid){
