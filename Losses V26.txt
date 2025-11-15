@@ -22,12 +22,12 @@ const BASE_M_PER_FRAME = CELL_M * 0.5;
 // === Simulation Time Scaling ===
 const TIME_SCALE_PRESETS = {
   FAST:     { label: 'FAST',     factor: 1.0 },
-  STANDARD: { label: 'STANDARD', factor: 0.55 },
-  SLOW:     { label: 'SLOW',     factor: 0.3 }
+  STANDARD: { label: 'STANDARD', factor: 0.35 },
+  SLOW:     { label: 'SLOW',     factor: 0.12 }
 };
 const TIME_SCALE_ORDER = ['FAST', 'STANDARD', 'SLOW'];
 let activeTimeScaleKey = 'FAST';
-let timeScaleButtons = {};
+let timeScaleSelect;
 
 function currentTimeScaleFactor(){
   const preset = TIME_SCALE_PRESETS[activeTimeScaleKey];
@@ -36,20 +36,20 @@ function currentTimeScaleFactor(){
 
 function setTimeScale(key){
   if (!TIME_SCALE_PRESETS[key]) return;
+  if (activeTimeScaleKey === key) return;
   activeTimeScaleKey = key;
-  updateTimeScaleButtonStyles();
+  syncTimeScaleControl();
 }
 
-function updateTimeScaleButtonStyles(){
-  TIME_SCALE_ORDER.forEach(key => {
-    const btn = timeScaleButtons[key];
-    if (!btn) return;
-    if (key === activeTimeScaleKey){
-      btn.style('background', '#4ade80').style('color', '#000').style('font-weight', 'bold');
-    } else {
-      btn.style('background', '#333').style('color', '#fff').style('font-weight', 'normal');
-    }
-  });
+function syncTimeScaleControl(){
+  if (!timeScaleSelect) return;
+  if (timeScaleSelect.value() !== activeTimeScaleKey){
+    timeScaleSelect.value(activeTimeScaleKey);
+  }
+  const preset = TIME_SCALE_PRESETS[activeTimeScaleKey];
+  if (preset){
+    timeScaleSelect.elt.title = `Simulation speed ×${preset.factor.toFixed(2)}`;
+  }
 }
 // --- Rotation coupling tunables ---
 const ROT_COUPLE = 3.0; // scales how strongly rotation adds to effective shear
@@ -5646,7 +5646,9 @@ function frameSeconds(){
   const vRef = qRef_m3s / Math.max(A_riser(), 1e-12); // m/s in riser
   const dx = BASE_M_PER_FRAME; // m advanced per frame at vRef
   const baseDt = dx / Math.max(vRef, 1e-9);
-  return baseDt * currentTimeScaleFactor(); // seconds per frame (scaled)
+  const scale = currentTimeScaleFactor();
+  window.timeScaleFactor = scale;
+  return baseDt * scale; // seconds per frame (scaled)
 }
 // ========================== CAPTURE / OVERLAYS =========================
 function captureState(){
@@ -5741,6 +5743,30 @@ function setup(){
   const slotW = 240;
 
   let xPos = 16;
+
+  // Top-right time scale dropdown (sits above the control rows)
+  const tsSelectWidth = 140;
+  const tsSelectX = width - tsSelectWidth - 24;
+  const tsSelectY = 10;
+  createDiv('Time Scale')
+    .position(tsSelectX - 95, tsSelectY + 4)
+    .size(90, 18)
+    .style('color', '#EEE')
+    .style('text-align', 'right')
+    .style('font-size', '12px');
+  timeScaleSelect = createSelect()
+    .position(tsSelectX, tsSelectY)
+    .size(tsSelectWidth, 24)
+    .style('background', '#1f2937')
+    .style('color', '#fff')
+    .style('border', '1px solid #4ade80')
+    .style('font-weight', 'bold');
+  TIME_SCALE_ORDER.forEach(key => {
+    const preset = TIME_SCALE_PRESETS[key];
+    if (preset) timeScaleSelect.option(preset.label, key);
+  });
+  timeScaleSelect.changed(() => setTimeScale(timeScaleSelect.value()));
+  syncTimeScaleControl();
   
 
   
@@ -5882,20 +5908,6 @@ logDownloadBtn.attribute('disabled', '');
 logDownloadBtn.mousePressed(() => {
   saveDiagnosticLog();
 });
-
-  // ========== Time Scale Controls ==========
-  const tsGroupWidth = TIME_SCALE_ORDER.length * 95;
-  const tsX = width - (tsGroupWidth + 40);
-  mkLabel('Time Scale', tsX, rowY2 - 14);
-  TIME_SCALE_ORDER.forEach((key, idx) => {
-    const preset = TIME_SCALE_PRESETS[key];
-    const btn = createButton(preset.label)
-      .size(90, 22)
-      .position(tsX + idx * 95, rowY2);
-    btn.mousePressed(() => setTimeScale(key));
-    timeScaleButtons[key] = btn;
-  });
-  updateTimeScaleButtonStyles();
 
     // small local helper (scoped to setup) to make 2-decimal number inputs
   function makeTwoDecimalInput(label, x, y, initial = 0) {
