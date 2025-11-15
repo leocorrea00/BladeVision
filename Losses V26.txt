@@ -1329,6 +1329,9 @@ function stepAdvection(){
   const qUp_m3s   = (typeof __qAnnUp_m3s   === 'number') ? __qAnnUp_m3s   : 0;  // upward above loss zone
   const qDown_m3s = (typeof __qAnnDown_m3s === 'number') ? __qAnnDown_m3s : 0;  // downward toward loss zone
 
+  window.__bopChokeUpMW_ppg = null;
+  window.__bopKillUpMW_ppg = null;
+
   // Grids & geometry helpers you already have:
   const A_riser = area_annulus(riser_ID_m,   ds_OD_m);
   const A_csg   = area_annulus(casing_ID_m,  ds_OD_m);
@@ -1464,10 +1467,6 @@ function stepAdvection(){
   // 5) RISER (ABOVE BOP): ADVECTION AND MIXING
   // =========================================================
 
-  // Calculate booster contribution going UP (not routed down to losses)
-  const qBO_m3s = Math.max(0, ((Q_BO || 0) / 15850.323));
-  const qBO_up = Math.max(0, qBO_m3s - qDown_m3s);  // Booster NOT going down = going UP
-
   // ✅ FIXED: Calculate choke/kill DOWN flows OUTSIDE the upflow block
   let qChoke_down = 0, qKill_down = 0;
   let chokeEffluentMW = MW_CHOKE, killEffluentMW = MW_KILL;
@@ -1484,10 +1483,29 @@ function stepAdvection(){
     }
   }
 
-  const qFromAnnBelow = Math.max(0, qUp_m3s - qBO_up);  // Flow from annulus below (DS + TF)
+  const qAnnulusToRiser = Math.max(0, window.__qBOP_annulusToRiser_m3s || 0);
+  const qAnnulusTotalUp = Math.max(0, window.__qBOP_annulusUpTotal_m3s || qAnnulusToRiser);
+  const qBO_up = Math.max(0, window.__qBOP_boosterUp_m3s || 0);
+  const qChokeMixUp = Math.max(0, window.__qBOP_chokeDownUp_m3s || 0);
+  const qKillMixUp = Math.max(0, window.__qBOP_killDownUp_m3s || 0);
+  const qBopTotalUp = Math.max(0, window.__qBOP_totalUp_m3s ||
+    (qAnnulusTotalUp + qBO_up + qChokeMixUp + qKillMixUp));
+  const qFromAnnBelow = qAnnulusToRiser;
+
+  const annulusTopMW = annBelowGrid[0] || dsEffluentMW;
+  let bopNodeMW = annulusTopMW;
+  if (qBopTotalUp > FLOW_THRESHOLD) {
+    let bopMix = 0;
+    if (qAnnulusTotalUp > FLOW_THRESHOLD) bopMix += qAnnulusTotalUp * annulusTopMW;
+    if (qBO_up > FLOW_THRESHOLD) bopMix += qBO_up * boosterEffluentMW;
+    if (qChokeMixUp > FLOW_THRESHOLD) bopMix += qChokeMixUp * chokeEffluentMW;
+    if (qKillMixUp > FLOW_THRESHOLD) bopMix += qKillMixUp * killEffluentMW;
+    bopNodeMW = bopMix / qBopTotalUp;
+  }
+  window.__bopNodeMW_ppg = bopNodeMW;
 
   // Total flow entering riser at BOP depth
-  const qTotalIntoRiser = qFromAnnBelow + qBO_up + qChoke_down + qKill_down;
+  const qTotalIntoRiser = qFromAnnBelow + qBO_up + qChokeMixUp + qKillMixUp;
 
   if (qTotalIntoRiser > FLOW_THRESHOLD) {
     const v_above = qTotalIntoRiser / Math.max(A_riser, 1e-12);
@@ -1504,8 +1522,7 @@ function stepAdvection(){
       let qTotal = 0;
 
       if (qFromAnnBelow > FLOW_THRESHOLD) {
-        const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
-        mixMW += qFromAnnBelow * fromBelowMW;
+        mixMW += qFromAnnBelow * annulusTopMW;
         qTotal += qFromAnnBelow;
       }
 
@@ -1514,14 +1531,14 @@ function stepAdvection(){
         qTotal += qBO_up;
       }
 
-      if (qChoke_down > FLOW_THRESHOLD) {
-        mixMW += qChoke_down * chokeEffluentMW;
-        qTotal += qChoke_down;
+      if (qChokeMixUp > FLOW_THRESHOLD) {
+        mixMW += qChokeMixUp * chokeEffluentMW;
+        qTotal += qChokeMixUp;
       }
 
-      if (qKill_down > FLOW_THRESHOLD) {
-        mixMW += qKill_down * killEffluentMW;
-        qTotal += qKill_down;
+      if (qKillMixUp > FLOW_THRESHOLD) {
+        mixMW += qKillMixUp * killEffluentMW;
+        qTotal += qKillMixUp;
       }
 
       if (qTotal > FLOW_THRESHOLD) {
@@ -1529,6 +1546,8 @@ function stepAdvection(){
       } else {
         mixMW = MW_DS;  // Fallback
       }
+
+      window.__bopRiserMW_ppg = mixMW;
 
       annAboveGrid.push(mixMW);
 
@@ -1562,8 +1581,7 @@ function stepAdvection(){
       let qTotal = 0;
 
       if (qFromAnnBelow > FLOW_THRESHOLD) {
-        const fromBelowMW = annBelowGrid[0] || dsEffluentMW;
-        mixMW += qFromAnnBelow * fromBelowMW;
+        mixMW += qFromAnnBelow * annulusTopMW;
         qTotal += qFromAnnBelow;
       }
 
@@ -1572,14 +1590,14 @@ function stepAdvection(){
         qTotal += qBO_up;
       }
 
-      if (qChoke_down > FLOW_THRESHOLD) {
-        mixMW += qChoke_down * chokeEffluentMW;
-        qTotal += qChoke_down;
+      if (qChokeMixUp > FLOW_THRESHOLD) {
+        mixMW += qChokeMixUp * chokeEffluentMW;
+        qTotal += qChokeMixUp;
       }
 
-      if (qKill_down > FLOW_THRESHOLD) {
-        mixMW += qKill_down * killEffluentMW;
-        qTotal += qKill_down;
+      if (qKillMixUp > FLOW_THRESHOLD) {
+        mixMW += qKillMixUp * killEffluentMW;
+        qTotal += qKillMixUp;
       }
 
       if (qTotal > FLOW_THRESHOLD) {
@@ -1588,8 +1606,12 @@ function stepAdvection(){
         mixMW = MW_DS;
       }
 
+      window.__bopRiserMW_ppg = mixMW;
+
       annAboveGrid[k] = (1 - accAbove/CELL_M) * annAboveGrid[k] + (accAbove/CELL_M) * mixMW;
     }
+  } else {
+    window.__bopRiserMW_ppg = null;
   }
   // If qTotalIntoRiser ~ 0, leave annAboveGrid unchanged: riser column stays static.
 
@@ -1658,7 +1680,10 @@ function stepAdvection(){
   // ===============================
   // ✅ NOW WORKS WITH BOP OPEN OR CLOSED
   if (Q_CHOKE > 0 && CHOKE_LINE_OPEN) {
-    const qChoke_m3s = Q_CHOKE / 15850.323;
+    let qChoke_m3s = Q_CHOKE / 15850.323;
+    if (CHOKE_DIRECTION === "UP" && typeof window.__qChokeUp_m3s === 'number') {
+      qChoke_m3s = Math.max(0, window.__qChokeUp_m3s);
+    }
     const A_choke = Math.PI * CHOKE_LINE_ID_m * CHOKE_LINE_ID_m / 4;
     const v_choke = qChoke_m3s / Math.max(A_choke, 1e-12);
     const chokeStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_choke / vref);
@@ -1684,13 +1709,15 @@ function stepAdvection(){
         for (let i = 0; i < chokeGrid.length - 1; i++) {
           chokeGrid[i] = chokeGrid[i + 1];
         }
-        // Fluid entering from below-BOP annulus at BOP depth
-        // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
-        const sourceMW = annBelowGrid[0] || MW_DS;
+        // Fluid entering from BOP node (mixture of annulus + booster + choke/kill down)
+        const sourceMW = (typeof window.__bopNodeMW_ppg === 'number'
+          ? window.__bopNodeMW_ppg
+          : (annBelowGrid[0] || MW_DS));
         const effMW = effectiveCellDensity_ppg(sourceMW, 0, false);
         chokeGrid[chokeGrid.length - 1] = effMW;
         accChoke -= CELL_M;
       }
+      window.__bopChokeUpMW_ppg = (qChoke_m3s > FLOW_THRESHOLD) ? (window.__bopNodeMW_ppg || (annBelowGrid[0] || MW_DS)) : null;
     }
   }
 
@@ -1699,7 +1726,10 @@ function stepAdvection(){
   // ===============================
   // ✅ NOW WORKS WITH BOP OPEN OR CLOSED
   if (Q_KILL > 0 && KILL_LINE_OPEN) {
-    const qKill_m3s = Q_KILL / 15850.323;
+    let qKill_m3s = Q_KILL / 15850.323;
+    if (KILL_DIRECTION === "UP" && typeof window.__qKillUp_m3s === 'number') {
+      qKill_m3s = Math.max(0, window.__qKillUp_m3s);
+    }
     const A_kill = Math.PI * KILL_LINE_ID_m * KILL_LINE_ID_m / 4;
     const v_kill = qKill_m3s / Math.max(A_kill, 1e-12);
     const killStep_m = TIME_ACCEL * BASE_M_PER_FRAME * (v_kill / vref);
@@ -1725,13 +1755,15 @@ function stepAdvection(){
         for (let i = 0; i < killGrid.length - 1; i++) {
           killGrid[i] = killGrid[i + 1];
         }
-        // Fluid entering from below-BOP annulus at BOP depth
-        // Take fluid from cell at BOP depth in annBelowGrid (top cell = index 0)
-        const sourceMW = annBelowGrid[0] || MW_DS;
+        // Fluid entering from BOP node mixture
+        const sourceMW = (typeof window.__bopNodeMW_ppg === 'number'
+          ? window.__bopNodeMW_ppg
+          : (annBelowGrid[0] || MW_DS));
         const effMW = effectiveCellDensity_ppg(sourceMW, 0, false);
         killGrid[killGrid.length - 1] = effMW;
         accKill -= CELL_M;
       }
+      window.__bopKillUpMW_ppg = (qKill_m3s > FLOW_THRESHOLD) ? (window.__bopNodeMW_ppg || (annBelowGrid[0] || MW_DS)) : null;
     }
   }
 
@@ -2914,6 +2946,19 @@ function nextBoundaryAfter_(d, goingUp){ // goingUp = true if depth is decreasin
 //            and a stable FLOW_OUT_gpm via hysteresis+smoothing.
 // Call once per substep BEFORE friction and level solver.
 // ---------------------------------------------------------------------------
+function publishBopNodeContrib(annUp=0, boosterUp=0, chokeDownUp=0, killDownUp=0){
+  const clampPos = (v) => (Number.isFinite(v) && v > 0) ? v : 0;
+  const ann = clampPos(annUp);
+  const bo  = clampPos(boosterUp);
+  const ch  = clampPos(chokeDownUp);
+  const ki  = clampPos(killDownUp);
+  window.__qBOP_annulusUpTotal_m3s = ann;
+  window.__qBOP_boosterUp_m3s      = bo;
+  window.__qBOP_chokeDownUp_m3s    = ch;
+  window.__qBOP_killDownUp_m3s     = ki;
+  window.__qBOP_totalUp_m3s        = ann + bo + ch + ki;
+}
+
 function routeAnnulusFlowsWithLosses(dt_s){
   const M3_PER_GPM = 1/15850.323;
 
@@ -2929,6 +2974,13 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // Choke and Kill line flows
   const qChoke_m3s = (Q_CHOKE || 0) * M3_PER_GPM;
   const qKill_m3s = (Q_KILL || 0) * M3_PER_GPM;
+
+  // Defaults for BOP mixing diagnostics (overwritten below)
+  publishBopNodeContrib(0, 0, 0, 0);
+  window.__qBOP_annulusToRiser_m3s = 0;
+  window.__qRiserUp_m3s = 0;
+  window.__qChokeUp_m3s = 0;
+  window.__qKillUp_m3s = 0;
 
   const chokeUpActive = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
   const killUpActive = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
@@ -2986,6 +3038,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
     qChoke_actual = flowDistribution.Q_choke_m3s;
     qKill_actual = flowDistribution.Q_kill_m3s;
 
+    window.__qChokeUp_m3s = qChoke_actual;
+    window.__qKillUp_m3s = qKill_actual;
+    window.__qRiserUp_m3s = 0;
+
     const chokeActual_gpm = qChoke_actual * 15850.323;
     const killActual_gpm = qKill_actual * 15850.323;
 
@@ -2999,6 +3055,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Store calculated flow rates for UI display
     window.__Q_CHOKE_CALCULATED_m3s = qChoke_actual;
     window.__Q_KILL_CALCULATED_m3s = qKill_actual;
+
+    // All upflow while BOP is closed originates from the annulus below
+    publishBopNodeContrib(qToSurface_belowBOP, 0, 0, 0);
+    window.__qBOP_annulusToRiser_m3s = 0;
 
     // Check if requested pressures can be achieved (for user feedback)
     if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP' && qChoke_actual > 1e-6) {
@@ -3169,11 +3229,17 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // If pressure doesn't allow downward flow (BHP < Pfrac at loss zone),
   // the zone deactivates (dP < 0 triggers hysteresis), qToLoss → 0, takeBO/takeChoke/takeKill → 0,
   // and leftovers route upward via this logic. This increases riser hydrostatic until new equilibrium.
-  let qAnnUp = DS_left + TF_left +
-               (riserFull || takeBO === 0 ? BO_left : 0) +
-               (riserFull || takeChoke === 0 ? Choke_left : 0) +
-               (riserFull || takeKill === 0 ? Kill_left : 0) +
-               qInflux;
+  const boosterUpToSurface = (riserFull || takeBO === 0 ? BO_left : 0);
+  const chokeDownUpToSurface = (riserFull || takeChoke === 0 ? Choke_left : 0);
+  const killDownUpToSurface = (riserFull || takeKill === 0 ? Kill_left : 0);
+
+  let qAnnUp = DS_left + TF_left + boosterUpToSurface +
+               chokeDownUpToSurface + killDownUpToSurface + qInflux;
+
+  const qAnnulusToSurface = Math.max(0, qAnnUp - boosterUpToSurface -
+    chokeDownUpToSurface - killDownUpToSurface);
+  publishBopNodeContrib(qAnnulusToSurface, boosterUpToSurface,
+    chokeDownUpToSurface, killDownUpToSurface);
 
   // === MULTI-PATH UP FLOW WHEN BOP OPEN + CHOKE/KILL LINES ALSO UP ===
   // If choke/kill lines are open for UP flow when BOP is also open,
@@ -3193,6 +3259,13 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
     // Update qAnnUp to reflect only riser flow (choke/kill bypass the riser)
     qAnnUp = Q_riser_actual;
+
+    window.__qRiserUp_m3s = Q_riser_actual;
+    window.__qChokeUp_m3s = hasChokeUP ? Q_choke_actual : 0;
+    window.__qKillUp_m3s = hasKillUP ? Q_kill_actual : 0;
+    window.__qBOP_annulusToRiser_m3s = Math.max(0,
+      Q_riser_actual - boosterUpToSurface -
+      chokeDownUpToSurface - killDownUpToSurface);
 
     // Store calculated choke/kill flows
     window.__Q_CHOKE_CALCULATED_m3s = Q_choke_actual;
@@ -3231,6 +3304,12 @@ function routeAnnulusFlowsWithLosses(dt_s){
     window.__Q_CHOKE_CALCULATED_m3s = 0;
     window.__Q_KILL_CALCULATED_m3s = 0;
     window.__Q_TOTAL_UP_m3s = qAnnUp;
+    window.__qRiserUp_m3s = qAnnUp;
+    window.__qChokeUp_m3s = 0;
+    window.__qKillUp_m3s = 0;
+    window.__qBOP_annulusToRiser_m3s = Math.max(0,
+      qAnnUp - boosterUpToSurface -
+      chokeDownUpToSurface - killDownUpToSurface);
   }
 
   // ✅ CRITICAL FIX: Separate flows for friction calculation
