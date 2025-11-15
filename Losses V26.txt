@@ -229,11 +229,17 @@ function riserFullEnoughForSBP(){
 function sbpCanPressurizeAnnulus(){
   if (!MPD_ON) return false;
   if (BOP_CLOSED) return true;
+  if (!RCD_CLOSED) return false;
   return riserFullEnoughForSBP();
 }
 
 function sbpAppliedPsi(){
-  return sbpCanPressurizeAnnulus() ? Math.max(0, CURRENT_SBP || 0) : 0;
+  if (!sbpCanPressurizeAnnulus()) return 0;
+  const base = Math.max(0, CURRENT_SBP || 0);
+  const extraFromCompression = (!BOP_CLOSED && mpdSealActive())
+    ? Math.max(0, closedWellPressureBoost_psi || 0)
+    : 0;
+  return base + extraFromCompression;
 }
 let ANCHOR_DEPTH = 0;
 let ANCHOR_ECD = 0;
@@ -2718,8 +2724,7 @@ function pressureAtDepth(d, opts = {}){
   const P_bop_lines = (includeBopLines && belowBOP) ? bopLinePressureContribution() : 0;
 
   // Closed Well Pressure Boost (when pumping to closed well with no exit)
-  const mpdSealed = mpdSealActive();
-  const closedApplies = includeClosed && ((BOP_CLOSED && belowBOP) || (!BOP_CLOSED && mpdSealed));
+  const closedApplies = includeClosed && BOP_CLOSED && belowBOP;
   const P_closed_well = closedApplies ? (closedWellPressureBoost_psi || 0) : 0;
 
   const total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
@@ -2874,14 +2879,26 @@ function bopLinePressureAboveBOP(depth){
   const seg = dominantBopLineSegment();
   if (!seg) return NaN;
 
-  const targetDepth = Math.max(0, Math.min(depth, BOP_DEPTH));
+  const targetDepth = clamp(depth, 0, BOP_DEPTH);
   const wetLen = Math.max(seg.wetLen, 0);
-  if (wetLen <= 0) {
-    return seg.surfacePressure;
+  if (wetLen <= 1e-6) {
+    const appliedAtBOP = pressureAtDepth(BOP_DEPTH);
+    return targetDepth >= BOP_DEPTH ? appliedAtBOP : Math.max(14.7, appliedAtBOP);
   }
-  const depthInSegment = Math.min(targetDepth, wetLen);
-  const frictionGrad = seg.frictionPsi / Math.max(wetLen, 1e-6);
-  return seg.surfacePressure + depthInSegment * (PSI_COEF * seg.mw + frictionGrad);
+
+  const fluidTopDepth = BOP_DEPTH - wetLen;
+  const depthWithinFluid = Math.max(0, Math.min(targetDepth - fluidTopDepth, wetLen));
+  const gradHydro = PSI_COEF * seg.mw;
+  const gradFric = seg.frictionPsi / Math.max(wetLen, 1e-6);
+  const gradTotal = gradHydro + gradFric;
+  const appliedAtBOP = pressureAtDepth(BOP_DEPTH);
+  const pressureAtFluidTop = Math.max(14.7, appliedAtBOP - gradTotal * wetLen);
+
+  if (targetDepth <= fluidTopDepth) {
+    return pressureAtFluidTop;
+  }
+
+  return pressureAtFluidTop + gradTotal * depthWithinFluid;
 }
 
 function bopLineEcdAtDepth(depth){
@@ -3089,7 +3106,9 @@ function sppAtLevel(lvl_m){
   const MWann = annulusAvgPPG();
   const MWds = dsAvgPPG();
   const hydroPsi = PSI_COEF * (MWann * TD_DEPTH - MWds * filledLen);
-  return dsFricPsi + annFricPsi + sbpPsi + hydroPsi;
+  const bopLinePsi = BOP_CLOSED ? bopLinePressureContribution() : 0;
+  const closedBoost = BOP_CLOSED ? (closedWellPressureBoost_psi || 0) : 0;
+  return dsFricPsi + annFricPsi + sbpPsi + hydroPsi + bopLinePsi + closedBoost;
 }
 
 function boSppAtLevel(lvl_m){
@@ -6742,16 +6761,12 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
 }
 
 // MPD RCD cap
-if (MPD_ON){
+if (MPD_ON && RCD_CLOSED){
   const capY = well.y - 8;
   const xL = well.x + 2;
   const xR = well.x + well.w - 2;
   noStroke();
-  if (RCD_CLOSED) {
-    fill(0, 80, 80, 230);
-  } else {
-    fill(200, 80, 80, 230);
-  }
+  fill(0, 80, 80, 230);
   rect(xL, capY, xR - xL, 14, 3);
   fill(0,0,100);
   textSize(12);
