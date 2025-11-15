@@ -152,6 +152,12 @@ let fitParams = { mu_p_Pa_s: null, tau_y_Pa: null, K_PL_Pa_s_n: null, n_PL: null
 // ============================ BOP & WELL CONTROL =============================
 let BOP_CLOSED = false; // BOP state (open/closed)
 let closedWellPressureBoost_psi = 0; // Pressure increase from pumping to closed well
+const CLOSED_WELL_WARNING_PSI = 12000;
+const CLOSED_WELL_MAX_PSI = 15000;
+
+let RCD_CLOSED = false;
+let MPD_CHOKE_LOCKED_CLOSED = false;
+let mpdChokeBtn, rcdBtn;
 
 // Choke Line (runs from BOP to surface, parallel to riser)
 let CHOKE_LINE_ID_in = 3.0; // Inner diameter (inches)
@@ -437,6 +443,24 @@ let levelCMLTop_m     = 0;
 let FLOW_OUT_gpm = 0;
 let FLOW_OUT_smooth = 0;
 const FLOW_OUT_ALPHA = 0.20;
+
+function mpdChokeIsFullyClosed(){
+  if (!MPD_ON) return false;
+  if (MPD_CHOKE_LOCKED_CLOSED) return true;
+  const chokeNearlyShut = (typeof CHOKE_POS_pct === 'number') ? (CHOKE_POS_pct <= 0.1) : true;
+  const flowVal = (typeof FLOW_OUT_gpm === 'number') ? FLOW_OUT_gpm : 0;
+  return chokeNearlyShut && flowVal < 0.5;
+}
+
+function mpdSealActive(){
+  return MPD_ON && RCD_CLOSED && mpdChokeIsFullyClosed();
+}
+
+function isWellShutInByValves(){
+  const bopSealedByValves = BOP_CLOSED && !CHOKE_LINE_OPEN && !KILL_LINE_OPEN;
+  const mpdSurfaceSeal = (!BOP_CLOSED) && mpdSealActive();
+  return bopSealedByValves || mpdSurfaceSeal;
+}
 
 // ===== Loss zones (up to 3) =====
 let LOSSES_ON = false;
@@ -1255,11 +1279,46 @@ function mixFormationFluidIntoGrid(grid, index, fluidDensity_ppg, fraction){
   grid[index] = base * (1 - f) + fluidDensity_ppg * f;
 }
 
+function currentFormationFluidInventory_m3(){
+  const cellH = CELL_M;
+  let total = 0;
+
+  for (let i = 0; i < N_BELOW; i++) {
+    const frac = (gasPhaseFrom_below[i] || 0) + (oilPhaseFrom_below[i] || 0) + (waterPhaseFrom_below[i] || 0);
+    if (frac > 1e-4) {
+      const depthMid = BOP_DEPTH + i * CELL_M + CELL_M * 0.5;
+      const area = areaAtDepthTop_(depthMid);
+      total += frac * Math.max(area, 1e-9) * cellH;
+    }
+  }
+
+  for (let i = 0; i < N_ABV; i++) {
+    const frac = (gasPhaseFrom_above[i] || 0) + (oilPhaseFrom_above[i] || 0) + (waterPhaseFrom_above[i] || 0);
+    if (frac > 1e-4) {
+      const depthMid = i * CELL_M + CELL_M * 0.5;
+      const area = areaAtDepthTop_(depthMid);
+      total += frac * Math.max(area, 1e-9) * cellH;
+    }
+  }
+
+  return total;
+}
+
+function currentFormationFluidInventory_bbl(){
+  return currentFormationFluidInventory_m3() * 6.28981;
+}
+
 function updateFormationFluidMigration(dt_s) {
   // Reset influx rate
   current_influx_m3s = 0;
 
-  if (!formationFluidEnabled) return;
+  if (!formationFluidEnabled) {
+    if (typeof window !== 'undefined') {
+      window.__influxRate_gpm = 0;
+      window.__influxInventory_bbl = 0;
+    }
+    return;
+  }
 
   const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
   if (!fluidProps) return;
@@ -1267,20 +1326,34 @@ function updateFormationFluidMigration(dt_s) {
   const expansion_m3s = Math.max(0, window.__gasExpansion_m3s || 0);
   window.__gasExpansion_m3s = 0;
 
+  const sealedByValves = isWellShutInByValves();
+
   // Calculate influx rate based on mode
   let influxRate_gpm = 0;
+  const BHP_psi = pressureAtDepth(formationFluidDepth_m);
   if (kickMode === 'MANUAL') {
     influxRate_gpm = formationFluidRate_gpm;
   } else if (kickMode === 'PRESSURE_DRIVEN') {
-    // Calculate BHP at kick depth
-    const BHP_psi = pressureAtDepth(formationFluidDepth_m);
     const deltaP = Math.max(0, porePressure_psi - BHP_psi);
     influxRate_gpm = productivityIndex_gpm_psi * deltaP;
+  }
+
+  if (sealedByValves) {
+    const availableDraw = Math.max(0, porePressure_psi - BHP_psi);
+    if (availableDraw <= 0) {
+      influxRate_gpm = 0;
+    } else if (kickMode === 'MANUAL') {
+      const maxRate = productivityIndex_gpm_psi * availableDraw;
+      influxRate_gpm = Math.min(influxRate_gpm, maxRate);
+    }
   }
 
   // Store current influx rate for flow routing (even if zero)
   const influx_m3s = influxRate_gpm / 15850.323;
   current_influx_m3s = influx_m3s + expansion_m3s;
+  if (typeof window !== 'undefined') {
+    window.__influxRate_gpm = influxRate_gpm;
+  }
 
   if (influxRate_gpm <= 0) {
     // Even with no influx, migrate existing kick fluids and propagate expansion effects
@@ -1357,6 +1430,10 @@ function updateFormationFluidMigration(dt_s) {
 
   // Update total volume
   formationFluidVolume_bbl += (formationFluidRate_gpm * dt_s) / 42; // Convert to barrels
+
+  if (typeof window !== 'undefined') {
+    window.__influxInventory_bbl = currentFormationFluidInventory_bbl();
+  }
 
   // Update front position (find highest cell with any formation fluid)
   let highestCell = -1;
@@ -2641,9 +2718,9 @@ function pressureAtDepth(d, opts = {}){
   const P_bop_lines = (includeBopLines && belowBOP) ? bopLinePressureContribution() : 0;
 
   // Closed Well Pressure Boost (when pumping to closed well with no exit)
-  const P_closed_well = (includeClosed && BOP_CLOSED && belowBOP)
-    ? (closedWellPressureBoost_psi || 0)
-    : 0;
+  const mpdSealed = mpdSealActive();
+  const closedApplies = includeClosed && ((BOP_CLOSED && belowBOP) || (!BOP_CLOSED && mpdSealed));
+  const P_closed_well = closedApplies ? (closedWellPressureBoost_psi || 0) : 0;
 
   const total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
   return total;
@@ -2717,13 +2794,13 @@ function activeBopLineSegments(){
   if (!BOP_CLOSED) return [];
 
   const segments = [];
-  const chokeActive = (CHOKE_DIRECTION === 'UP' && Q_CHOKE > 0 && CHOKE_LINE_OPEN);
-  const killActive  = (KILL_DIRECTION === 'UP'  && Q_KILL  > 0 && KILL_LINE_OPEN);
+  const chokeActive = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+  const killActive  = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
 
   if (chokeActive) {
     const qChoke_m3s = (typeof window !== 'undefined' && typeof window.__Q_CHOKE_CALCULATED_m3s === 'number')
       ? Math.max(window.__Q_CHOKE_CALCULATED_m3s, 0)
-      : Q_CHOKE * M3_PER_GPM;
+      : (Q_CHOKE || 0) * M3_PER_GPM;
     const dryLen = clamp(levelDeficit_choke_m || 0, 0, BOP_DEPTH);
     const wetLen = Math.max(0, BOP_DEPTH - dryLen);
     if (wetLen > 0) {
@@ -2743,7 +2820,7 @@ function activeBopLineSegments(){
   if (killActive) {
     const qKill_m3s = (typeof window !== 'undefined' && typeof window.__Q_KILL_CALCULATED_m3s === 'number')
       ? Math.max(window.__Q_KILL_CALCULATED_m3s, 0)
-      : Q_KILL * M3_PER_GPM;
+      : (Q_KILL || 0) * M3_PER_GPM;
     const dryLen = clamp(levelDeficit_kill_m || 0, 0, BOP_DEPTH);
     const wetLen = Math.max(0, BOP_DEPTH - dryLen);
     if (wetLen > 0) {
@@ -3387,17 +3464,14 @@ function routeAnnulusFlowsWithLosses(dt_s){
       closedWellPressureBoost_psi += pressureIncrease_psi;
 
       // ✅ NEW: Pressure warning and safety limit
-      const MAX_SAFE_PRESSURE_PSI = 15000; // Safety limit
-      const WARNING_PRESSURE_PSI = 12000;  // Warning threshold
-
-      if (closedWellPressureBoost_psi > WARNING_PRESSURE_PSI) {
+      if (closedWellPressureBoost_psi > CLOSED_WELL_WARNING_PSI) {
         window.__PRESSURE_COMPRESSION_WARNING = `⚠️ CLOSED WELL PRESSURE: ${closedWellPressureBoost_psi.toFixed(0)} psi - PUMPING WITH NO EXIT PATH!`;
       }
 
       // Cap pressure at maximum safe limit
-      if (closedWellPressureBoost_psi > MAX_SAFE_PRESSURE_PSI) {
-        closedWellPressureBoost_psi = MAX_SAFE_PRESSURE_PSI;
-        window.__PRESSURE_COMPRESSION_WARNING = `🛑 CRITICAL: Pressure limited at ${MAX_SAFE_PRESSURE_PSI} psi - STOP PUMPING!`;
+      if (closedWellPressureBoost_psi > CLOSED_WELL_MAX_PSI) {
+        closedWellPressureBoost_psi = CLOSED_WELL_MAX_PSI;
+        window.__PRESSURE_COMPRESSION_WARNING = `🛑 CRITICAL: Pressure limited at ${CLOSED_WELL_MAX_PSI} psi - STOP PUMPING!`;
       }
     } else {
       // Well has exit path - pressure boost decays back to normal
@@ -3454,6 +3528,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // ✅ NEW: Add choke/kill DOWN flows to supply when BOP is open
   const qChoke_down = (CHOKE_LINE_OPEN && CHOKE_DIRECTION === "DOWN") ? qChoke_m3s : 0;
   const qKill_down = (KILL_LINE_OPEN && KILL_DIRECTION === "DOWN") ? qKill_m3s : 0;
+  const mpdSurfaceSeal = mpdSealActive();
 
   // Supply that can feed losses from downhole side (no surface returns here)
   // We allow DS + Booster + TopFill + Choke/Kill DOWN to feed the zone; subtract CML intake
@@ -3738,6 +3813,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
     targetFO_m3s += riserUp_m3s;
   }
 
+  if (mpdSurfaceSeal) {
+    targetFO_m3s = 0;
+  }
+
   const targetFO_gpm = Math.max(0, targetFO_m3s * 15850.323);
 
   // Debug FO calculation disabled (too verbose)
@@ -3751,16 +3830,44 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const ALPHA = lossesActive ? 0.25 : 0.8;  // Fast filter when no losses
   const DQDT_MAX = lossesActive ? 800 : 5000; // Fast slew when no losses
 
-  const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
-  const lp   = prev + ALPHA*(targetFO_gpm - prev);
-  const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
-  const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
-  FLOW_OUT_gpm = prev + step;
+  if (mpdSurfaceSeal) {
+    FLOW_OUT_gpm = 0;
+  } else {
+    const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
+    const lp   = prev + ALPHA*(targetFO_gpm - prev);
+    const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
+    const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
+    FLOW_OUT_gpm = prev + step;
+  }
 
   // Additional debug disabled (too verbose)
   // if (frameCount % 150 === 0 && Math.abs(targetFO_gpm - FLOW_OUT_gpm) > 10) {
   //   console.log(`[FO_DEBUG] Slewing: prev=${prev.toFixed(1)}, lp=${lp.toFixed(1)}, step=${step.toFixed(1)}, dt=${dt_s.toFixed(4)}s, maxStep=${maxStep.toFixed(1)}`);
   // }
+
+  const qSurfaceActual_m3s = Math.max(0, (FLOW_OUT_gpm || 0)) * M3_PER_GPM;
+  const qTotalIn_m3s = qDS + qBO + qTF + qChoke_down + qKill_down + qInflux;
+  const qTotalOut_m3s = qToLoss + qCML + qSurfaceActual_m3s;
+  const netVolumeTrapped_m3s = Math.max(0, qTotalIn_m3s - qTotalOut_m3s);
+
+  if (mpdSurfaceSeal && netVolumeTrapped_m3s > 1e-6) {
+    const dtSeal = Math.max(window.dt_s || dt_s || 1/60, 1/120);
+    const trappedVolume_bbl = netVolumeTrapped_m3s * 6.28981 * dtSeal;
+    const pressureIncrease_psi = trappedVolume_bbl * 15;
+    closedWellPressureBoost_psi = Math.min(CLOSED_WELL_MAX_PSI, closedWellPressureBoost_psi + pressureIncrease_psi);
+
+    if (closedWellPressureBoost_psi > CLOSED_WELL_WARNING_PSI) {
+      window.__PRESSURE_COMPRESSION_WARNING = `⚠️ CLOSED WELL PRESSURE: ${closedWellPressureBoost_psi.toFixed(0)} psi - RCD SEALED!`;
+    }
+    if (closedWellPressureBoost_psi >= CLOSED_WELL_MAX_PSI) {
+      window.__PRESSURE_COMPRESSION_WARNING = `🛑 CRITICAL: Pressure limited at ${CLOSED_WELL_MAX_PSI} psi - STOP PUMPING!`;
+    }
+  } else if (!BOP_CLOSED) {
+    closedWellPressureBoost_psi *= 0.9;
+    if (!mpdSurfaceSeal) {
+      window.__PRESSURE_COMPRESSION_WARNING = null;
+    }
+  }
 
   // Optional smoother you already have
   if (typeof FLOW_OUT_ALPHA==='number') {
@@ -4210,6 +4317,10 @@ function updateAllLossZones(dt_s) {
       z._Q_vel = (z._Q_vel || 0) * decay;
       z.Qloss_gpm = z._Q_filt;
     }
+    if (typeof window !== 'undefined') {
+      window.sumLoss_gpm = 0;
+      window.__lossZoneDiag = [];
+    }
     return;
   }
 
@@ -4226,17 +4337,20 @@ function updateAllLossZones(dt_s) {
   const Q_DS_gpm = Q_DS || 0;
   const Q_BO_gpm = Q_BO || 0;
   const Q_TF_gpm = (TOPFILL_ON ? Q_TOPFILL : 0) || 0;
+  const Q_CHOKE_DOWN_gpm = (CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'DOWN') ? (Q_CHOKE || 0) : 0;
+  const Q_KILL_DOWN_gpm  = (KILL_LINE_OPEN  && KILL_DIRECTION  === 'DOWN') ? (Q_KILL  || 0) : 0;
   const boosterDown = (fluidTop > 0.5);
 
   // DS flows UP from TD, so it's available to all zones (processed deepest to shallowest)
   let qDS_remaining = Q_DS_gpm;
 
-  // Booster flows DOWN from BOP, so it's consumed by zones top-to-bottom
-  // Only zones BELOW BOP can receive booster flow
-  let qBO_remaining = boosterDown ? (Q_BO_gpm + Q_TF_gpm) : 0;
+  // Booster + downline flows feed zones below BOP when riser is not full
+  const totalDownInjection_gpm = Q_BO_gpm + Q_TF_gpm + Q_CHOKE_DOWN_gpm + Q_KILL_DOWN_gpm;
+  let qBO_remaining = boosterDown ? totalDownInjection_gpm : 0;
 
   // Track total loss change for global rate limit
   let totalLossChange_gpm = 0;
+  const lossDiag = [];
 
   // ========================================================================
   // Process zones from SHALLOW to DEEP (spatial order for downward booster flow)
@@ -4328,6 +4442,13 @@ function updateAllLossZones(dt_s) {
       qDS_remaining -= Q_new;
     }
 
+    lossDiag.push({
+      depth_m: z.depth_m,
+      overbalance_psi: dP,
+      qLoss_gpm: z.Qloss_gpm || 0,
+      active: z._active === true
+    });
+
     // Clamp to zero (avoid numerical errors)
     qBO_remaining = Math.max(0, qBO_remaining);
     qDS_remaining = Math.max(0, qDS_remaining);
@@ -4354,6 +4475,12 @@ function updateAllLossZones(dt_s) {
     z._Q_filt = (z._Q_filt || 0) * decay;
     z._Q_vel = (z._Q_vel || 0) * decay;
     z.Qloss_gpm = z._Q_filt;
+  }
+
+  const sumLoss_gpm = activeZones.reduce((s, z) => s + (z.Qloss_gpm || 0), 0);
+  if (typeof window !== 'undefined') {
+    window.sumLoss_gpm = sumLoss_gpm;
+    window.__lossZoneDiag = lossDiag;
   }
 }
 
@@ -5544,6 +5671,14 @@ function setup(){
   sbpModeBtn = createButton('SBP: ' + (SBP_MODE === 'manual' ? 'Manual' : 'Anchor')).size(110, 22).position(xPos, rowY2);
   xPos += 120;
 
+  const mpdChokeLabel = () => MPD_CHOKE_LOCKED_CLOSED ? 'MPD Choke: CLOSED' : 'MPD Choke: AUTO';
+  mpdChokeBtn = createButton(mpdChokeLabel()).size(140, 22).position(xPos, rowY2);
+  xPos += 150;
+
+  const rcdLabel = () => RCD_CLOSED ? 'RCD: CLOSED' : 'RCD: OPEN';
+  rcdBtn = createButton(rcdLabel()).size(110, 22).position(xPos, rowY2);
+  xPos += 120;
+
   cmlBtn = createButton(CML_ON ? 'CML: ON' : 'CML: OFF').size(90, 22).position(xPos, rowY2)
     .style('background', '#ffe74a').style('font-weight', 'bold');
   xPos += 100;
@@ -5652,6 +5787,14 @@ logDownloadBtn.mousePressed(() => {
   cmlDepthInput.input(() => { CML_DEPTH = clamp(num(cmlDepthInput.value()), 0, BOP_DEPTH); });
   
   mpdBtn.mousePressed(() => { MPD_ON = !MPD_ON; mpdBtn.html(MPD_ON ? 'MPD: ON' : 'MPD: OFF'); });
+  mpdChokeBtn.mousePressed(() => {
+    MPD_CHOKE_LOCKED_CLOSED = !MPD_CHOKE_LOCKED_CLOSED;
+    mpdChokeBtn.html(MPD_CHOKE_LOCKED_CLOSED ? 'MPD Choke: CLOSED' : 'MPD Choke: AUTO');
+  });
+  rcdBtn.mousePressed(() => {
+    RCD_CLOSED = !RCD_CLOSED;
+    rcdBtn.html(RCD_CLOSED ? 'RCD: CLOSED' : 'RCD: OPEN');
+  });
   sbpModeBtn.mousePressed(() => {
     SBP_MODE = (SBP_MODE === 'manual') ? 'anchor' : 'manual';
     sbpModeBtn.html(SBP_MODE === 'manual' ? 'SBP: Manual' : 'SBP: Anchor');
@@ -6603,8 +6746,17 @@ if (MPD_ON){
   const capY = well.y - 8;
   const xL = well.x + 2;
   const xR = well.x + well.w - 2;
-  noStroke(); fill(0, 80, 80, 230); rect(xL, capY, xR - xL, 14, 3);
-  fill(0,0,100); textSize(12); textAlign(CENTER, BASELINE); text("RCD", (xL + xR)/2, capY + 12);
+  noStroke();
+  if (RCD_CLOSED) {
+    fill(0, 80, 80, 230);
+  } else {
+    fill(200, 80, 80, 230);
+  }
+  rect(xL, capY, xR - xL, 14, 3);
+  fill(0,0,100);
+  textSize(12);
+  textAlign(CENTER, BASELINE);
+  text("RCD", (xL + xR)/2, capY + 12);
   textAlign(CENTER, CENTER);
 }
 
@@ -8423,6 +8575,12 @@ function updateDiagnosticsUI(dt_s){
   const loss_gpm = (typeof window !== 'undefined' && typeof window.sumLoss_gpm === 'number')
     ? window.sumLoss_gpm
     : (typeof totalLossRate_gpm === 'function' ? (totalLossRate_gpm() || 0) : 0);
+  const lossDemand_gpm = (typeof window !== 'undefined' && typeof window.__qLossDemand_m3s === 'number')
+    ? window.__qLossDemand_m3s * 15850.323
+    : loss_gpm;
+  const lossDeficit_gpm = (typeof window !== 'undefined' && typeof window.__qLossDeficit_m3s === 'number')
+    ? window.__qLossDeficit_m3s * 15850.323
+    : 0;
 
   const qCML_gpm  = (typeof effective_Q_CML_gpm === 'function' ? (effective_Q_CML_gpm() || 0) : 0);
   const qComp_gpm = (typeof compressionEquivalentFlow_gpm === 'function'
@@ -8453,6 +8611,22 @@ function updateDiagnosticsUI(dt_s){
   const bopState = BOP_CLOSED ? 'CLOSED' : 'OPEN';
   const chokeState = `${CHOKE_LINE_OPEN ? 'OPEN' : 'CLOSED'} / ${CHOKE_DIRECTION}`;
   const killState = `${KILL_LINE_OPEN ? 'OPEN' : 'CLOSED'} / ${KILL_DIRECTION}`;
+  const downMix = (typeof window !== 'undefined' && window.__qAnnDown_breakdown)
+    ? window.__qAnnDown_breakdown
+    : { booster: 0, choke: 0, kill: 0, topfill: 0 };
+  const downBo_gpm = (downMix.booster || 0) * 15850.323;
+  const downCh_gpm = (downMix.choke || 0) * 15850.323;
+  const downKi_gpm = (downMix.kill || 0) * 15850.323;
+  const downTf_gpm = (downMix.topfill || 0) * 15850.323;
+  const sealedByValves = isWellShutInByValves();
+  const mpdSeal = mpdSealActive();
+  const closedBoost = closedWellPressureBoost_psi || 0;
+  const influxRateDiag = (typeof window !== 'undefined' && typeof window.__influxRate_gpm === 'number')
+    ? window.__influxRate_gpm
+    : formationFluidRate_gpm;
+  const influxInventoryDiag = (typeof window !== 'undefined' && typeof window.__influxInventory_bbl === 'number')
+    ? window.__influxInventory_bbl
+    : 0;
 
   // Prefer residual published by the level solver; else compute locally
   const resid_gpm = (typeof window !== 'undefined' && typeof window.qResid_gpm === 'number')
@@ -8469,8 +8643,12 @@ function updateDiagnosticsUI(dt_s){
     `Kill Line (${killState}) → Flow: ${fmt(killFlow_gpm)} gpm | MW: ${fmt2(killMW_ppg)} ppg`,
     `DS/Booster/TopFill In (gpm): ${fmt(qDS_gpm)} / ${fmt(qBO_gpm)} / ${fmt(qTopFill_gpm)}`,
     `FO (gpm): ${fmt(FLOW_OUT_gpm)} | ΣLoss (gpm): ${fmt(loss_gpm)}`,
+    `Loss demand / actual / deficit (gpm): ${fmt(lossDemand_gpm)} / ${fmt(loss_gpm)} / ${fmt(lossDeficit_gpm)}`,
+    `Down supply (gpm): Bo ${fmt(downBo_gpm)} | Ch ${fmt(downCh_gpm)} | Ki ${fmt(downKi_gpm)} | TF ${fmt(downTf_gpm)}`,
     `Q_CML_eff (gpm): ${fmt(qCML_gpm)} | Q_comp (gpm): ${fmt(qComp_gpm)}`,
-    `MassBal Resid (gpm): ${fmt(resid_gpm)}`
+    `MassBal Resid (gpm): ${fmt(resid_gpm)}`,
+    `Shut-In (valves): ${sealedByValves ? 'YES' : 'NO'} | MPD Seal: ${mpdSeal ? 'YES' : 'NO'} | Closed boost (psi): ${fmt(closedBoost)}`,
+    `Influx (gpm): ${fmt(influxRateDiag)} | Kick Volume (bbl): ${fmt(influxInventoryDiag)}`
   ];
 
   uiDiag.text.html(diagLines.join('<br/>'));
