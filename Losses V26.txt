@@ -3562,7 +3562,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
     fromBooster: 0,
     fromChoke: 0,
     fromKill: 0,
-    fromTopFill: 0
+    fromTopFill: 0,
+    fromStorage: 0
   };
 
   if (Array.isArray(lossZones)) {
@@ -3599,6 +3600,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
     ? totalLossDemand_m3s()
     : ((typeof totalLossRate_gpm==='function' ? totalLossRate_gpm() : 0) * M3_PER_GPM);
 
+  const qLossActual = (typeof totalLossRate_gpm === 'function')
+    ? (totalLossRate_gpm() || 0) * M3_PER_GPM
+    : qDem;
+
   // ============================================================================
   // BOP CLOSED STATE - SEPARATE FLOW PATHS
   // ============================================================================
@@ -3616,8 +3621,19 @@ function routeAnnulusFlowsWithLosses(dt_s){
     if (CHOKE_DIRECTION === "DOWN" && CHOKE_LINE_OPEN) qIn_belowBOP += qChoke_m3s;
     if (KILL_DIRECTION === "DOWN" && KILL_LINE_OPEN) qIn_belowBOP += qKill_m3s;
 
-    // Losses consume fluid from below-BOP annulus
-    const qToLoss = Math.min(qDem, Math.max(0, qIn_belowBOP));
+    // Losses consume fluid from below-BOP annulus (can exceed instantaneous inflow)
+    const qToLoss = qLossActual;
+    const qStorageDraw_m3s = Math.max(0, qToLoss - Math.max(0, qIn_belowBOP));
+    window.__lossStorageDraw_m3s = qStorageDraw_m3s;
+
+    window.__lossAllocation = {
+      fromDS: 0,
+      fromBooster: 0,
+      fromChoke: 0,
+      fromKill: 0,
+      fromTopFill: 0,
+      fromStorage: qStorageDraw_m3s
+    };
 
     // Available fluid to flow UP through choke/kill lines
     let qAvailable_belowBOP = Math.max(0, qIn_belowBOP - qToLoss);
@@ -3784,8 +3800,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
   // We allow DS + Booster + TopFill + Choke/Kill DOWN to feed the zone; subtract CML intake
   let qSupply = Math.max(0, qDS + qBO + qTF + qChoke_down + qKill_down - qCML);
 
-  // Amount that actually goes to the loss zone this step
-  const qToLoss = Math.min(qDem, qSupply);
+  const qToLoss = qLossActual;
+  const qSupplyForLoss = Math.min(qSupply, qToLoss);
+  const qStorageDraw_m3s = Math.max(0, qToLoss - qSupplyForLoss);
+  window.__lossStorageDraw_m3s = qStorageDraw_m3s;
 
   // How to source qToLoss: prefer Booster + Choke/Kill (downward) while level below surface,
   // then DS, then TopFill; this ensures downward flows go DOWN to the zone when not full.
@@ -3855,7 +3873,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
     fromBooster: takeBO,
     fromChoke: takeChoke,
     fromKill: takeKill,
-    fromTopFill: takeTF
+    fromTopFill: takeTF,
+    fromStorage: Math.max(0, qToLoss - (takeDS + takeBO + takeChoke + takeKill + takeTF))
   };
 
   const zonesBelow = Array.isArray(lossZones)
@@ -4552,7 +4571,11 @@ function smoothLossCommand(z, target_gpm, dt_s, qAvailable_gpm){
     cmd = z._Q_cmd - maxStep;
   }
 
-  cmd = Math.max(0, Math.min(qAvailable_gpm, cmd));
+  if (Number.isFinite(qAvailable_gpm)) {
+    cmd = Math.min(qAvailable_gpm, cmd);
+  }
+
+  cmd = Math.max(0, cmd);
   z._Q_cmd = cmd;
   return cmd;
 }
@@ -4695,12 +4718,9 @@ function updateAllLossZones(dt_s) {
     // DS return is available to all zones (flows upward from TD)
     const qDSAvailable = qDS_remaining;
 
-    // Total available to this zone
-    const qAvailable_gpm = qBoosterAvailable + qDSAvailable;
-
-    // Target flow limited by capacity and availability
-    const Q_target = Math.min(Q_capacity_gpm, qAvailable_gpm);
-    const Q_command = smoothLossCommand(z, Q_target, dt_s, qAvailable_gpm);
+    // Target flow is purely physics-driven (capacity from ΔP)
+    const Q_target = Q_capacity_gpm;
+    const Q_command = smoothLossCommand(z, Q_target, dt_s, null);
 
     // === ACCELERATION LIMITING (prevents spikes) ===
     const Q_current = z._Q_filt || 0;
@@ -4726,22 +4746,32 @@ function updateAllLossZones(dt_s) {
     z.Qloss_gpm = Q_new;
 
     // === CONSUME FLOW SPATIALLY ===
-    // Preferentially consume booster first (if available), then DS
-    if (zoneCanSeeBooster && qBO_remaining > 0) {
-      const fromBooster = Math.min(Q_new, qBO_remaining);
-      qBO_remaining -= fromBooster;
-      const fromDS = Q_new - fromBooster;
-      qDS_remaining -= fromDS;
-    } else {
-      // Only DS available
-      qDS_remaining -= Q_new;
+    // Preferentially consume booster/down-line injections first, then DS, any remainder is drawn from the annulus column
+    let remainingNeed_gpm = Q_new;
+    let fromDownLines_gpm = 0;
+    let fromDS_gpm = 0;
+
+    if (zoneCanSeeBooster && qBO_remaining > 0 && remainingNeed_gpm > 0) {
+      fromDownLines_gpm = Math.min(qBO_remaining, remainingNeed_gpm);
+      qBO_remaining -= fromDownLines_gpm;
+      remainingNeed_gpm -= fromDownLines_gpm;
     }
+
+    if (remainingNeed_gpm > 0 && qDS_remaining > 0) {
+      fromDS_gpm = Math.min(qDS_remaining, remainingNeed_gpm);
+      qDS_remaining -= fromDS_gpm;
+      remainingNeed_gpm -= fromDS_gpm;
+    }
+
+    const drawFromColumn_gpm = Math.max(0, remainingNeed_gpm);
+    z._storageDraw_gpm = drawFromColumn_gpm;
 
     lossDiag.push({
       depth_m: z.depth_m,
       overbalance_psi: dP,
       qLoss_gpm: z.Qloss_gpm || 0,
-      active: z._active === true
+      active: z._active === true,
+      storageDraw_gpm: drawFromColumn_gpm
     });
 
     // Clamp to zero (avoid numerical errors)
