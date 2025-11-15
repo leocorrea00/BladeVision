@@ -2119,6 +2119,22 @@ function annulusAvgPPG(){
   return count > 0 ? sum / count : MW_DS;
 }
 
+function annulusBelowAvgPPG(){
+  if (!Array.isArray(annBelowGrid) || annBelowGrid.length === 0) {
+    return MW_DS;
+  }
+  let sum = 0;
+  for (let i = 0; i < annBelowGrid.length; i++) {
+    const mudWeight = annBelowGrid[i] || MW_DS;
+    sum += effectiveCellDensity_ppg(mudWeight, i, false);
+  }
+  return sum / annBelowGrid.length;
+}
+
+function annulusConnectedAvgPPG(){
+  return BOP_CLOSED ? annulusBelowAvgPPG() : annulusAvgPPG();
+}
+
 function rhoDynamic(){ return annulusAvgPPG() * PPG_TO_KGM3; }
 function rho_bo(){ return boosterAvgPPG() * PPG_TO_KGM3; }
 function dsAvgPPG(){ return average(dsGrid) || MW_DS; }
@@ -3322,7 +3338,7 @@ function sppAtLevel(lvl_m){
   const dsFricPsi = dsFrictionPsiLength(filledLen);
   const annFricPsi = frictionPsi_withCML_rheo(TD_DEPTH);   // <— rheology-aware
   const sbpPsi = sbpAppliedPsi();
-  const MWann = annulusAvgPPG();
+  const MWann = annulusConnectedAvgPPG();
   const MWds = dsAvgPPG();
   const hydroPsi = PSI_COEF * (MWann * TD_DEPTH - MWds * filledLen);
 
