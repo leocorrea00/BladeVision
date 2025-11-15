@@ -3652,26 +3652,20 @@ function calculateFractureFriction_psi(qFrac_m3s, zone) {
   const qFrac_gpm = qFrac_m3s * 15850.323;
   const n = zone.n || 1.0;
 
-  // Use zone's reference calibration if available
+  // Use the calibrated ΔP-Q curve for the fracture when it exists
   if (zone.Qref_gpm > 0 && zone.DPref_psi > 0) {
     const C_frac = zone.Qref_gpm / Math.pow(zone.DPref_psi, n);
-    const dP_frac = Math.pow(qFrac_gpm / Math.max(C_frac, 1e-6), 1/n);
-    return dP_frac;
+    const denom = Math.max(C_frac, 1e-6);
+    const ratio = Math.max(qFrac_gpm, 0) / denom;
+    return Math.pow(ratio, 1 / n);
   }
 
-  // Fallback: Estimate fracture friction as percentage of annulus friction
-  // Fractures are easier path but NOT frictionless
-  // Assume fracture has ~20% of annulus resistance (can be tuned)
-  const qEquiv_m3s = qFrac_m3s;
+  // Fallback: treat fracture as a low-resistance annulus section (~20%)
   const depth_m = zone.depth_m;
-
-  // Calculate what annulus friction would be for this flow
   const qAbove_save = window.__qAnnAbove_m3s;
-  window.__qAnnAbove_m3s = qEquiv_m3s;
+  window.__qAnnAbove_m3s = qFrac_m3s;
   const P_fric_ann_equiv = frictionPsi_withCML_rheo(depth_m);
   window.__qAnnAbove_m3s = qAbove_save;
-
-  // Fracture friction is ~20% of annulus friction (easier path but not zero)
   return P_fric_ann_equiv * 0.2;
 }
 
@@ -3707,46 +3701,51 @@ function frictionPsi_fast(depth_m, q_m3s) {
   return dP_psi;
 }
 
-// Calculate BHP at zone with flow split between annulus and fracture
-// This is the CORE of the new physics model
-function calculateBHPWithLossSplit(zone, qLoss_m3s, qIn_m3s) {
-  if (!zone) return 0;
+function computeLossZoneBhpState(zone, qLoss_m3s, qIn_m3s) {
+  if (!zone) {
+    return {
+      BHP: 0,
+      qUp_m3s: 0,
+      P_hydro: 0,
+      P_fric_ann: 0,
+      P_sbp: 0,
+      P_fracFric: 0,
+      residual: 0,
+    };
+  }
 
   const depth_m = zone.depth_m;
   const wetTop = annulusTopDepthGlobal();
 
-  // Hydrostatic (only below fluid level)
   const depth_wet = Math.max(0, depth_m - wetTop);
   const ecd_ppg = ecdAtDepth(depth_m);
   const P_hydro = PSI_COEF * ecd_ppg * depth_wet;
 
-  // Split flow
-  // PHYSICS: Fluid flows UP from TD (bottom) through annulus to loss zone
-  // At loss zone, flow splits:
-  //   - qLoss_m3s exits to fracture
-  //   - qUp_m3s continues UP to surface
-  //
-  // qIn_m3s = flow arriving at loss zone from below (flowing UP from TD)
   const qUp_m3s = Math.max(0, qIn_m3s - qLoss_m3s);
-  const qFrac_m3s = Math.max(0, qLoss_m3s);
-
-  // Use FAST friction approximations for losses solver iterations
-  // This gives ~10x speedup with acceptable accuracy for iterative convergence
-  // NOTE: We only need relative changes during iterations, not absolute accuracy
-
-  // Annulus friction (from TD to zone)
-  const P_fric_ann = frictionPsi_fast(depth_m, qIn_m3s);
-
-  // Fracture friction (simplified: ~20% of annulus friction)
-  const P_fric_frac = frictionPsi_fast(depth_m, qFrac_m3s) * 0.2;
-
-  // SBP (applies whenever MPD can pressurize the annulus)
+  const P_fric_ann = qUp_m3s > 1e-9 ? frictionPsi_fast(depth_m, qUp_m3s) : 0;
   const P_sbp = sbpAppliedPsi();
 
-  // BHP = Hydrostatic + Annulus Friction (for qUp only) + Fracture Friction + SBP
-  const BHP = P_hydro + P_fric_ann + P_fric_frac + P_sbp;
+  const P_fracFric = calculateFractureFriction_psi(Math.max(0, qLoss_m3s), zone);
+  const P_frac = zone.fracPressure_psi || 0;
 
-  return BHP;
+  const BHP = P_hydro + P_fric_ann + P_sbp;
+  const residual = BHP - P_frac - P_fracFric;
+
+  return {
+    BHP,
+    qUp_m3s,
+    P_hydro,
+    P_fric_ann,
+    P_sbp,
+    P_fracFric,
+    residual,
+  };
+}
+
+// Calculate BHP at zone with flow split between annulus and fracture
+// (legacy helper kept for compatibility – returns hydro+annulus friction+SBP)
+function calculateBHPWithLossSplit(zone, qLoss_m3s, qIn_m3s) {
+  return computeLossZoneBhpState(zone, qLoss_m3s, qIn_m3s).BHP;
 }
 
 // Iteratively solve for loss rate where BHP balances at fracture pressure
@@ -3824,22 +3823,19 @@ function solveZoneLossEquilibrium(zone, qIn_m3s, dt_s) {
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const qLoss_trial = (qLoss_min + qLoss_max) / 2;
-    const BHP = calculateBHPWithLossSplit(zone, qLoss_trial, qIn_m3s);
+    const state = computeLossZoneBhpState(zone, qLoss_trial, qIn_m3s);
+    const residual = state.residual;
 
-    if (Math.abs(BHP - Pfrac) < TOLERANCE_PSI) {
+    if (Math.abs(residual) < TOLERANCE_PSI) {
       qLoss_result = qLoss_trial;
       break; // OPTIMIZATION 5: Early exit on convergence
     }
 
-    if (BHP > Pfrac) {
-      // Pressure too high → need MORE losses to reduce annulus friction
+    if (residual > 0) {
+      // Hydro + annulus friction + SBP still exceed FracP + fracture friction → increase qLoss
       qLoss_min = qLoss_trial;
     } else {
-      // Pressure too low → reduce losses
-      // NOTE: This allows RECOVERY from total losses:
-      //   - If MW changes (lighter) → BHP drops
-      //   - If flow reduces → friction drops → BHP drops
-      //   - Solver reduces qLoss → qUp increases → flow resumes to surface
+      // Net pressure is below the fracture requirement → decrease qLoss so more flow reaches surface
       qLoss_max = qLoss_trial;
     }
 
