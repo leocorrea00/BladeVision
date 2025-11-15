@@ -211,6 +211,23 @@ let MPD_ON = false;
 let SBP_MODE = "manual"; // "manual" | "anchor"
 let SBP_MANUAL = 0;
 let CURRENT_SBP = 0;
+
+function riserFullEnoughForSBP(){
+  const topDepth = (typeof annulusTopDepthGlobal === 'function')
+    ? annulusTopDepthGlobal()
+    : 0;
+  return topDepth <= 0.5; // ~0 when full, small tolerance for noise
+}
+
+function sbpCanPressurizeAnnulus(){
+  if (!MPD_ON) return false;
+  if (BOP_CLOSED) return true;
+  return riserFullEnoughForSBP();
+}
+
+function sbpAppliedPsi(){
+  return sbpCanPressurizeAnnulus() ? Math.max(0, CURRENT_SBP || 0) : 0;
+}
 let ANCHOR_DEPTH = 0;
 let ANCHOR_ECD = 0;
 // Time series
@@ -363,7 +380,7 @@ function pressureForPCOR(d){
   const depth = Math.max(0, d);
   const ecd = ecdAtDepth(depth); // uses only the grids, no hydraulics
   const P_hyd = PSI_COEF * ecd * depth; // psi
-  const P_sbp = (CURRENT_SBP || 0); // psi
+  const P_sbp = sbpAppliedPsi(); // psi
   return P_hyd + P_sbp; // psi
 }
 // Apply pressure-only correction at a representative depth
@@ -564,7 +581,7 @@ function systemCompliance_m3_per_Pa() {
        + betaFluid(fl)*Vds   + betaFluid(fl)*Vbooster;
 }
 function averageSystemPressure_psi() {
-  const P0 = (CURRENT_SBP || 0);
+  const P0 = sbpAppliedPsi();
   const P1 = pressureAtDepth(BOP_DEPTH);
   const P2 = pressureAtDepth(SHOE_DEPTH);
   const P3 = pressureAtDepth(TD_DEPTH);
@@ -2461,9 +2478,8 @@ function pressureAtDepth(d){
   // Friction
   const P_fric = frictionPsi_withCML_rheo(d);
 
-  // SBP (only when riser is FULL and BOP OPEN)
-  const riserFull = (fluidTop <= 0);
-  const P_sbp = (MPD_ON && riserFull && !BOP_CLOSED) ? (CURRENT_SBP || 0) : 0;
+  // SBP contribution (when MPD path can pressurize the annulus)
+  const P_sbp = sbpAppliedPsi();
 
   // BOP Line Contribution (when BOP closed and choke/kill lines flowing UP)
   const P_bop_lines = bopLinePressureContribution();
@@ -2583,7 +2599,7 @@ function calculateUPFlowDistribution(qAvailable_m3s, BHP_source_psi) {
   if (!BOP_CLOSED) {
     const riserMW = averageEffectiveDensity(annAboveGrid, true);
     const riserHydro_psi = PSI_COEF * riserMW * BOP_DEPTH;
-    const appliedPressure = (MPD_ON && (annulusTopDepthGlobal() <= 0.5)) ? (CURRENT_SBP || 0) : 0;
+    const appliedPressure = sbpAppliedPsi();
 
     paths.push({
       name: 'RISER',
@@ -2753,7 +2769,7 @@ function sppAtLevel(lvl_m){
   const filledLen = TD_DEPTH - lvl;
   const dsFricPsi = dsFrictionPsiLength(filledLen);
   const annFricPsi = frictionPsi_withCML_rheo(TD_DEPTH);   // <— rheology-aware
-  const sbpPsi = (window.CURRENT_SBP || 0);
+  const sbpPsi = sbpAppliedPsi();
   const MWann = annulusAvgPPG();
   const MWds = dsAvgPPG();
   const hydroPsi = PSI_COEF * (MWann * TD_DEPTH - MWds * filledLen);
@@ -2765,7 +2781,7 @@ function boSppAtLevel(lvl_m){
   const filledLen = BOP_DEPTH - lvl;
   const boFricPsi = boosterFrictionPsiLength(filledLen);
   const annFricAbovePsi = frictionPsi_withCML_rheo(BOP_DEPTH); // <— rheology-aware
-  const sbpPsi = (window.CURRENT_SBP || 0);
+  const sbpPsi = sbpAppliedPsi();
   const MWannAbv = average(annAboveGrid);
   const MWbo = boosterAvgPPG();
   const hydroPsi = PSI_COEF * (MWannAbv * BOP_DEPTH - MWbo * filledLen);
@@ -3561,9 +3577,8 @@ function calculateBHPWithLossSplit(zone, qLoss_m3s, qIn_m3s) {
   // Fracture friction (simplified: ~20% of annulus friction)
   const P_fric_frac = frictionPsi_fast(depth_m, qFrac_m3s) * 0.2;
 
-  // SBP (only when riser full)
-  const riserFull = (wetTop <= 0.5);
-  const P_sbp = (MPD_ON && riserFull) ? (CURRENT_SBP || 0) : 0;
+  // SBP (applies whenever MPD can pressurize the annulus)
+  const P_sbp = sbpAppliedPsi();
 
   // BHP = Hydrostatic + Annulus Friction (for qUp only) + Fracture Friction + SBP
   const BHP = P_hydro + P_fric_ann + P_fric_frac + P_sbp;
@@ -4161,9 +4176,10 @@ function chokeCv(pct){
   return CHOKE_CV_MAX * (1 - Math.exp(-CHOKE_K * p)) / (1 - Math.exp(-CHOKE_K));
 }
 function updateChokeFromFO(){
-  if (!MPD_ON || FLOW_OUT_gpm < 1 || CURRENT_SBP < 1){ CHOKE_POS_pct = 0; return 0; }
+  const sbpPsi = sbpAppliedPsi();
+  if (!MPD_ON || FLOW_OUT_gpm < 1 || sbpPsi < 1){ CHOKE_POS_pct = 0; return 0; }
   const SG = rhoDynamic()/1000;
-  const Cv_req = FLOW_OUT_gpm / Math.sqrt(Math.max(CURRENT_SBP/Math.max(SG,0.7), 1e-6));
+  const Cv_req = FLOW_OUT_gpm / Math.sqrt(Math.max(sbpPsi/Math.max(SG,0.7), 1e-6));
   let best = 0;
   for (let p=0; p<=100; p+=0.5){ if (chokeCv(p) >= Cv_req){ best = p; break; } }
   if (chokeCv(100) < Cv_req) best = 100;
@@ -5374,7 +5390,7 @@ function captureDiagnosticData() {
     qAnnAbove_gpm: (qAnnAbove_m3s * 15850.323).toFixed(1),
 
     // SBP
-    SBP_psi: (CURRENT_SBP || 0).toFixed(0),
+    SBP_psi: sbpAppliedPsi().toFixed(0),
     MPD_ON: MPD_ON ? 'YES' : 'NO'
   };
 
@@ -5442,6 +5458,34 @@ function saveDiagnosticLog() {
   console.log(`Saved ${diagnosticLog.data.length} data points to CSV`);
 }
 
+function updateSBPState(){
+  if (!MPD_ON){
+    CURRENT_SBP = 0;
+    return;
+  }
+
+  if (!sbpCanPressurizeAnnulus()){
+    CURRENT_SBP = 0;
+    return;
+  }
+
+  let applied = 0;
+  if (SBP_MODE === "manual"){
+    applied = Math.max(0, SBP_MANUAL);
+  } else if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
+    const p_set = PSI_COEF * ANCHOR_ECD * ANCHOR_DEPTH;
+    const p_actual = pressureAtDepth_noSBP(ANCHOR_DEPTH);
+    applied = Math.max(0, p_set - p_actual);
+  }
+
+  CURRENT_SBP = applied;
+
+  if (SBP_MODE === 'anchor'){
+    if (sbpSlider) sbpSlider.value(CURRENT_SBP);
+    if (sbpInput) sbpInput.value(nf(CURRENT_SBP, 1, 0));
+  }
+}
+
 // ================================ DRAW =================================
 function draw(){
   background(0,0,12);
@@ -5467,57 +5511,7 @@ function draw(){
   // Call with dt_s=0 to just update flow variables without advancing simulation time
   routeAnnulusFlowsWithLosses(0);
 
-  // SBP logic
-  if (MPD_ON){
-    // Rule #8: SBP can only be applied if riser is full (CML_TOP_DEPTH must be 0)
-    const riserIsFull = (!CML_ON || CML_TOP_DEPTH < 0.1);
-    
-    if (riserIsFull) {
-      if (SBP_MODE === "manual"){
-        CURRENT_SBP = Math.max(0, SBP_MANUAL);
-      } else {
-        if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
-          const p_set = PSI_COEF * ANCHOR_ECD * ANCHOR_DEPTH;
-          const p_actual = pressureAtDepth_noSBP(ANCHOR_DEPTH);
-          CURRENT_SBP = Math.max(0, p_set - p_actual);
-        } else {
-          CURRENT_SBP = 0;
-        }
-      }
-    } else {
-      CURRENT_SBP = 0; // Cannot apply SBP when riser level is dropped
-    }
-  } else {
-    CURRENT_SBP = 0;
-  }
-  
-  // SBP logic
-if (MPD_ON){
-  const riserIsFull = (!CML_ON || CML_TOP_DEPTH < 0.1);
-  
-  if (riserIsFull) {
-    if (SBP_MODE === "manual"){
-      CURRENT_SBP = Math.max(0, SBP_MANUAL);
-    } else {
-      // Anchor mode
-      if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
-        const p_set = PSI_COEF * ANCHOR_ECD * ANCHOR_DEPTH;
-        const p_actual = pressureAtDepth_noSBP(ANCHOR_DEPTH);
-        CURRENT_SBP = Math.max(0, p_set - p_actual);
-        
-        // ✅ ADD THIS: Update slider and input to show calculated setpoint
-        if (sbpSlider) sbpSlider.value(CURRENT_SBP);
-        if (sbpInput) sbpInput.value(nf(CURRENT_SBP, 1, 0));
-      } else {
-        CURRENT_SBP = 0;
-      }
-    }
-  } else {
-    CURRENT_SBP = 0;
-  }
-} else {
-  CURRENT_SBP = 0;
-}
+  updateSBPState();
   // Update CML level and (if enabled) Auto-CML flow command BEFORE pressures are used
   updateCMLLevelAndControl();
   // Update BOP flow displays based on direction (UP = calculated/read-only, DOWN = user-editable)
@@ -5542,7 +5536,7 @@ if (tsFrame % TS_STRIDE === 0){
   tsData.dsFlow.unshift(Q_DS);
   tsData.cmlFlow.unshift(Q_CML || 0);
   tsData.spp.unshift(lastSPP);
-  tsData.sbpApplied.unshift(CURRENT_SBP);
+  tsData.sbpApplied.unshift(sbpAppliedPsi());
   
   
 // Flow Out line (0–QMAX)
@@ -6625,7 +6619,7 @@ function drawStatusPanelRight(anchorX){
   text(`Annulus MW above BOP: ${nf(average(annAboveGrid),1,2)} ppg`, x, y);
   
   let y2 = y + 20;
-  text(`SBP Applied: ${nf(CURRENT_SBP,1,0)} psi | Mode: ${SBP_MODE.toUpperCase()}`, x, y2);
+  text(`SBP Applied: ${nf(sbpAppliedPsi(),1,0)} psi | Mode: ${SBP_MODE.toUpperCase()}`, x, y2);
   
   y2 += 20;
   if (ANCHOR_DEPTH > 0 && ANCHOR_ECD > 0){
