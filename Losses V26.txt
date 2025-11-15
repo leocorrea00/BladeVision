@@ -86,6 +86,7 @@ const LOSS_CMD_SLEW_GPM_PER_S = 450;    // Slew limit applied to smoothed comman
 // === Level Change Rate Limits ===
 const LEVEL_MAX_RISE_RATE_M_S = 5.0;    // Max level rise (m/s)
 const LEVEL_MAX_DROP_RATE_M_S = 8.0;    // Max level drop (m/s)
+const LINE_LEVEL_EQ_TAU_S = 0.6;        // Time constant for U-tube line level equalization
 
 // === Flow Out Stabilization ===
 // ✅ IMPROVED: More filtering to prevent oscillations from loss zones
@@ -272,8 +273,8 @@ let sbpLevelArmed = false;
 let lastAnnulusTopDepth_m = 0;
 
 function riserFullEnoughForSBP(){
-  const topDepth = (typeof annulusTopDepthGlobal === 'function')
-    ? annulusTopDepthGlobal()
+  const topDepth = (typeof surfaceColumnTopDepth === 'function')
+    ? surfaceColumnTopDepth()
     : 0;
   if (!Number.isFinite(topDepth)) return false;
 
@@ -588,6 +589,17 @@ function annulusTopDepthGlobal(){
   return Math.max(0, Math.min(ANN_TOP_DEPTH_m, TD_DEPTH));
 }
 
+// Surface-connected column top (riser when open, active choke/kill leg when shut in)
+function surfaceColumnTopDepth(){
+  const baseTop = annulusTopDepthGlobal();
+  if (!BOP_CLOSED) return baseTop;
+  const seg = dominantBopLineSegment && dominantBopLineSegment();
+  if (seg && seg.wetLen > 1e-3) {
+    return Math.max(0, BOP_DEPTH - seg.wetLen);
+  }
+  return Math.min(baseTop, BOP_DEPTH);
+}
+
 // Section area at a given depth (annulus)
 function annulusAreaAtDepth(d){
   if (d < BOP_DEPTH) return area_annulus(riser_ID_m,  ds_OD_m);          // riser annulus
@@ -649,8 +661,11 @@ function mapDepthToY(d){ return remap(d, 0, MAX_DEPTH, well.y, well.y + well.h);
 // Riser free-surface depth: max(CML-driven top, Loss-driven top), capped at BOP
 
 function riserTopDepth(){
-  // Riser visual top is the global top capped at BOP
-  levelRiserTop_m = Math.min(annulusTopDepthGlobal(), BOP_DEPTH);
+  // Riser visual top follows whichever column currently vents to surface
+  const surfTop = (typeof surfaceColumnTopDepth === 'function')
+    ? surfaceColumnTopDepth()
+    : annulusTopDepthGlobal();
+  levelRiserTop_m = Math.min(surfTop, BOP_DEPTH);
   return levelRiserTop_m;
 }
 
@@ -5341,6 +5356,100 @@ function updateRiserLevelWithLosses(dt_s) {
   }
 }
 
+function updateSurfaceConnectedLevels(dt_s){
+  if (BOP_CLOSED) return;
+  const dt = Math.max(dt_s || 0, 0);
+  const bopPsi = pressureAtDepth(BOP_DEPTH);
+  if (!isFinite(bopPsi) || bopPsi <= 0) return;
+
+  const relaxTarget = Math.min(surfaceColumnTopDepth(), BOP_DEPTH);
+  const relaxDeficit = (prev) => {
+    const tau = Math.max(LINE_LEVEL_EQ_TAU_S, 1e-3);
+    const alpha = dt > 0 ? Math.min(1, dt / tau) : 1;
+    const clamped = Math.max(0, Math.min(relaxTarget, BOP_DEPTH));
+    return prev + alpha * (clamped - prev);
+  };
+
+  const solveWetLength = (surfacePsi, avgMW, flow_m3s, frictionFn) => {
+    const maxLen = BOP_DEPTH;
+    if (maxLen <= 0) return 0;
+
+    const totalAt = (len) => {
+      if (len <= 0) return surfacePsi;
+      const hydro = PSI_COEF * avgMW * len;
+      const fric = (flow_m3s > 1e-9) ? frictionFn(len, flow_m3s) : 0;
+      return surfacePsi + hydro + fric;
+    };
+
+    const hiTotal = totalAt(maxLen);
+    if (hiTotal <= bopPsi + 0.5) return maxLen;
+
+    const loTotal = totalAt(0);
+    if (loTotal >= bopPsi - 0.5) return 0;
+
+    let lo = 0;
+    let hi = maxLen;
+    for (let i = 0; i < 14; i++) {
+      const mid = 0.5 * (lo + hi);
+      const total = totalAt(mid);
+      if (total >= bopPsi) {
+        hi = mid;
+      } else {
+        lo = mid;
+      }
+    }
+    return hi;
+  };
+
+  const updateLine = (opts) => {
+    const prev = Math.max(0, Math.min(opts.get() || 0, BOP_DEPTH));
+    if (!opts.active) {
+      opts.set(relaxDeficit(prev));
+      return;
+    }
+
+    const surfacePsi = Math.max(0, opts.surfacePsi());
+    const avgMW = Math.max(0.1, opts.avgMW());
+    const flow_m3s = Math.max(0, opts.flow());
+    const wetLen = solveWetLength(surfacePsi, avgMW, flow_m3s, opts.friction);
+    const targetDef = Math.max(0, Math.min(BOP_DEPTH - wetLen, BOP_DEPTH));
+    const tau = Math.max(LINE_LEVEL_EQ_TAU_S, 1e-3);
+    const alpha = dt > 0 ? Math.min(1, dt / tau) : 1;
+    const next = prev + alpha * (targetDef - prev);
+    opts.set(Math.max(0, Math.min(next, BOP_DEPTH)));
+  };
+
+  updateLine({
+    active: CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP',
+    get: () => levelDeficit_choke_m,
+    set: (v) => { levelDeficit_choke_m = v; },
+    surfacePsi: () => CHOKE_PRESSURE_psi || 0,
+    avgMW: () => (chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE),
+    flow: () => {
+      if (typeof window !== 'undefined' && typeof window.__Q_CHOKE_CALCULATED_m3s === 'number') {
+        return Math.max(window.__Q_CHOKE_CALCULATED_m3s, 0);
+      }
+      return Math.max((Q_CHOKE || 0) * M3_PER_GPM, 0);
+    },
+    friction: (len, flow) => chokeFrictionPsiLength(len, flow)
+  });
+
+  updateLine({
+    active: KILL_LINE_OPEN && KILL_DIRECTION === 'UP',
+    get: () => levelDeficit_kill_m,
+    set: (v) => { levelDeficit_kill_m = v; },
+    surfacePsi: () => KILL_PRESSURE_psi || 0,
+    avgMW: () => (killGrid.length > 0 ? average(killGrid) : MW_KILL),
+    flow: () => {
+      if (typeof window !== 'undefined' && typeof window.__Q_KILL_CALCULATED_m3s === 'number') {
+        return Math.max(window.__Q_KILL_CALCULATED_m3s, 0);
+      }
+      return Math.max((Q_KILL || 0) * M3_PER_GPM, 0);
+    },
+    friction: (len, flow) => killFrictionPsiLength(len, flow)
+  });
+}
+
 // Helper functions for level solver
 function areaAtDepthTop_(d) {
   if (d <= BOP_DEPTH) return A_riserAnn();
@@ -6624,6 +6733,7 @@ const adaptiveIters = (() => {
   return (lossRatio > 0.3 || totalLoss > 500) ? 3 : 2;
 })();
 equilibrateFluidLevel(dt_frame, adaptiveIters);
+updateSurfaceConnectedLevels(dt_frame);
 
 // 6. Section flows already computed by routeAnnulusFlowsWithLosses() inside equilibrateFluidLevel()
 // DO NOT call recomputeAnnulusSectionFlowsForLosses() here - it uses old routing logic!
