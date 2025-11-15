@@ -154,6 +154,8 @@ let fitParams = { mu_p_Pa_s: null, tau_y_Pa: null, K_PL_Pa_s_n: null, n_PL: null
 // ============================ BOP & WELL CONTROL =============================
 let BOP_CLOSED = false; // BOP state (open/closed)
 let closedWellPressureBoost_psi = 0; // Pressure increase from pumping to closed well
+let trappedAnnulusBasePressure_psi = null; // Remembers BOP pressure at moment of isolation
+let lastOpenAnnulusPressure_psi = 14.7;    // Latest open-well annulus pressure at BOP
 const CLOSED_WELL_WARNING_PSI = 12000;
 const CLOSED_WELL_MAX_PSI = 15000;
 
@@ -2713,12 +2715,7 @@ function pressureAtDepth(d, opts = {}){
   if (d < 0) return 0;
   if (d > TD_DEPTH) d = TD_DEPTH;
 
-  const fluidTop = effectiveFluidTopForDepth(d);
-
-  // Above fluid level = atmospheric only
-  if (d <= fluidTop) {
-    return 14.7;
-  }
+  let fluidTop = effectiveFluidTopForDepth(d);
 
   // Refresh section flows
   if (typeof window.__qAnnAbove_m3s !== 'number' || typeof window.__qAnnBelow_m3s !== 'number'){
@@ -2727,29 +2724,51 @@ function pressureAtDepth(d, opts = {}){
     }
   }
 
+  const includeBopLines = (typeof opts.includeBopLines === 'boolean') ? opts.includeBopLines : true;
+  const includeClosed = (typeof opts.includeClosedWell === 'boolean') ? opts.includeClosedWell : true;
+  const belowBOP = d >= BOP_DEPTH;
+  const bopIsolated = BOP_CLOSED && belowBOP;
+
+  if (bopIsolated) {
+    fluidTop = Math.max(fluidTop, BOP_DEPTH);
+  }
+
+  const sbpPsi = sbpAppliedPsi();
+  const sbpApplies = !(BOP_CLOSED && belowBOP);
+  const P_sbp = sbpApplies ? sbpPsi : 0;
+
+  const P_bop_lines = (includeBopLines && belowBOP) ? bopLinePressureContribution() : 0;
+  const closedApplies = includeClosed && BOP_CLOSED && belowBOP;
+  const P_closed_well = closedApplies ? (closedWellPressureBoost_psi || 0) : 0;
+
+  const basePsi = bopIsolated
+    ? (isFinite(trappedAnnulusBasePressure_psi)
+        ? trappedAnnulusBasePressure_psi
+        : (isFinite(lastOpenAnnulusPressure_psi) ? lastOpenAnnulusPressure_psi : 14.7))
+    : 0;
+
+  // Above fluid level
+  if (d <= fluidTop) {
+    if (bopIsolated) {
+      return basePsi + P_bop_lines + P_closed_well;
+    }
+    return 14.7;
+  }
+
   // Hydrostatic (only below fluid level)
   const P_hydro = hydrostaticPsiBetween(fluidTop, d);
 
   // Friction
-  const P_fric = frictionPsi_withCML_rheo(d);
+  let P_fric = frictionPsi_withCML_rheo(d);
+  if (bopIsolated) {
+    const refFric = frictionPsi_withCML_rheo(BOP_DEPTH);
+    P_fric = Math.max(0, P_fric - refFric);
+  }
 
-  // SBP contribution (when MPD path can pressurize the annulus)
-  const sbpPsi = sbpAppliedPsi();
-  const sbpApplies = !(BOP_CLOSED && d >= BOP_DEPTH);
-  const P_sbp = sbpApplies ? sbpPsi : 0;
-
-  // BOP Line Contribution (when BOP closed and choke/kill lines flowing UP)
-  const includeBopLines = (typeof opts.includeBopLines === 'boolean') ? opts.includeBopLines : true;
-  const includeClosed = (typeof opts.includeClosedWell === 'boolean') ? opts.includeClosedWell : true;
-  const belowBOP = d >= BOP_DEPTH;
-
-  const P_bop_lines = (includeBopLines && belowBOP) ? bopLinePressureContribution() : 0;
-
-  // Closed Well Pressure Boost (when pumping to closed well with no exit)
-  const closedApplies = includeClosed && BOP_CLOSED && belowBOP;
-  const P_closed_well = closedApplies ? (closedWellPressureBoost_psi || 0) : 0;
-
-  const total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
+  let total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
+  if (bopIsolated) {
+    total += basePsi;
+  }
   return total;
 }
 
@@ -6123,6 +6142,14 @@ function draw(){
   // Call with dt_s=0 to just update flow variables without advancing simulation time
   routeAnnulusFlowsWithLosses(0);
 
+  if (!BOP_CLOSED) {
+    const refPsi = pressureAtDepth(BOP_DEPTH);
+    if (isFinite(refPsi)) {
+      lastOpenAnnulusPressure_psi = refPsi;
+    }
+    trappedAnnulusBasePressure_psi = null;
+  }
+
   updateSBPState();
   // Update CML level and (if enabled) Auto-CML flow command BEFORE pressures are used
   updateCMLLevelAndControl();
@@ -8133,11 +8160,27 @@ function buildBOPWellControlUI() {
     .style('color', '#0b1725')
     .style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80')
     .mousePressed(() => {
+      if (!BOP_CLOSED) {
+        const refPsi = pressureAtDepth(BOP_DEPTH);
+        if (isFinite(refPsi)) {
+          trappedAnnulusBasePressure_psi = refPsi;
+          lastOpenAnnulusPressure_psi = refPsi;
+        } else {
+          trappedAnnulusBasePressure_psi = lastOpenAnnulusPressure_psi;
+        }
+      } else {
+        trappedAnnulusBasePressure_psi = null;
+      }
+
       BOP_CLOSED = !BOP_CLOSED;
       uiBOP.bopBtn.html(BOP_CLOSED ? 'BOP: CLOSED' : 'BOP: OPEN');
       uiBOP.bopBtn.style('background', BOP_CLOSED ? '#ff6b6b' : '#4ade80');
       if (!BOP_CLOSED) {
         closedWellPressureBoost_psi = 0;
+        trappedAnnulusBasePressure_psi = null;
+      }
+      if (uiBOP.stateLabel) {
+        uiBOP.stateLabel.html(BOP_CLOSED ? 'Annulus isolated to surface' : 'Annulus communicating with riser');
       }
     });
 
