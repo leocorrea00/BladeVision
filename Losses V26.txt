@@ -201,7 +201,8 @@ let CHOKE_LINE_ID_in = 3.0; // Inner diameter (inches)
 let CHOKE_LINE_ID_m = 0; // Converted to meters in setup
 let Q_CHOKE = 0; // gpm
 let CHOKE_DIRECTION = "UP"; // "UP" or "DOWN"
-let CHOKE_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
+let CHOKE_PRESSURE_psi = 0; // Actual pressure applied at choke line surface
+let CHOKE_PRESSURE_TARGET_psi = CHOKE_PRESSURE_psi; // User-set target stored when control transferred
 let MW_CHOKE = 9.5; // ppg, choke line fluid (starts with same as DS)
 let CHOKE_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let chokeGrid = []; // Fluid tracking grid (BOP to surface)
@@ -213,12 +214,21 @@ let KILL_LINE_ID_in = 3.0; // Inner diameter (inches)
 let KILL_LINE_ID_m = 0; // Converted to meters in setup
 let Q_KILL = 0; // gpm
 let KILL_DIRECTION = "UP"; // "UP" or "DOWN"
-let KILL_PRESSURE_psi = 0; // User-set pressure (acts as backpressure when UP, or SPP when DOWN)
+let KILL_PRESSURE_psi = 0; // Actual pressure applied at kill line surface
+let KILL_PRESSURE_TARGET_psi = KILL_PRESSURE_psi;
 let MW_KILL = 9.5; // ppg, kill line fluid (starts with same as DS)
 let KILL_LINE_OPEN = false; // Open/Closed state - must be OPEN to flow
 let killGrid = []; // Fluid tracking grid (BOP to surface)
 let accKill = 0; // Advection accumulator
 let levelDeficit_kill_m = 0; // Level deficit in kill line
+let chokeSurfacePressure_calc_psi = null;
+let killSurfacePressure_calc_psi = null;
+let bopPressureMaster = null; // 'choke' | 'kill' | null
+let chokeUpWasActive = false;
+let killUpWasActive = false;
+let chokeUpActivationSeq = 0;
+let killUpActivationSeq = 0;
+let bopPressureActivationCounter = 0;
 
 // Fluids / flows
 let MW_DS = 9.5; // ppg, drillstring
@@ -2926,10 +2936,123 @@ function activeBopLineSegments(){
   return segments;
 }
 
+function chokeLineIsFlowingUp(){
+  return CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+}
+
+function killLineIsFlowingUp(){
+  return KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
+}
+
+function chokeLineHasUserPressureControl(){
+  if (CHOKE_DIRECTION !== 'UP') return false;
+  if (!chokeLineIsFlowingUp()) return true;
+  if (!killLineIsFlowingUp()) return true;
+  return bopPressureMaster === 'choke';
+}
+
+function killLineHasUserPressureControl(){
+  if (KILL_DIRECTION !== 'UP') return false;
+  if (!killLineIsFlowingUp()) return true;
+  if (!chokeLineIsFlowingUp()) return true;
+  return bopPressureMaster === 'kill';
+}
+
+function updateBopPressureMasterState(chokeUpActive, killUpActive){
+  if (chokeUpActive && !chokeUpWasActive){
+    chokeUpActivationSeq = ++bopPressureActivationCounter;
+  }
+  if (killUpActive && !killUpWasActive){
+    killUpActivationSeq = ++bopPressureActivationCounter;
+  }
+
+  if (!chokeUpActive && !killUpActive){
+    bopPressureMaster = null;
+  } else {
+    if (bopPressureMaster === 'choke' && !chokeUpActive) bopPressureMaster = null;
+    if (bopPressureMaster === 'kill' && !killUpActive) bopPressureMaster = null;
+    if (!bopPressureMaster){
+      if (chokeUpActive && killUpActive){
+        if (chokeUpActivationSeq && killUpActivationSeq){
+          bopPressureMaster = (chokeUpActivationSeq <= killUpActivationSeq) ? 'choke' : 'kill';
+        } else if (chokeUpActivationSeq){
+          bopPressureMaster = 'choke';
+        } else if (killUpActivationSeq){
+          bopPressureMaster = 'kill';
+        } else {
+          bopPressureMaster = 'choke';
+        }
+      } else if (chokeUpActive){
+        bopPressureMaster = 'choke';
+      } else if (killUpActive){
+        bopPressureMaster = 'kill';
+      }
+    }
+  }
+
+  chokeUpWasActive = chokeUpActive;
+  killUpWasActive = killUpActive;
+
+  applyBopPressureTargets();
+}
+
+function applyBopPressureTargets(){
+  if (CHOKE_DIRECTION === 'UP' && chokeLineHasUserPressureControl()){
+    CHOKE_PRESSURE_psi = CHOKE_PRESSURE_TARGET_psi;
+  }
+  if (KILL_DIRECTION === 'UP' && killLineHasUserPressureControl()){
+    KILL_PRESSURE_psi = KILL_PRESSURE_TARGET_psi;
+  }
+}
+
+function setChokePressureTarget(psi){
+  const clamped = Math.max(0, psi);
+  CHOKE_PRESSURE_TARGET_psi = clamped;
+  if (chokeLineHasUserPressureControl()) {
+    CHOKE_PRESSURE_psi = clamped;
+  }
+}
+
+function setKillPressureTarget(psi){
+  const clamped = Math.max(0, psi);
+  KILL_PRESSURE_TARGET_psi = clamped;
+  if (killLineHasUserPressureControl()) {
+    KILL_PRESSURE_psi = clamped;
+  }
+}
+
+function chokePressureControlMode(){
+  if (CHOKE_DIRECTION !== 'UP') return 'down';
+  if (!chokeLineIsFlowingUp()) return 'up-control';
+  if (!killLineIsFlowingUp()) return 'up-control';
+  return chokeLineHasUserPressureControl() ? 'up-control' : 'up-passive';
+}
+
+function killPressureControlMode(){
+  if (KILL_DIRECTION !== 'UP') return 'down';
+  if (!killLineIsFlowingUp()) return 'up-control';
+  if (!chokeLineIsFlowingUp()) return 'up-control';
+  return killLineHasUserPressureControl() ? 'up-control' : 'up-passive';
+}
+
+function chokeWetLength_m(){
+  const dryLen = clamp(levelDeficit_choke_m || 0, 0, BOP_DEPTH);
+  return Math.max(0, BOP_DEPTH - dryLen);
+}
+
+function killWetLength_m(){
+  const dryLen = clamp(levelDeficit_kill_m || 0, 0, BOP_DEPTH);
+  return Math.max(0, BOP_DEPTH - dryLen);
+}
+
 function dominantBopLineSegment(){
   if (!BOP_CLOSED) return null;
   const segments = activeBopLineSegments();
   if (!segments.length) return null;
+  if (bopPressureMaster){
+    const owner = segments.find(seg => seg.name === bopPressureMaster);
+    if (owner) return owner;
+  }
   if (segments.length === 1) return segments[0];
   return segments.reduce((best, seg) => {
     if (!best) return seg;
@@ -3453,6 +3576,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const chokeUpActive = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
   const killUpActive = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
 
+  chokeSurfacePressure_calc_psi = null;
+  killSurfacePressure_calc_psi = null;
+
+  updateBopPressureMasterState(chokeUpActive, killUpActive);
+
   window.__CHOKE_PRESSURE_WARNING = null;
   window.__KILL_PRESSURE_WARNING = null;
   window.__Q_TOTAL_UP_m3s = 0;
@@ -3525,27 +3653,39 @@ function routeAnnulusFlowsWithLosses(dt_s){
     window.__Q_KILL_CALCULATED_m3s = qKill_actual;
 
     // Check if requested pressures can be achieved (for user feedback)
-    if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP' && qChoke_actual > 1e-6) {
-      // Calculate actual pressure at surface with calculated flow
-      const actualFriction = chokeFrictionPsiLength(BOP_DEPTH, qChoke_actual);
+    if (chokeUpActive) {
       const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
-      const actualHydro = PSI_COEF * chokeMW * BOP_DEPTH;
-      const actualSurfaceP = BHP_at_BOP - actualHydro - actualFriction;
-      const pressureDiff = Math.abs(actualSurfaceP - CHOKE_PRESSURE_psi);
-      if (pressureDiff > 50) {
-        window.__CHOKE_PRESSURE_WARNING = `Target: ${CHOKE_PRESSURE_psi.toFixed(0)} psi, Actual: ${actualSurfaceP.toFixed(0)} psi`;
+      const wetLen = chokeWetLength_m();
+      const actualFriction = chokeFrictionPsiLength(wetLen, qChoke_actual);
+      const actualHydro = PSI_COEF * chokeMW * wetLen;
+      const actualSurfaceP = Math.max(0, BHP_at_BOP - actualHydro - actualFriction);
+      chokeSurfacePressure_calc_psi = actualSurfaceP;
+      if (chokeLineHasUserPressureControl()) {
+        const target = CHOKE_PRESSURE_TARGET_psi;
+        const pressureDiff = Math.abs(actualSurfaceP - target);
+        if (pressureDiff > 50) {
+          window.__CHOKE_PRESSURE_WARNING = `Target: ${target.toFixed(0)} psi, Actual: ${actualSurfaceP.toFixed(0)} psi`;
+        }
+      } else {
+        CHOKE_PRESSURE_psi = actualSurfaceP;
       }
     }
 
-    if (KILL_LINE_OPEN && KILL_DIRECTION === 'UP' && qKill_actual > 1e-6) {
-      // Calculate actual pressure at surface with calculated flow
-      const actualFriction = killFrictionPsiLength(BOP_DEPTH, qKill_actual);
+    if (killUpActive) {
       const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
-      const actualHydro = PSI_COEF * killMW * BOP_DEPTH;
-      const actualSurfaceP = BHP_at_BOP - actualHydro - actualFriction;
-      const pressureDiff = Math.abs(actualSurfaceP - KILL_PRESSURE_psi);
-      if (pressureDiff > 50) {
-        window.__KILL_PRESSURE_WARNING = `Target: ${KILL_PRESSURE_psi.toFixed(0)} psi, Actual: ${actualSurfaceP.toFixed(0)} psi`;
+      const wetLen = killWetLength_m();
+      const actualFriction = killFrictionPsiLength(wetLen, qKill_actual);
+      const actualHydro = PSI_COEF * killMW * wetLen;
+      const actualSurfaceP = Math.max(0, BHP_at_BOP - actualHydro - actualFriction);
+      killSurfacePressure_calc_psi = actualSurfaceP;
+      if (killLineHasUserPressureControl()) {
+        const target = KILL_PRESSURE_TARGET_psi;
+        const pressureDiff = Math.abs(actualSurfaceP - target);
+        if (pressureDiff > 50) {
+          window.__KILL_PRESSURE_WARNING = `Target: ${target.toFixed(0)} psi, Actual: ${actualSurfaceP.toFixed(0)} psi`;
+        }
+      } else {
+        KILL_PRESSURE_psi = actualSurfaceP;
       }
     }
 
@@ -3843,11 +3983,18 @@ function routeAnnulusFlowsWithLosses(dt_s){
       Q_CHOKE = chokeActual_gpm;
 
       const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
-      const friction = chokeFrictionPsiLength(BOP_DEPTH, Q_choke_actual);
-      const hydro = PSI_COEF * chokeMW * BOP_DEPTH;
-      const actualSurface = BHP_at_BOP - hydro - friction;
-      if (Math.abs(actualSurface - CHOKE_PRESSURE_psi) > 50) {
-        window.__CHOKE_PRESSURE_WARNING = `Target: ${CHOKE_PRESSURE_psi.toFixed(0)} psi, Actual: ${actualSurface.toFixed(0)} psi`;
+      const wetLen = chokeWetLength_m();
+      const friction = chokeFrictionPsiLength(wetLen, Q_choke_actual);
+      const hydro = PSI_COEF * chokeMW * wetLen;
+      const actualSurface = Math.max(0, BHP_at_BOP - hydro - friction);
+      chokeSurfacePressure_calc_psi = actualSurface;
+      if (chokeLineHasUserPressureControl()) {
+        const target = CHOKE_PRESSURE_TARGET_psi;
+        if (Math.abs(actualSurface - target) > 50) {
+          window.__CHOKE_PRESSURE_WARNING = `Target: ${target.toFixed(0)} psi, Actual: ${actualSurface.toFixed(0)} psi`;
+        }
+      } else {
+        CHOKE_PRESSURE_psi = actualSurface;
       }
     }
 
@@ -3856,11 +4003,18 @@ function routeAnnulusFlowsWithLosses(dt_s){
       Q_KILL = killActual_gpm;
 
       const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
-      const friction = killFrictionPsiLength(BOP_DEPTH, Q_kill_actual);
-      const hydro = PSI_COEF * killMW * BOP_DEPTH;
-      const actualSurface = BHP_at_BOP - hydro - friction;
-      if (Math.abs(actualSurface - KILL_PRESSURE_psi) > 50) {
-        window.__KILL_PRESSURE_WARNING = `Target: ${KILL_PRESSURE_psi.toFixed(0)} psi, Actual: ${actualSurface.toFixed(0)} psi`;
+      const wetLen = killWetLength_m();
+      const friction = killFrictionPsiLength(wetLen, Q_kill_actual);
+      const hydro = PSI_COEF * killMW * wetLen;
+      const actualSurface = Math.max(0, BHP_at_BOP - hydro - friction);
+      killSurfacePressure_calc_psi = actualSurface;
+      if (killLineHasUserPressureControl()) {
+        const target = KILL_PRESSURE_TARGET_psi;
+        if (Math.abs(actualSurface - target) > 50) {
+          window.__KILL_PRESSURE_WARNING = `Target: ${target.toFixed(0)} psi, Actual: ${actualSurface.toFixed(0)} psi`;
+        }
+      } else {
+        KILL_PRESSURE_psi = actualSurface;
       }
     }
   } else {
@@ -8181,6 +8335,8 @@ let uiBOP = {
   killPressSlider: null, killPressInput: null,
   killDirUpBtn: null, killDirDownBtn: null, killOpenBtn: null
 };
+let chokePressureInputMode = null;
+let killPressureInputMode = null;
 
 function bopUIPosition() {
   const x = (typeof bopFrameX === 'number') ? bopFrameX + 18 : 780;
@@ -8346,16 +8502,18 @@ function buildBOPWellControlUI() {
     uiBOP.chokeMWSlider.value(MW_CHOKE);
   });
 
-  const chokePress = makeSliderRow(chokeCard, 'Pressure (psi)', 0, 5000, CHOKE_PRESSURE_psi, 50, 0);
+  const chokePress = makeSliderRow(chokeCard, 'Pressure (psi)', 0, 5000, CHOKE_PRESSURE_TARGET_psi, 50, 0);
   uiBOP.chokePressSlider = chokePress.slider;
   uiBOP.chokePressInput = chokePress.input;
   chokePress.slider.input(() => {
-    CHOKE_PRESSURE_psi = uiBOP.chokePressSlider.value();
-    uiBOP.chokePressInput.value(nf(CHOKE_PRESSURE_psi, 1, 0));
+    const val = uiBOP.chokePressSlider.value();
+    setChokePressureTarget(val);
+    uiBOP.chokePressInput.value(nf(CHOKE_PRESSURE_TARGET_psi, 1, 0));
   });
   chokePress.input.input(() => {
-    CHOKE_PRESSURE_psi = Math.max(0, Number(uiBOP.chokePressInput.value()) || 0);
-    uiBOP.chokePressSlider.value(CHOKE_PRESSURE_psi);
+    const val = Math.max(0, Number(uiBOP.chokePressInput.value()) || 0);
+    setChokePressureTarget(val);
+    uiBOP.chokePressSlider.value(CHOKE_PRESSURE_TARGET_psi);
   });
 
   const chokeBtns = createDiv('').parent(chokeCard)
@@ -8437,16 +8595,18 @@ function buildBOPWellControlUI() {
     uiBOP.killMWSlider.value(MW_KILL);
   });
 
-  const killPress = makeSliderRow(killCard, 'Pressure (psi)', 0, 5000, KILL_PRESSURE_psi, 50, 0);
+  const killPress = makeSliderRow(killCard, 'Pressure (psi)', 0, 5000, KILL_PRESSURE_TARGET_psi, 50, 0);
   uiBOP.killPressSlider = killPress.slider;
   uiBOP.killPressInput = killPress.input;
   killPress.slider.input(() => {
-    KILL_PRESSURE_psi = uiBOP.killPressSlider.value();
-    uiBOP.killPressInput.value(nf(KILL_PRESSURE_psi, 1, 0));
+    const val = uiBOP.killPressSlider.value();
+    setKillPressureTarget(val);
+    uiBOP.killPressInput.value(nf(KILL_PRESSURE_TARGET_psi, 1, 0));
   });
   killPress.input.input(() => {
-    KILL_PRESSURE_psi = Math.max(0, Number(uiBOP.killPressInput.value()) || 0);
-    uiBOP.killPressSlider.value(KILL_PRESSURE_psi);
+    const val = Math.max(0, Number(uiBOP.killPressInput.value()) || 0);
+    setKillPressureTarget(val);
+    uiBOP.killPressSlider.value(KILL_PRESSURE_TARGET_psi);
   });
 
   const killBtns = createDiv('').parent(killCard)
@@ -8502,25 +8662,31 @@ function buildBOPWellControlUI() {
 
   updateChokeDirectionButtons();
   updateKillDirectionButtons();
-  updateChokePressureInputState();
-  updateKillPressureInputState();
+  updateChokePressureInputState(true);
+  updateKillPressureInputState(true);
   updateBOPMWDisplays();
 }
 
 // Update choke pressure input state based on direction
-function updateChokePressureInputState() {
+function updateChokePressureInputState(force=false) {
   if (!uiBOP.chokePressInput || !uiBOP.chokePressSlider) return;
 
-  if (CHOKE_DIRECTION === 'DOWN') {
-    // DOWN = Pumping mode → SPP is calculated (read-only)
+  const mode = chokePressureControlMode();
+  if (mode === 'down') {
     uiBOP.chokePressInput.attribute('readonly', true);
     uiBOP.chokePressInput.style('background', 'rgba(100,150,200,0.15)');
     uiBOP.chokePressInput.style('cursor', 'not-allowed');
     uiBOP.chokePressInput.style('opacity', '0.7');
     uiBOP.chokePressSlider.attribute('disabled', true);
     uiBOP.chokePressSlider.style('opacity', '0.5');
+  } else if (mode === 'up-passive') {
+    uiBOP.chokePressInput.attribute('readonly', true);
+    uiBOP.chokePressInput.style('background', 'rgba(255,180,120,0.15)');
+    uiBOP.chokePressInput.style('cursor', 'not-allowed');
+    uiBOP.chokePressInput.style('opacity', '0.8');
+    uiBOP.chokePressSlider.attribute('disabled', true);
+    uiBOP.chokePressSlider.style('opacity', '0.5');
   } else {
-    // UP = Extraction mode → User sets backpressure (editable)
     uiBOP.chokePressInput.removeAttribute('readonly');
     uiBOP.chokePressInput.style('background', 'rgba(255,255,255,0.07)');
     uiBOP.chokePressInput.style('cursor', 'text');
@@ -8528,22 +8694,44 @@ function updateChokePressureInputState() {
     uiBOP.chokePressSlider.removeAttribute('disabled');
     uiBOP.chokePressSlider.style('opacity', '1');
   }
+
+  const modeChanged = (mode !== chokePressureInputMode);
+  if (mode === 'down' && (modeChanged || force)) {
+    uiBOP.chokePressInput.value(nf(CHOKE_PRESSURE_psi, 0, 1));
+    uiBOP.chokePressSlider.value(CHOKE_PRESSURE_psi);
+  } else if (mode === 'up-passive') {
+    const display = isFinite(chokeSurfacePressure_calc_psi)
+      ? chokeSurfacePressure_calc_psi
+      : CHOKE_PRESSURE_psi;
+    uiBOP.chokePressInput.value(nf(display, 0, 1));
+    uiBOP.chokePressSlider.value(display);
+  } else if (mode === 'up-control' && (modeChanged || force)) {
+    uiBOP.chokePressInput.value(nf(CHOKE_PRESSURE_TARGET_psi, 0, 1));
+    uiBOP.chokePressSlider.value(CHOKE_PRESSURE_TARGET_psi);
+  }
+
+  chokePressureInputMode = mode;
 }
 
-// Update kill pressure input state based on direction
-function updateKillPressureInputState() {
+function updateKillPressureInputState(force=false) {
   if (!uiBOP.killPressInput || !uiBOP.killPressSlider) return;
 
-  if (KILL_DIRECTION === 'DOWN') {
-    // DOWN = Pumping mode → SPP is calculated (read-only)
+  const mode = killPressureControlMode();
+  if (mode === 'down') {
     uiBOP.killPressInput.attribute('readonly', true);
     uiBOP.killPressInput.style('background', 'rgba(100,150,200,0.15)');
     uiBOP.killPressInput.style('cursor', 'not-allowed');
     uiBOP.killPressInput.style('opacity', '0.7');
     uiBOP.killPressSlider.attribute('disabled', true);
     uiBOP.killPressSlider.style('opacity', '0.5');
+  } else if (mode === 'up-passive') {
+    uiBOP.killPressInput.attribute('readonly', true);
+    uiBOP.killPressInput.style('background', 'rgba(255,180,120,0.15)');
+    uiBOP.killPressInput.style('cursor', 'not-allowed');
+    uiBOP.killPressInput.style('opacity', '0.8');
+    uiBOP.killPressSlider.attribute('disabled', true);
+    uiBOP.killPressSlider.style('opacity', '0.5');
   } else {
-    // UP = Extraction mode → User sets backpressure (editable)
     uiBOP.killPressInput.removeAttribute('readonly');
     uiBOP.killPressInput.style('background', 'rgba(255,255,255,0.07)');
     uiBOP.killPressInput.style('cursor', 'text');
@@ -8551,6 +8739,23 @@ function updateKillPressureInputState() {
     uiBOP.killPressSlider.removeAttribute('disabled');
     uiBOP.killPressSlider.style('opacity', '1');
   }
+
+  const modeChanged = (mode !== killPressureInputMode);
+  if (mode === 'down' && (modeChanged || force)) {
+    uiBOP.killPressInput.value(nf(KILL_PRESSURE_psi, 0, 1));
+    uiBOP.killPressSlider.value(KILL_PRESSURE_psi);
+  } else if (mode === 'up-passive') {
+    const display = isFinite(killSurfacePressure_calc_psi)
+      ? killSurfacePressure_calc_psi
+      : KILL_PRESSURE_psi;
+    uiBOP.killPressInput.value(nf(display, 0, 1));
+    uiBOP.killPressSlider.value(display);
+  } else if (mode === 'up-control' && (modeChanged || force)) {
+    uiBOP.killPressInput.value(nf(KILL_PRESSURE_TARGET_psi, 0, 1));
+    uiBOP.killPressSlider.value(KILL_PRESSURE_TARGET_psi);
+  }
+
+  killPressureInputMode = mode;
 }
 
 // Update choke direction button highlighting
@@ -8601,8 +8806,13 @@ function updateBOPPressureDisplays() {
     uiBOP.chokePressInput.value(nf(chokeSPP, 0, 1));
     if (uiBOP.chokePressSlider) uiBOP.chokePressSlider.value(chokeSPP);
   } else if (CHOKE_DIRECTION === 'UP') {
-    // UP mode: user controls pressure, just ensure it's not overwritten
-    // (pressure is set by user input handler)
+    if (!chokeLineHasUserPressureControl()) {
+      const display = isFinite(chokeSurfacePressure_calc_psi)
+        ? chokeSurfacePressure_calc_psi
+        : CHOKE_PRESSURE_psi;
+      uiBOP.chokePressInput.value(nf(display, 0, 1));
+      if (uiBOP.chokePressSlider) uiBOP.chokePressSlider.value(display);
+    }
   }
 
   // KILL LINE
@@ -8615,8 +8825,17 @@ function updateBOPPressureDisplays() {
     uiBOP.killPressInput.value(nf(killSPP, 0, 1));
     if (uiBOP.killPressSlider) uiBOP.killPressSlider.value(killSPP);
   } else if (KILL_DIRECTION === 'UP') {
-    // UP mode: user controls pressure
+    if (!killLineHasUserPressureControl()) {
+      const display = isFinite(killSurfacePressure_calc_psi)
+        ? killSurfacePressure_calc_psi
+        : KILL_PRESSURE_psi;
+      uiBOP.killPressInput.value(nf(display, 0, 1));
+      if (uiBOP.killPressSlider) uiBOP.killPressSlider.value(display);
+    }
   }
+
+  updateChokePressureInputState();
+  updateKillPressureInputState();
 }
 
 // Update flow rate displays for choke/kill lines
