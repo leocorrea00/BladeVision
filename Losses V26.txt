@@ -4440,6 +4440,12 @@ function updateRiserLevelWithLosses(dt_s) {
   const qDS_m3s = to_m3s(Q_DS || 0);
   const qBO_m3s = to_m3s(Q_BO || 0);
   const qTF_m3s = TOPFILL_ON ? to_m3s(Q_TOPFILL || 0) : 0;
+  const qChokeDown_m3s = (CHOKE_LINE_OPEN && CHOKE_DIRECTION === "DOWN")
+    ? to_m3s(Q_CHOKE || 0)
+    : 0;
+  const qKillDown_m3s = (KILL_LINE_OPEN && KILL_DIRECTION === "DOWN")
+    ? to_m3s(Q_KILL || 0)
+    : 0;
   const qCML_m3s = to_m3s(effective_Q_CML_gpm() || 0);
 
   // Get active loss zones sorted by depth (deepest first)
@@ -4457,7 +4463,7 @@ function updateRiserLevelWithLosses(dt_s) {
 
   if (activeLossZones.length === 0) {
     // NO ACTIVE LOSSES: Simple global mass balance
-    const qIn_total = qDS_m3s + qBO_m3s + qTF_m3s - qCML_m3s;
+    const qIn_total = qDS_m3s + qBO_m3s + qTF_m3s + qChokeDown_m3s + qKillDown_m3s - qCML_m3s;
     const qOut_total = qOutSurface_m3s;
     const qNet = qIn_total - qOut_total;
 
@@ -4502,10 +4508,21 @@ function updateRiserLevelWithLosses(dt_s) {
 
   // Total losses currently exiting into the formation
   const qLoss_total_m3s = activeLossZones.reduce((sum, z) => sum + to_m3s(z.Qloss_gpm || 0), 0);
+  const qDemand_m3s = (typeof totalLossDemand_m3s === 'function')
+    ? totalLossDemand_m3s()
+    : qLoss_total_m3s;
+  const highestLossDepth = activeLossZones[activeLossZones.length - 1].depth_m;
+  const allowDeficit = topDepthNow < (highestLossDepth - 1e-3);
+  const qDeficit_m3s = allowDeficit ? Math.max(0, qDemand_m3s - qLoss_total_m3s) : 0;
 
-  const qIn_total_m3s = qDS_m3s + qBO_m3s + qTF_m3s;
+  if (typeof window !== 'undefined') {
+    window.__qLossDemand_m3s = qDemand_m3s;
+    window.__qLossDeficit_m3s = qDeficit_m3s;
+  }
+
+  const qIn_total_m3s = qDS_m3s + qBO_m3s + qTF_m3s + qChokeDown_m3s + qKillDown_m3s;
   const qOut_total_m3s = qLoss_total_m3s + qOutSurface_m3s + qCML_m3s;
-  const qNet_total_m3s = qIn_total_m3s - qOut_total_m3s;
+  const qNet_total_m3s = qIn_total_m3s - qOut_total_m3s - qDeficit_m3s;
 
   let dV_total = qNet_total_m3s * dt_s;
   let newTop = topDepthNow;
@@ -4535,7 +4552,6 @@ function updateRiserLevelWithLosses(dt_s) {
   }
 
   // Prevent the wet top from dropping deeper than the shallowest active loss zone
-  const highestLossDepth = activeLossZones[activeLossZones.length - 1].depth_m;
   newTop = Math.min(newTop, highestLossDepth);
 
   // Rate limiting for stability
