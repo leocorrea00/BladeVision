@@ -20,12 +20,15 @@ const Q_REF = 500;
 const BASE_M_PER_FRAME = CELL_M * 0.5;
 
 // === Simulation Time Scaling ===
+const REAL_TIME_DT_PER_FRAME = 1 / 30; // seconds of simulated time per rendered frame (~30 FPS)
 const TIME_SCALE_PRESETS = {
-  FAST:     { label: 'FAST',     factor: 1.0 },
-  STANDARD: { label: 'STANDARD', factor: 0.35 },
-  SLOW:     { label: 'SLOW',     factor: 0.12 }
+  FAST:        { label: 'FAST',        factor: 1.0 },
+  STANDARD:    { label: 'STANDARD',    factor: 0.35 },
+  SLOW:        { label: 'SLOW',        factor: 0.12 },
+  SUPER_SLOW:  { label: 'SUPER SLOW',  factor: 0.06 },
+  REAL_TIME:   { label: 'REAL TIME',   targetDt: REAL_TIME_DT_PER_FRAME }
 };
-const TIME_SCALE_ORDER = ['FAST', 'STANDARD', 'SLOW'];
+const TIME_SCALE_ORDER = ['FAST', 'STANDARD', 'SLOW', 'SUPER_SLOW', 'REAL_TIME'];
 let activeTimeScaleKey = 'FAST';
 let timeScaleSelect;
 let simulationPaused = false;
@@ -33,9 +36,13 @@ let simElapsedSeconds = 0;
 let playButton, pauseButton, resetButton;
 let simClockDiv;
 
-function currentTimeScaleFactor(){
+function currentTimeScaleFactor(baseDt){
   const preset = TIME_SCALE_PRESETS[activeTimeScaleKey];
-  return preset ? preset.factor : 1.0;
+  if (!preset) return 1.0;
+  if (preset.targetDt && typeof baseDt === 'number' && baseDt > 1e-9) {
+    return preset.targetDt / baseDt;
+  }
+  return preset.factor != null ? preset.factor : 1.0;
 }
 
 function setTimeScale(key){
@@ -52,7 +59,13 @@ function syncTimeScaleControl(){
   }
   const preset = TIME_SCALE_PRESETS[activeTimeScaleKey];
   if (preset){
-    timeScaleSelect.elt.title = `Simulation speed ×${preset.factor.toFixed(2)}`;
+    if (preset.targetDt){
+      const perFrameMs = preset.targetDt * 1000;
+      timeScaleSelect.elt.title = `Simulation speed ≈ real time (${perFrameMs.toFixed(1)} ms/frame)`;
+    } else {
+      const factorLabel = (preset.factor != null ? preset.factor : 1).toFixed(2);
+      timeScaleSelect.elt.title = `Simulation speed ×${factorLabel}`;
+    }
   }
 }
 
@@ -4896,13 +4909,10 @@ function updateAllLossZones(dt_s) {
     ? Math.max(0, current_influx_m3s * GPM_PER_M3S)
     : 0;
 
-  // DS flows UP from TD, so it's available to all zones (processed deepest to shallowest)
-  let qDS_remaining = Q_DS_gpm;
-  let qKick_remaining = qInfluxBelow_gpm;
-
-  // Booster + downline flows feed zones below BOP when riser is not full
+  const dsSupplyTotal_gpm = Q_DS_gpm;
+  const kickSupplyTotal_gpm = qInfluxBelow_gpm;
   const totalDownInjection_gpm = Q_BO_gpm + Q_TF_gpm + Q_CHOKE_DOWN_gpm + Q_KILL_DOWN_gpm;
-  let qBO_remaining = boosterDown ? totalDownInjection_gpm : 0;
+  const downInjectionAvailable_gpm = boosterDown ? totalDownInjection_gpm : 0;
 
   // Track total loss change for global rate limit
   let totalLossChange_gpm = 0;
@@ -4932,6 +4942,12 @@ function updateAllLossZones(dt_s) {
         z._Q_filt = 0;
         z._Q_vel = 0;
         z._Q_cmd = 0;
+        z._pendingNeed_gpm = 0;
+        z._fromDownLines_gpm = 0;
+        z._fromDS_gpm = 0;
+        z._fromKick_gpm = 0;
+        z._storageDraw_gpm = 0;
+        z._lastOverbalance_psi = dP;
         continue;
       }
       z._active = true;
@@ -4943,6 +4959,12 @@ function updateAllLossZones(dt_s) {
         z._Q_vel *= decay;
         z.Qloss_gpm = z._Q_filt;
         z._Q_cmd = 0;
+        z._pendingNeed_gpm = 0;
+        z._fromDownLines_gpm = 0;
+        z._fromDS_gpm = 0;
+        z._fromKick_gpm = 0;
+        z._storageDraw_gpm = 0;
+        z._lastOverbalance_psi = dP;
         continue;
       }
     }
@@ -4960,10 +4982,6 @@ function updateAllLossZones(dt_s) {
     }
 
     // === SPATIAL FLOW AVAILABILITY ===
-    // Booster can only reach zones BELOW BOP_DEPTH (it flows downward from BOP)
-    const zoneCanSeeBooster = (z.depth_m >= BOP_DEPTH);
-    const qBoosterAvailable = zoneCanSeeBooster ? qBO_remaining : 0;
-
     // Target flow is purely physics-driven (capacity from ΔP)
     const Q_target = Q_capacity_gpm;
     const Q_command = smoothLossCommand(z, Q_target, dt_s, null);
@@ -4990,54 +5008,74 @@ function updateAllLossZones(dt_s) {
     z._Q_vel = Q_vel_new;
     z._Q_filt = Q_new;
     z.Qloss_gpm = Q_new;
+    z._pendingNeed_gpm = Q_new;
+    z._fromDownLines_gpm = 0;
+    z._fromDS_gpm = 0;
+    z._fromKick_gpm = 0;
+    z._storageDraw_gpm = 0;
+    z._lastOverbalance_psi = dP;
+  }
 
-    // === CONSUME FLOW SPATIALLY ===
-    // Preferentially consume booster/down-line injections first, then DS, any remainder is drawn from the annulus column
-    let remainingNeed_gpm = Q_new;
-    let fromDownLines_gpm = 0;
-    let fromDS_gpm = 0;
-    let fromKick_gpm = 0;
-
-    if (zoneCanSeeBooster && qBO_remaining > 0 && remainingNeed_gpm > 0) {
-      fromDownLines_gpm = Math.min(qBO_remaining, remainingNeed_gpm);
-      qBO_remaining -= fromDownLines_gpm;
-      remainingNeed_gpm -= fromDownLines_gpm;
+  // Allocate downward supply (booster/choke/kill/top-fill) shallow → deep
+  let downAvail_gpm = downInjectionAvailable_gpm;
+  if (downAvail_gpm > 1e-9) {
+    for (const z of activeZones) {
+      if (z.depth_m < BOP_DEPTH) { z._fromDownLines_gpm = 0; continue; }
+      const need = Math.max(0, z._pendingNeed_gpm || 0);
+      if (need <= 0) { z._fromDownLines_gpm = 0; continue; }
+      const take = Math.min(need, downAvail_gpm);
+      z._fromDownLines_gpm = take;
+      z._pendingNeed_gpm = need - take;
+      downAvail_gpm -= take;
+      if (downAvail_gpm <= 1e-6) break;
     }
-
-    const upSupplyRemaining = qDS_remaining + qKick_remaining;
-    if (remainingNeed_gpm > 0 && upSupplyRemaining > 0) {
-      const takeUp_gpm = Math.min(upSupplyRemaining, remainingNeed_gpm);
-      const takeKick_gpm = Math.min(qKick_remaining, takeUp_gpm);
-      if (takeKick_gpm > 0) {
-        fromKick_gpm = takeKick_gpm;
-        qKick_remaining -= takeKick_gpm;
-      }
-      fromDS_gpm = takeUp_gpm - fromKick_gpm;
-      qDS_remaining = Math.max(0, qDS_remaining - fromDS_gpm);
-      remainingNeed_gpm -= takeUp_gpm;
+  } else {
+    for (const z of activeZones) {
+      z._fromDownLines_gpm = 0;
     }
+  }
 
-    const drawFromColumn_gpm = Math.max(0, remainingNeed_gpm);
+  // Allocate upward supply (kick + drillstring) deep → shallow
+  let dsAvail_gpm = dsSupplyTotal_gpm;
+  let kickAvail_gpm = kickSupplyTotal_gpm;
+  const kickEntryDepth_m = (formationFluidEnabled && typeof formationFluidDepth_m === 'number')
+    ? formationFluidDepth_m
+    : null;
+  const kickBelowBOP = kickEntryDepth_m != null && kickEntryDepth_m >= BOP_DEPTH;
+  const zonesDescending = [...activeZones].sort((a, b) => b.depth_m - a.depth_m);
+  for (const z of zonesDescending) {
+    let need = Math.max(0, z._pendingNeed_gpm || 0);
+    const canSeeKick = kickBelowBOP && kickEntryDepth_m != null && z.depth_m <= kickEntryDepth_m;
+    let takeKick = 0;
+    let takeDS = 0;
+    if (need > 0 && canSeeKick && kickAvail_gpm > 0) {
+      takeKick = Math.min(need, kickAvail_gpm);
+      kickAvail_gpm -= takeKick;
+      need -= takeKick;
+    }
+    if (need > 0 && dsAvail_gpm > 0) {
+      takeDS = Math.min(need, dsAvail_gpm);
+      dsAvail_gpm -= takeDS;
+      need -= takeDS;
+    }
+    z._fromKick_gpm = takeKick;
+    z._fromDS_gpm = takeDS;
+    z._pendingNeed_gpm = need;
+  }
+
+  for (const z of activeZones) {
+    const drawFromColumn_gpm = Math.max(0, z._pendingNeed_gpm || 0);
     z._storageDraw_gpm = drawFromColumn_gpm;
-
     lossDiag.push({
       depth_m: z.depth_m,
-      overbalance_psi: dP,
+      overbalance_psi: z._lastOverbalance_psi || 0,
       qLoss_gpm: z.Qloss_gpm || 0,
       active: z._active === true,
       storageDraw_gpm: drawFromColumn_gpm,
-      fromDownLines_gpm,
-      fromDS_gpm,
-      fromKick_gpm
+      fromDownLines_gpm: z._fromDownLines_gpm || 0,
+      fromDS_gpm: z._fromDS_gpm || 0,
+      fromKick_gpm: z._fromKick_gpm || 0
     });
-
-    // Clamp to zero (avoid numerical errors)
-    qBO_remaining = Math.max(0, qBO_remaining);
-    qDS_remaining = Math.max(0, qDS_remaining);
-    qKick_remaining = Math.max(0, qKick_remaining);
-
-    // Early exit if no flow left
-    if (qBO_remaining < 0.1 && qDS_remaining < 0.1 && qKick_remaining < 0.1) break;
   }
 
   // === GLOBAL RATE LIMIT (prevents total system shock) ===
@@ -5611,7 +5649,8 @@ function updateRiserLevelWithLosses(dt_s) {
 }
 
 function updateSurfaceConnectedLevels(dt_s){
-  if (BOP_CLOSED) return;
+  const mpdSealed = (typeof mpdSealActive === 'function') ? mpdSealActive() : false;
+  if (BOP_CLOSED || mpdSealed || (MPD_ON && RCD_CLOSED)) return;
   const dt = Math.max(dt_s || 0, 0);
   const bopPsi = pressureAtDepth(BOP_DEPTH);
   if (!isFinite(bopPsi) || bopPsi <= 0) return;
@@ -5726,9 +5765,12 @@ function nextBoundaryAfter_(d, goingUp) {
 
 function equilibrateFluidLevel(dt_s, maxIterations = 5) {
   const M3_PER_GPM = 1 / 15850.323;
-  const dt_sub = dt_s / Math.max(1, maxIterations);
+  const kickLossCoupled = !!(LOSSES_ON && formationFluidEnabled &&
+    ((formationFluidRate_gpm || 0) > 0 || (typeof current_influx_m3s === 'number' && current_influx_m3s > 1e-8)));
+  const iterCount = Math.max(maxIterations, kickLossCoupled ? 8 : 5);
+  const dt_sub = dt_s / Math.max(1, iterCount);
 
-  for (let i = 0; i < maxIterations; i++) {
+  for (let i = 0; i < iterCount; i++) {
     // 1) Zones: compute ΔP, capacity, and per-zone actual qLoss_gpm
     updateAllLossZones(dt_sub); // produces z.qLoss_gpm and window.sumLoss_gpm
 
@@ -5759,7 +5801,8 @@ function equilibrateFluidLevel(dt_s, maxIterations = 5) {
       ? totalLossDemand_m3s()
       : ((typeof totalLossRate_gpm === 'function' ? totalLossRate_gpm() : 0) * M3_PER_GPM);
 
-    const eps = Math.max(1e-6, 0.02 * Math.max(qIn_m3s, 1e-3)); // ~2% band
+    const epsBase = Math.max(1e-6, 0.02 * Math.max(qIn_m3s, 1e-3));
+    const eps = kickLossCoupled ? epsBase * 0.5 : epsBase;
     if (Math.abs(qDemand_m3s - qIn_m3s) <= eps) break;
   }
 }
@@ -6314,10 +6357,10 @@ function frameSeconds(){
   const vRef = qRef_m3s / Math.max(A_riser(), 1e-12); // m/s in riser
   const dx = BASE_M_PER_FRAME; // m advanced per frame at vRef
   const baseDt = dx / Math.max(vRef, 1e-9);
-  const scale = currentTimeScaleFactor();
+  const scale = currentTimeScaleFactor(baseDt);
   const pausedFactor = simulationPaused ? 0 : 1;
   window.timeScaleFactor = scale;
-  return baseDt * scale * pausedFactor; // seconds per frame (scaled)
+  return baseDt * scale * pausedFactor; // seconds per frame (scaled or clamped)
 }
 // ========================== CAPTURE / OVERLAYS =========================
 function captureState(){
