@@ -5069,8 +5069,13 @@ function pipeArea_m2(diameter_m){
 function closedBopLineBuffers(){
   if (!BOP_CLOSED) return [];
   const buffers = [];
-  const addBuffer = (name, isOpen, diameter_m, readFn, writeFn) => {
-    if (!isOpen) return;
+
+  // Even if a choke/kill valve is shut at surface, the trapped column between
+  // the BOP and that valve is still part of the closed system.  When losses are
+  // active the column should drain before the isolated annulus level moves, so
+  // treat any existing line as an available buffer whenever the stack is shut.
+  const addBuffer = (name, shouldInclude, diameter_m, readFn, writeFn) => {
+    if (!shouldInclude) return;
     const area = pipeArea_m2(diameter_m);
     if (area <= 0) return;
     const current = clamp(Number(readFn()) || 0, 0, BOP_DEPTH);
@@ -5082,11 +5087,16 @@ function closedBopLineBuffers(){
     });
   };
 
-  addBuffer('choke', CHOKE_LINE_OPEN, CHOKE_LINE_ID_m,
+  const chokeExists = (CHOKE_LINE_ID_m || 0) > 0;
+  const killExists  = (KILL_LINE_ID_m  || 0) > 0;
+
+  addBuffer('choke', chokeExists,
+    CHOKE_LINE_ID_m,
     () => levelDeficit_choke_m,
     (v) => { levelDeficit_choke_m = v; });
 
-  addBuffer('kill', KILL_LINE_OPEN, KILL_LINE_ID_m,
+  addBuffer('kill', killExists,
+    KILL_LINE_ID_m,
     () => levelDeficit_kill_m,
     (v) => { levelDeficit_kill_m = v; });
 
