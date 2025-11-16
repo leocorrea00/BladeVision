@@ -28,6 +28,10 @@ const TIME_SCALE_PRESETS = {
 const TIME_SCALE_ORDER = ['FAST', 'STANDARD', 'SLOW'];
 let activeTimeScaleKey = 'FAST';
 let timeScaleSelect;
+let simulationPaused = false;
+let simElapsedSeconds = 0;
+let playButton, pauseButton, resetButton;
+let simClockDiv;
 
 function currentTimeScaleFactor(){
   const preset = TIME_SCALE_PRESETS[activeTimeScaleKey];
@@ -49,6 +53,66 @@ function syncTimeScaleControl(){
   const preset = TIME_SCALE_PRESETS[activeTimeScaleKey];
   if (preset){
     timeScaleSelect.elt.title = `Simulation speed ×${preset.factor.toFixed(2)}`;
+  }
+}
+
+function syncSimControlButtons(){
+  if (playButton){
+    const active = !simulationPaused;
+    playButton.style('background', active ? '#4ade80' : '#1f2937');
+    playButton.style('color', active ? '#0f172a' : '#f8fafc');
+  }
+  if (pauseButton){
+    const active = simulationPaused;
+    pauseButton.style('background', active ? '#fbbf24' : '#1f2937');
+    pauseButton.style('color', active ? '#0f172a' : '#f8fafc');
+  }
+  if (resetButton){
+    resetButton.style('background', '#1f2937');
+    resetButton.style('color', '#f8fafc');
+  }
+  window.simulationPaused = simulationPaused;
+}
+
+function formatSimClock(seconds){
+  const totalSeconds = Math.max(0, seconds);
+  const wholeSeconds = Math.floor(totalSeconds);
+  const days = Math.floor(wholeSeconds / 86400);
+  const hours = Math.floor((wholeSeconds % 86400) / 3600);
+  const minutes = Math.floor((wholeSeconds % 3600) / 60);
+  const secs = wholeSeconds % 60;
+  const hh = String(hours).padStart(2, '0');
+  const mm = String(minutes).padStart(2, '0');
+  const ss = String(secs).padStart(2, '0');
+  return `Day ${days} · ${hh}:${mm}:${ss}`;
+}
+
+function updateSimClockDisplay(){
+  if (!simClockDiv) return;
+  const label = formatSimClock(simElapsedSeconds);
+  const suffix = simulationPaused ? ' (paused)' : '';
+  simClockDiv.html(label + suffix);
+}
+
+function resumeSimulation(){
+  simulationPaused = false;
+  syncSimControlButtons();
+  updateSimClockDisplay();
+}
+
+function pauseSimulation(){
+  simulationPaused = true;
+  syncSimControlButtons();
+  updateSimClockDisplay();
+}
+
+function resetSimulation(){
+  simElapsedSeconds = 0;
+  simulationPaused = false;
+  syncSimControlButtons();
+  updateSimClockDisplay();
+  if (typeof window !== 'undefined' && window.location && typeof window.location.reload === 'function'){
+    window.location.reload();
   }
 }
 // --- Rotation coupling tunables ---
@@ -6187,8 +6251,9 @@ function frameSeconds(){
   const dx = BASE_M_PER_FRAME; // m advanced per frame at vRef
   const baseDt = dx / Math.max(vRef, 1e-9);
   const scale = currentTimeScaleFactor();
+  const pausedFactor = simulationPaused ? 0 : 1;
   window.timeScaleFactor = scale;
-  return baseDt * scale; // seconds per frame (scaled)
+  return baseDt * scale * pausedFactor; // seconds per frame (scaled)
 }
 // ========================== CAPTURE / OVERLAYS =========================
 function captureState(){
@@ -6284,19 +6349,21 @@ function setup(){
 
   let xPos = 16;
 
-  // Top-right time scale dropdown (sits above the control rows)
-  const tsSelectWidth = 140;
-  const tsSelectX = width - tsSelectWidth - 24;
-  const tsSelectY = 10;
+  // Top-right time scale + transport controls
+  const tsSelectWidth = 150;
+  const tsPanelRight = width - 24;
+  const tsPanelX = tsPanelRight - tsSelectWidth;
+  const tsPanelY = 10;
   createDiv('Time Scale')
-    .position(tsSelectX - 95, tsSelectY + 4)
-    .size(90, 18)
+    .position(tsPanelX, tsPanelY)
+    .size(tsSelectWidth, 16)
     .style('color', '#EEE')
-    .style('text-align', 'right')
-    .style('font-size', '12px');
+    .style('text-align', 'center')
+    .style('font-size', '12px')
+    .style('font-weight', 'bold');
   timeScaleSelect = createSelect()
-    .position(tsSelectX, tsSelectY)
-    .size(tsSelectWidth, 24)
+    .position(tsPanelX, tsPanelY + 20)
+    .size(tsSelectWidth, 26)
     .style('background', '#1f2937')
     .style('color', '#fff')
     .style('border', '1px solid #4ade80')
@@ -6307,9 +6374,51 @@ function setup(){
   });
   timeScaleSelect.changed(() => setTimeScale(timeScaleSelect.value()));
   syncTimeScaleControl();
-  
 
-  
+  const btnRowY = tsPanelY + 54;
+  const btnSpacing = 6;
+  const btnWidth = Math.floor((tsSelectWidth - btnSpacing * 2) / 3);
+  playButton = createButton('PLAY')
+    .position(tsPanelX, btnRowY)
+    .size(btnWidth, 28)
+    .style('background', '#1f2937')
+    .style('color', '#f8fafc')
+    .style('border', '1px solid #4ade80')
+    .style('font-weight', 'bold')
+    .mousePressed(resumeSimulation);
+  pauseButton = createButton('PAUSE')
+    .position(tsPanelX + btnWidth + btnSpacing, btnRowY)
+    .size(btnWidth, 28)
+    .style('background', '#1f2937')
+    .style('color', '#f8fafc')
+    .style('border', '1px solid #4ade80')
+    .style('font-weight', 'bold')
+    .mousePressed(pauseSimulation);
+  resetButton = createButton('RESET')
+    .position(tsPanelX + 2 * (btnWidth + btnSpacing), btnRowY)
+    .size(btnWidth, 28)
+    .style('background', '#1f2937')
+    .style('color', '#f8fafc')
+    .style('border', '1px solid #4ade80')
+    .style('font-weight', 'bold')
+    .mousePressed(resetSimulation);
+
+  simClockDiv = createDiv('Day 0 · 00:00:00')
+    .position(tsPanelX, btnRowY + 36)
+    .size(tsSelectWidth, 26)
+    .style('color', '#f8fafc')
+    .style('background', '#0f172a')
+    .style('border', '1px solid #4ade80')
+    .style('border-radius', '4px')
+    .style('font-family', 'monospace')
+    .style('font-size', '14px')
+    .style('text-align', 'center')
+    .style('line-height', '26px');
+  syncSimControlButtons();
+  updateSimClockDisplay();
+
+
+
   // Row 1: All sliders in ONE row
   mkLabel("DS MW", xPos, rowY1 - 14);
   dsMWSlider = createSlider(MW_MIN, MW_MAX, MW_DS, MW_STEP).position(xPos, rowY1).style('width', '160px');
@@ -6841,50 +6950,56 @@ plotTimeSeriesLine(tsChoke_pct, 0, 100, null);
 // ---- PHYSICS UPDATE ORDER (Pattern A) ----
 const dt_frame = frameSeconds();
 window.dt_s = dt_frame;
-
-// 1. Calculate U-tube imbalances FIRST
-computeImbalanceFlows();
-
-// 2-5: Equilibrate losses and level together (iterative)
-// NOTE: This calls routeAnnulusFlowsWithLosses() internally which sets:
-//   - window.__qAnnUp_m3s, window.__qAnnDown_m3s (section flows)
-//   - FLOW_OUT_gpm (with proper hysteresis and smoothing)
-// Adaptive iterations: fewer when stable, more when active losses
-const adaptiveIters = (() => {
-  if (!LOSSES_ON) return 1;
-  const totalLoss = (typeof totalLossRate_gpm === 'function') ? totalLossRate_gpm() : 0;
-  const totalFlow = (Q_DS || 0) + (Q_BO || 0);
-  const lossRatio = totalFlow > 10 ? totalLoss / totalFlow : 0;
-  // High loss activity → 3 iterations, low/stable → 2 iterations
-  return (lossRatio > 0.3 || totalLoss > 500) ? 3 : 2;
-})();
-equilibrateFluidLevel(dt_frame, adaptiveIters);
-updateSurfaceConnectedLevels(dt_frame);
-
-// 6. Section flows already computed by routeAnnulusFlowsWithLosses() inside equilibrateFluidLevel()
-// DO NOT call recomputeAnnulusSectionFlowsForLosses() here - it uses old routing logic!
-
-// 7. Update CML controller
-// (already called earlier - skip if done)
-
-// 8. Choke update (FO already computed by routeAnnulusFlowsWithLosses)
-if (MPD_ON) updateChokeFromFO();
-
-// 9. Advect fluids
-stepAdvection();
-
-// 9b. Update formation fluid migration (kicks)
-if (formationFluidEnabled) {
-  updateFormationFluidMigration(dt_frame);
+if (!simulationPaused && dt_frame > 0){
+  simElapsedSeconds += dt_frame;
 }
 
-// 10. Gravity settling
-gravityDensitySwap();
+if (!simulationPaused){
+  // 1. Calculate U-tube imbalances FIRST
+  computeImbalanceFlows();
+
+  // 2-5: Equilibrate losses and level together (iterative)
+  // NOTE: This calls routeAnnulusFlowsWithLosses() internally which sets:
+  //   - window.__qAnnUp_m3s, window.__qAnnDown_m3s (section flows)
+  //   - FLOW_OUT_gpm (with proper hysteresis and smoothing)
+  // Adaptive iterations: fewer when stable, more when active losses
+  const adaptiveIters = (() => {
+    if (!LOSSES_ON) return 1;
+    const totalLoss = (typeof totalLossRate_gpm === 'function') ? totalLossRate_gpm() : 0;
+    const totalFlow = (Q_DS || 0) + (Q_BO || 0);
+    const lossRatio = totalFlow > 10 ? totalLoss / totalFlow : 0;
+    // High loss activity → 3 iterations, low/stable → 2 iterations
+    return (lossRatio > 0.3 || totalLoss > 500) ? 3 : 2;
+  })();
+  equilibrateFluidLevel(dt_frame, adaptiveIters);
+  updateSurfaceConnectedLevels(dt_frame);
+
+  // 6. Section flows already computed by routeAnnulusFlowsWithLosses() inside equilibrateFluidLevel()
+  // DO NOT call recomputeAnnulusSectionFlowsForLosses() here - it uses old routing logic!
+
+  // 7. Update CML controller
+  // (already called earlier - skip if done)
+
+  // 8. Choke update (FO already computed by routeAnnulusFlowsWithLosses)
+  if (MPD_ON) updateChokeFromFO();
+
+  // 9. Advect fluids
+  stepAdvection();
+
+  // 9b. Update formation fluid migration (kicks)
+  if (formationFluidEnabled) {
+    updateFormationFluidMigration(dt_frame);
+  }
+
+  // 10. Gravity settling
+  gravityDensitySwap();
+}
 
 // 11. UI updates
 refreshLossesUIFromModel();
 updateDiagnosticsUI(dt_frame);
 updateBOPPressureDisplays();
+updateSimClockDisplay();
 
   // ========== DIAGNOSTIC LOGGING ==========
   // Capture data at regular intervals when recording
