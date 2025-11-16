@@ -656,13 +656,22 @@ function annulusTopDepthGlobal(){
 
 // Surface-connected column top (riser when open, active choke/kill leg when shut in)
 function surfaceColumnTopDepth(){
-  const baseTop = annulusTopDepthGlobal();
-  if (!BOP_CLOSED) return baseTop;
-  const seg = dominantBopLineSegment && dominantBopLineSegment();
+  if (!BOP_CLOSED) {
+    return annulusTopDepthGlobal();
+  }
+
+  const seg = (typeof dominantBopLineSegment === 'function')
+    ? dominantBopLineSegment()
+    : null;
   if (seg && seg.wetLen > 1e-3) {
     return Math.max(0, BOP_DEPTH - seg.wetLen);
   }
-  return Math.min(baseTop, BOP_DEPTH);
+
+  const hasLossTop = LOSSES_ON && typeof LOSS_TOP_DEPTH_m === 'number';
+  const fallback = hasLossTop
+    ? Math.min(Math.max(LOSS_TOP_DEPTH_m, 0), BOP_DEPTH)
+    : BOP_DEPTH;
+  return fallback;
 }
 
 // Section area at a given depth (annulus)
@@ -5083,6 +5092,7 @@ function extractLossFluidFromGrid(z, dt_s){
 
 function effective_Q_CML_gpm(){
   if (!CML_ON) return 0;
+  if (BOP_CLOSED) return 0;
   const intakeDepth = CML_DEPTH || 0;
   const annulusTop = annulusTopDepthGlobal();
   if (intakeDepth <= annulusTop) return 0; // intake “in air”
@@ -7762,12 +7772,14 @@ function drawKickSymbols(){
 function drawCMLVisual(){
   if (!CML_ON) return;
   const yPump = mapDepthToY(CML_DEPTH);
-  const pumpX = well.x + well.w + 8;
+  const chokeLineX = well.x + well.w + 16;
   const pumpSize = 16;
+  const pumpX = chokeLineX + 44;
   noStroke(); fill(55, 100, 100, 240);
   rect(pumpX, yPump - pumpSize/2, pumpSize, pumpSize, 3);
 
-  const pipeW = 12, pipeX = pumpX + pumpSize + 10;
+  const pipeW = 12;
+  const pipeX = pumpX + pumpSize + 12;
   stroke(0,0,50,160); noFill();
   const yTop = well.y;
   rect(pipeX - pipeW/2, yTop, pipeW, yPump - yTop, 3);
