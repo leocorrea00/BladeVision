@@ -3736,7 +3736,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const qBO  = (Q_BO || 0) * M3_PER_GPM;
   const qTF  = (TOPFILL_ON ? (Q_TOPFILL||0) : 0) * M3_PER_GPM;
   const qCML = (typeof effective_Q_CML_gpm==='function' ? (effective_Q_CML_gpm()||0) : 0) * M3_PER_GPM;
-  const qInflux = (typeof current_influx_m3s === 'number') ? current_influx_m3s : 0;
+  const qInflux = (typeof current_influx_m3s === 'number') ? Math.max(0, current_influx_m3s) : 0;
+  const influxFeedsLossZones = formationFluidEnabled &&
+    typeof formationFluidDepth_m === 'number' && formationFluidDepth_m >= BOP_DEPTH;
+  const qInfluxBelow = influxFeedsLossZones ? qInflux : 0;
+  const qInfluxAbove = Math.max(0, qInflux - qInfluxBelow);
 
   // Choke and Kill line flows
   const qChoke_m3s = (Q_CHOKE || 0) * M3_PER_GPM;
@@ -3762,6 +3766,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
     fromChoke: 0,
     fromKill: 0,
     fromTopFill: 0,
+    fromKick: 0,
     fromStorage: 0
   };
 
@@ -3814,7 +3819,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Inputs: DS return, Kicks, Choke/Kill lines flowing DOWN
     // Outputs: Losses, Choke/Kill lines flowing UP
 
-    let qIn_belowBOP = qDS + qInflux; // DS return + kicks enter below BOP
+    let qIn_belowBOP = qDS + qInfluxBelow; // DS return + kicks enter below BOP
 
     // Add choke/kill lines flowing DOWN (pumping into wellbore)
     if (CHOKE_DIRECTION === "DOWN" && CHOKE_LINE_OPEN) qIn_belowBOP += qChoke_m3s;
@@ -3831,6 +3836,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
       fromChoke: 0,
       fromKill: 0,
       fromTopFill: 0,
+      fromKick: 0,
       fromStorage: qStorageDraw_m3s
     };
 
@@ -3997,7 +4003,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
   // Supply that can feed losses from downhole side (no surface returns here)
   // We allow DS + Booster + TopFill + Choke/Kill DOWN to feed the zone; subtract CML intake
-  let qSupply = Math.max(0, qDS + qBO + qTF + qChoke_down + qKill_down - qCML);
+  let qSupply = Math.max(0, qDS + qInfluxBelow + qBO + qTF + qChoke_down + qKill_down - qCML);
 
   const qToLoss = qLossActual;
   const qSupplyForLoss = Math.min(qSupply, qToLoss);
@@ -4012,6 +4018,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const riserFull = connectedTopDepth <= 0.5;
 
   let takeBO = 0, takeDS = 0, takeTF = 0, takeChoke = 0, takeKill = 0;
+  let takeKick = 0;
+  let kickAvail = qInfluxBelow;
 
   if (!riserFull) {
     // prioritize booster + choke/kill → DS → TF to feed the loss zone
@@ -4021,13 +4029,30 @@ function routeAnnulusFlowsWithLosses(dt_s){
     rem = rem - takeChoke;
     takeKill = Math.min(qKill_down, rem);           // then kill down
     rem = rem - takeKill;
-    takeDS = Math.min(qDS, rem);                    // then drillstring
-    rem = rem - takeDS;
+    const dsKickAvail = Math.max(0, qDS + kickAvail);
+    const dsKickTake = Math.min(dsKickAvail, rem);
+    if (dsKickTake > 0) {
+      const kickShare = Math.min(kickAvail, dsKickTake);
+      if (kickShare > 0) {
+        takeKick += kickShare;
+        kickAvail -= kickShare;
+      }
+      takeDS = dsKickTake - kickShare;
+      rem -= dsKickTake;
+    }
     takeTF = Math.min(qTF, rem);                    // then topfill
   } else {
     // riser full: let DS/TF supply zone first; booster and choke/kill contribute to returns
-    takeDS = Math.min(qDS, qToLoss);
-    let rem = qToLoss - takeDS;
+    const dsKickTake = Math.min(Math.max(0, qDS + kickAvail), qToLoss);
+    let rem = qToLoss - dsKickTake;
+    if (dsKickTake > 0) {
+      const kickShare = Math.min(kickAvail, dsKickTake);
+      if (kickShare > 0) {
+        takeKick += kickShare;
+        kickAvail -= kickShare;
+      }
+      takeDS = dsKickTake - kickShare;
+    }
     takeTF = Math.min(qTF, rem);
     rem = rem - takeTF;
     takeBO = Math.min(qBO, rem);
@@ -4039,6 +4064,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
   // Leftovers after feeding losses
   const DS_left = Math.max(0, qDS - takeDS);
+  const Kick_left = Math.max(0, qInfluxBelow - takeKick);
   const BO_left = Math.max(0, qBO - takeBO);
   const TF_left = Math.max(0, qTF - takeTF);
   const Choke_left = Math.max(0, qChoke_down - takeChoke);
@@ -4076,7 +4102,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
     fromChoke: takeChoke,
     fromKill: takeKill,
     fromTopFill: takeTF,
-    fromStorage: Math.max(0, qToLoss - (takeDS + takeBO + takeChoke + takeKill + takeTF))
+    fromKick: takeKick,
+    fromStorage: Math.max(0, qToLoss - (takeDS + takeBO + takeChoke + takeKill + takeTF + takeKick))
   };
 
   const zonesBelow = Array.isArray(lossZones)
@@ -4149,7 +4176,7 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const killDownUpToSurface = Kill_left;
 
   let qAnnUp = DS_left + TF_left + boosterUpToSurface +
-               chokeDownUpToSurface + killDownUpToSurface + qInflux;
+               chokeDownUpToSurface + killDownUpToSurface + Kick_left + qInfluxAbove;
 
   const qAnnulusToSurface = Math.max(0, qAnnUp - boosterUpToSurface -
     chokeDownUpToSurface - killDownUpToSurface);
@@ -4860,8 +4887,15 @@ function updateAllLossZones(dt_s) {
   const Q_KILL_DOWN_gpm  = (KILL_LINE_OPEN  && KILL_DIRECTION  === 'DOWN') ? (Q_KILL  || 0) : 0;
   const boosterDown = (fluidTop > 0.5);
 
+  const influxFeedsLossZones = formationFluidEnabled &&
+    typeof formationFluidDepth_m === 'number' && formationFluidDepth_m >= BOP_DEPTH;
+  const qInfluxBelow_gpm = (influxFeedsLossZones && typeof current_influx_m3s === 'number')
+    ? Math.max(0, current_influx_m3s * GPM_PER_M3S)
+    : 0;
+
   // DS flows UP from TD, so it's available to all zones (processed deepest to shallowest)
   let qDS_remaining = Q_DS_gpm;
+  let qKick_remaining = qInfluxBelow_gpm;
 
   // Booster + downline flows feed zones below BOP when riser is not full
   const totalDownInjection_gpm = Q_BO_gpm + Q_TF_gpm + Q_CHOKE_DOWN_gpm + Q_KILL_DOWN_gpm;
@@ -4919,9 +4953,6 @@ function updateAllLossZones(dt_s) {
     const zoneCanSeeBooster = (z.depth_m >= BOP_DEPTH);
     const qBoosterAvailable = zoneCanSeeBooster ? qBO_remaining : 0;
 
-    // DS return is available to all zones (flows upward from TD)
-    const qDSAvailable = qDS_remaining;
-
     // Target flow is purely physics-driven (capacity from ΔP)
     const Q_target = Q_capacity_gpm;
     const Q_command = smoothLossCommand(z, Q_target, dt_s, null);
@@ -4954,6 +4985,7 @@ function updateAllLossZones(dt_s) {
     let remainingNeed_gpm = Q_new;
     let fromDownLines_gpm = 0;
     let fromDS_gpm = 0;
+    let fromKick_gpm = 0;
 
     if (zoneCanSeeBooster && qBO_remaining > 0 && remainingNeed_gpm > 0) {
       fromDownLines_gpm = Math.min(qBO_remaining, remainingNeed_gpm);
@@ -4961,10 +4993,17 @@ function updateAllLossZones(dt_s) {
       remainingNeed_gpm -= fromDownLines_gpm;
     }
 
-    if (remainingNeed_gpm > 0 && qDS_remaining > 0) {
-      fromDS_gpm = Math.min(qDS_remaining, remainingNeed_gpm);
-      qDS_remaining -= fromDS_gpm;
-      remainingNeed_gpm -= fromDS_gpm;
+    const upSupplyRemaining = qDS_remaining + qKick_remaining;
+    if (remainingNeed_gpm > 0 && upSupplyRemaining > 0) {
+      const takeUp_gpm = Math.min(upSupplyRemaining, remainingNeed_gpm);
+      const takeKick_gpm = Math.min(qKick_remaining, takeUp_gpm);
+      if (takeKick_gpm > 0) {
+        fromKick_gpm = takeKick_gpm;
+        qKick_remaining -= takeKick_gpm;
+      }
+      fromDS_gpm = takeUp_gpm - fromKick_gpm;
+      qDS_remaining = Math.max(0, qDS_remaining - fromDS_gpm);
+      remainingNeed_gpm -= takeUp_gpm;
     }
 
     const drawFromColumn_gpm = Math.max(0, remainingNeed_gpm);
@@ -4975,15 +5014,19 @@ function updateAllLossZones(dt_s) {
       overbalance_psi: dP,
       qLoss_gpm: z.Qloss_gpm || 0,
       active: z._active === true,
-      storageDraw_gpm: drawFromColumn_gpm
+      storageDraw_gpm: drawFromColumn_gpm,
+      fromDownLines_gpm,
+      fromDS_gpm,
+      fromKick_gpm
     });
 
     // Clamp to zero (avoid numerical errors)
     qBO_remaining = Math.max(0, qBO_remaining);
     qDS_remaining = Math.max(0, qDS_remaining);
+    qKick_remaining = Math.max(0, qKick_remaining);
 
     // Early exit if no flow left
-    if (qBO_remaining < 0.1 && qDS_remaining < 0.1) break;
+    if (qBO_remaining < 0.1 && qDS_remaining < 0.1 && qKick_remaining < 0.1) break;
   }
 
   // === GLOBAL RATE LIMIT (prevents total system shock) ===
@@ -9565,6 +9608,11 @@ function updateDiagnosticsUI(dt_s){
   const downCh_gpm = (downMix.choke || 0) * 15850.323;
   const downKi_gpm = (downMix.kill || 0) * 15850.323;
   const downTf_gpm = (downMix.topfill || 0) * 15850.323;
+  const lossAlloc = (typeof window !== 'undefined' && window.__lossAllocation)
+    ? window.__lossAllocation
+    : null;
+  const kickFeed_gpm = lossAlloc ? ((lossAlloc.fromKick || 0) * 15850.323) : 0;
+  const storageDraw_gpm = lossAlloc ? ((lossAlloc.fromStorage || 0) * 15850.323) : 0;
   const sealedByValves = isWellShutInByValves();
   const mpdSeal = mpdSealActive();
   const closedBoost = closedWellPressureBoost_psi || 0;
@@ -9606,6 +9654,7 @@ function updateDiagnosticsUI(dt_s){
     `FO (gpm): ${fmt(FLOW_OUT_gpm)} | ΣLoss (gpm): ${fmt(lossDisplay_gpm)}${usingInferredLoss ? ` (mass ${fmt(lossInferred_gpm)})` : ''}`,
     `Loss demand / actual / deficit (gpm): ${fmt(lossDemand_gpm)} / ${fmt(loss_gpm)} / ${fmt(lossDeficit_gpm)}`,
     `Down supply (gpm): Bo ${fmt(downBo_gpm)} | Ch ${fmt(downCh_gpm)} | Ki ${fmt(downKi_gpm)} | TF ${fmt(downTf_gpm)}`,
+    `Kick feed / storage draw (gpm): ${fmt(kickFeed_gpm)} | ${fmt(storageDraw_gpm)}`,
     `Q_CML_eff (gpm): ${fmt(qCML_gpm)} | Q_comp (gpm): ${fmt(qComp_gpm)}`,
     `MassBal Resid (gpm): ${fmt(resid_gpm)}`,
     `Shut-In (valves): ${sealedByValves ? 'YES' : 'NO'} | MPD Seal: ${mpdSeal ? 'YES' : 'NO'} | Closed boost (psi): ${fmt(closedBoost)}`,
