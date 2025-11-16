@@ -5565,7 +5565,7 @@ function updateSurfaceConnectedLevels(dt_s){
   const relaxTarget = Math.min(surfaceColumnTopDepth(), BOP_DEPTH);
   const relaxDeficit = (prev) => {
     const tau = Math.max(LINE_LEVEL_EQ_TAU_S, 1e-3);
-    const alpha = dt > 0 ? Math.min(1, dt / tau) : 1;
+    const alpha = dt > 0 ? Math.min(1, dt / (tau + dt)) : 1;
     const clamped = Math.max(0, Math.min(relaxTarget, BOP_DEPTH));
     return prev + alpha * (clamped - prev);
   };
@@ -5614,7 +5614,7 @@ function updateSurfaceConnectedLevels(dt_s){
     const wetLen = solveWetLength(surfacePsi, avgMW, flow_m3s, opts.friction);
     const targetDef = Math.max(0, Math.min(BOP_DEPTH - wetLen, BOP_DEPTH));
     const tau = Math.max(LINE_LEVEL_EQ_TAU_S, 1e-3);
-    const alpha = dt > 0 ? Math.min(1, dt / tau) : 1;
+    const alpha = dt > 0 ? Math.min(1, dt / (tau + dt)) : 1;
     const next = prev + alpha * (targetDef - prev);
     opts.set(Math.max(0, Math.min(next, BOP_DEPTH)));
   };
