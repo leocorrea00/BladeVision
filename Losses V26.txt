@@ -9329,6 +9329,15 @@ function updateDiagnosticsUI(dt_s){
     ? window.qResid_gpm
     : (qIn_gpm - (qOutSurf_gpm + qCML_gpm + loss_gpm) - qComp_gpm);
 
+  const lossInferred_gpm = Math.max(0, qIn_gpm - (qOutSurf_gpm + qCML_gpm + qComp_gpm) - resid_gpm);
+  const usingInferredLoss = (loss_gpm < 0.5 && lossInferred_gpm > loss_gpm + 0.5);
+  const lossDisplay_gpm = usingInferredLoss ? lossInferred_gpm : loss_gpm;
+
+  if (typeof window !== 'undefined') {
+    window.__lossInferred_gpm = lossInferred_gpm;
+    window.__lossDisplay_gpm = lossDisplay_gpm;
+  }
+
   const fmt = v => (+v).toFixed(1);
   const fmt2 = v => (+v).toFixed(2);
 
@@ -9338,7 +9347,7 @@ function updateDiagnosticsUI(dt_s){
     `Choke Line (${chokeState}) → Flow: ${fmt(chokeFlow_gpm)} gpm | MW: ${fmt2(chokeMW_ppg)} ppg`,
     `Kill Line (${killState}) → Flow: ${fmt(killFlow_gpm)} gpm | MW: ${fmt2(killMW_ppg)} ppg`,
     `DS/Booster/TopFill In (gpm): ${fmt(qDS_gpm)} / ${fmt(qBO_gpm)} / ${fmt(qTopFill_gpm)}`,
-    `FO (gpm): ${fmt(FLOW_OUT_gpm)} | ΣLoss (gpm): ${fmt(loss_gpm)}`,
+    `FO (gpm): ${fmt(FLOW_OUT_gpm)} | ΣLoss (gpm): ${fmt(lossDisplay_gpm)}${usingInferredLoss ? ` (mass ${fmt(lossInferred_gpm)})` : ''}`,
     `Loss demand / actual / deficit (gpm): ${fmt(lossDemand_gpm)} / ${fmt(loss_gpm)} / ${fmt(lossDeficit_gpm)}`,
     `Down supply (gpm): Bo ${fmt(downBo_gpm)} | Ch ${fmt(downCh_gpm)} | Ki ${fmt(downKi_gpm)} | TF ${fmt(downTf_gpm)}`,
     `Q_CML_eff (gpm): ${fmt(qCML_gpm)} | Q_comp (gpm): ${fmt(qComp_gpm)}`,
