@@ -257,6 +257,7 @@ let trappedAnnulusBasePressure_psi = null; // Remembers BOP pressure at moment o
 let lastOpenAnnulusPressure_psi = 14.7;    // Latest open-well annulus pressure at BOP
 const CLOSED_WELL_WARNING_PSI = 12000;
 const CLOSED_WELL_MAX_PSI = 15000;
+const CLOSED_WELL_PSI_PER_BBL = 15; // Approximate psi gain per trapped barrel
 
 let RCD_CLOSED = false;
 let MPD_CHOKE_LOCKED_CLOSED = false;
@@ -827,6 +828,41 @@ function compressionEquivalentFlow_gpm(dt_s) {
   return 0.20 * q_gpm; // gentle under-relaxation
 }
 
+function applyClosedWellCompression(netVolumeChange_m3s, dt_s, contextLabel){
+  if (!isFinite(netVolumeChange_m3s) || Math.abs(netVolumeChange_m3s) < 1e-9) return;
+  const dt = Math.max(dt_s || (typeof window !== 'undefined' ? window.dt_s : 0) || 1/60, 1/120);
+  const deltaPsi = netVolumeChange_m3s * 6.28981 * dt * CLOSED_WELL_PSI_PER_BBL;
+  const prev = closedWellPressureBoost_psi || 0;
+  closedWellPressureBoost_psi = clamp(prev + deltaPsi, 0, CLOSED_WELL_MAX_PSI);
+
+  const warnLabel = contextLabel || 'SHUT IN';
+  if (typeof window !== 'undefined') {
+    if (closedWellPressureBoost_psi >= CLOSED_WELL_MAX_PSI) {
+      window.__PRESSURE_COMPRESSION_WARNING = `🛑 CRITICAL: Pressure limited at ${CLOSED_WELL_MAX_PSI} psi - ${warnLabel}!`;
+    } else if (closedWellPressureBoost_psi > CLOSED_WELL_WARNING_PSI) {
+      window.__PRESSURE_COMPRESSION_WARNING = `⚠️ CLOSED WELL PRESSURE: ${closedWellPressureBoost_psi.toFixed(0)} psi - ${warnLabel}`;
+    } else if ((typeof isWellShutInByValves === 'function' ? !isWellShutInByValves() : true)
+        && !(typeof mpdSealActive === 'function' && mpdSealActive())) {
+      window.__PRESSURE_COMPRESSION_WARNING = null;
+    }
+  }
+}
+
+function bleedClosedWellPressure(dt_s){
+  const dt = Math.max(dt_s || (typeof window !== 'undefined' ? window.dt_s : 0) || 1/60, 1/120);
+  const tau = 4.0;
+  const decay = Math.exp(-dt / tau);
+  closedWellPressureBoost_psi *= decay;
+  if (closedWellPressureBoost_psi < 1) {
+    closedWellPressureBoost_psi = 0;
+  }
+  if (typeof window !== 'undefined') {
+    if (closedWellPressureBoost_psi < CLOSED_WELL_WARNING_PSI * 0.8) {
+      window.__PRESSURE_COMPRESSION_WARNING = null;
+    }
+  }
+}
+
 // --------------------- Loss zones: mapping & calibration ---------------------
 function mapLossZonesToGrid(){
   for (const z of lossZones){
@@ -882,10 +918,10 @@ function applyTaylorBoost(base, rpm, Di, Do, mu_app, rho, n){
   const gap = Math.max(Do - Di, 1e-6);
   const Ta = (omega * Ri * gap) / Math.max(nu, 1e-12);
   const { Ta_c, C0, Cn } = TAYLOR_BOOST;
-  if (Ta <= Ta_c) return base;
   // stronger boost; increased sensitivity for shear-thinning (n<1)
   const C = C0 * (1 + Cn * Math.max(0, 1 - (n ?? 1)));
-  return base * (1 + C * Math.sqrt(Ta/Ta_c));
+  const ratio = Math.max(Ta / Math.max(Ta_c, 1e-6), 0);
+  return base * (1 + C * Math.sqrt(ratio));
 }
 // HB laminar formulas (slot annulus + pipe)
 function mu_app_HB(gdot, K, n, tauY){
@@ -2970,6 +3006,7 @@ function pressureAtDepth(d, opts = {}){
   const includeClosed = (typeof opts.includeClosedWell === 'boolean') ? opts.includeClosedWell : true;
   const belowBOP = d >= BOP_DEPTH;
   const bopIsolated = BOP_CLOSED && belowBOP;
+  const mpdSurfaceSeal = (typeof mpdSealActive === 'function') ? mpdSealActive() : false;
 
   if (bopIsolated) {
     fluidTop = Math.max(fluidTop, BOP_DEPTH);
@@ -2984,7 +3021,7 @@ function pressureAtDepth(d, opts = {}){
   const P_bop_lines = bopLineActive
     ? (bopLineSegment.surfacePressure + bopLineSegment.frictionPsi + PSI_COEF * bopLineSegment.mw * bopLineSegment.wetLen)
     : 0;
-  const closedApplies = includeClosed && BOP_CLOSED && belowBOP;
+  const closedApplies = includeClosed && ((BOP_CLOSED && belowBOP) || mpdSurfaceSeal);
   const P_closed_well = closedApplies ? (closedWellPressureBoost_psi || 0) : 0;
 
   const basePsi = bopIsolated
@@ -3922,33 +3959,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
     // === CLOSED WELL PHYSICS ===
     // When pumping to a closed well (no UP path, more IN than losses), pressure builds
-    const netVolumeTrapped_m3s = Math.max(0, qIn_belowBOP - qToLoss - qToSurface_belowBOP);
-    const wellIsClosed = (qToSurface_belowBOP < 0.001) && (netVolumeTrapped_m3s > 0.001);
-
-    if (wellIsClosed) {
-      // Well is closed - fluid has nowhere to go, pressure increases
-      // Convert trapped volume to pressure increase
-      // Using simplified compressibility: ~10 psi per bbl in a typical wellbore
-      const dt_s = Math.max(1/120, window.dt_s || 1/60); // time step in seconds
-      const trappedVolume_bbl = netVolumeTrapped_m3s * 6.28981 * dt_s; // m3/s to bbl
-      const pressureIncrease_psi = trappedVolume_bbl * 15; // ~15 psi per bbl trapped
-      closedWellPressureBoost_psi += pressureIncrease_psi;
-
-      // ✅ NEW: Pressure warning and safety limit
-      if (closedWellPressureBoost_psi > CLOSED_WELL_WARNING_PSI) {
-        window.__PRESSURE_COMPRESSION_WARNING = `⚠️ CLOSED WELL PRESSURE: ${closedWellPressureBoost_psi.toFixed(0)} psi - PUMPING WITH NO EXIT PATH!`;
-      }
-
-      // Cap pressure at maximum safe limit
-      if (closedWellPressureBoost_psi > CLOSED_WELL_MAX_PSI) {
-        closedWellPressureBoost_psi = CLOSED_WELL_MAX_PSI;
-        window.__PRESSURE_COMPRESSION_WARNING = `🛑 CRITICAL: Pressure limited at ${CLOSED_WELL_MAX_PSI} psi - STOP PUMPING!`;
-      }
-    } else {
-      // Well has exit path - pressure boost decays back to normal
-      closedWellPressureBoost_psi *= 0.95; // Decay factor
-      window.__PRESSURE_COMPRESSION_WARNING = null; // Clear warning
-    }
+    const netVolumeChange_m3s = qIn_belowBOP - qToLoss - qToSurface_belowBOP;
+    applyClosedWellCompression(netVolumeChange_m3s, dt_s, 'BOP SHUT');
 
     // === ABOVE BOP (Isolated riser) ===
     // Inputs: Booster, TopFill
@@ -3969,20 +3981,17 @@ function routeAnnulusFlowsWithLosses(dt_s){
     // Flow Out calculation - from choke/kill lines
     const targetFO_gpm = Math.max(0, qToSurface_belowBOP * 15850.323);
 
-    // Update FLOW_OUT with fast filter (or immediate if well is closed)
-    if (wellIsClosed) {
-      // Well is closed - set FO to 0 immediately (no filter delay)
+    // Update FLOW_OUT with fast filter (line flow only when surface path exists)
+    const ALPHA = 0.5;
+    const DQDT_MAX = 1000;
+    const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
+    const lp = prev + ALPHA*(targetFO_gpm - prev);
+    const dtSmooth = Math.max(window.dt_s || 1/60, 1/120);
+    const maxStep = DQDT_MAX * dtSmooth;
+    const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
+    FLOW_OUT_gpm = prev + step;
+    if (targetFO_gpm < 1e-3) {
       FLOW_OUT_gpm = 0;
-    } else {
-      // Normal filter for smooth FO changes
-      const ALPHA = 0.5;
-      const DQDT_MAX = 1000;
-      const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
-      const lp = prev + ALPHA*(targetFO_gpm - prev);
-      const dtSmooth = Math.max(window.dt_s || 1/60, 1/120);
-      const maxStep = DQDT_MAX * dtSmooth;
-      const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
-      FLOW_OUT_gpm = prev + step;
     }
 
     if (typeof FLOW_OUT_ALPHA==='number') {
@@ -4348,15 +4357,18 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const ALPHA = lossesActive ? 0.25 : 0.8;  // Fast filter when no losses
   const DQDT_MAX = lossesActive ? 800 : 5000; // Fast slew when no losses
 
-  if (mpdSurfaceSeal) {
-    FLOW_OUT_gpm = 0;
-  } else {
-    const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
-    const lp   = prev + ALPHA*(targetFO_gpm - prev);
-    const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
-    const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
-    FLOW_OUT_gpm = prev + step;
-  }
+    if (mpdSurfaceSeal) {
+      FLOW_OUT_gpm = 0;
+    } else {
+      const prev = (typeof FLOW_OUT_gpm==='number') ? FLOW_OUT_gpm : 0;
+      const lp   = prev + ALPHA*(targetFO_gpm - prev);
+      const maxStep = DQDT_MAX * Math.max(dt_s, 1/120);
+      const step = Math.max(-maxStep, Math.min(maxStep, lp - prev));
+      FLOW_OUT_gpm = prev + step;
+      if (targetFO_gpm < 1e-3) {
+        FLOW_OUT_gpm = 0;
+      }
+    }
 
   // Additional debug disabled (too verbose)
   // if (frameCount % 150 === 0 && Math.abs(targetFO_gpm - FLOW_OUT_gpm) > 10) {
@@ -4366,23 +4378,13 @@ function routeAnnulusFlowsWithLosses(dt_s){
   const qSurfaceActual_m3s = Math.max(0, (FLOW_OUT_gpm || 0)) * M3_PER_GPM;
   const qTotalIn_m3s = qDS + qBO + qTF + qChoke_down + qKill_down + qInflux;
   const qTotalOut_m3s = qToLoss + qCML + qSurfaceActual_m3s;
-  const netVolumeTrapped_m3s = Math.max(0, qTotalIn_m3s - qTotalOut_m3s);
+  const netVolumeChange_m3s = qTotalIn_m3s - qTotalOut_m3s;
 
-  if (mpdSurfaceSeal && netVolumeTrapped_m3s > 1e-6) {
-    const dtSeal = Math.max(window.dt_s || dt_s || 1/60, 1/120);
-    const trappedVolume_bbl = netVolumeTrapped_m3s * 6.28981 * dtSeal;
-    const pressureIncrease_psi = trappedVolume_bbl * 15;
-    closedWellPressureBoost_psi = Math.min(CLOSED_WELL_MAX_PSI, closedWellPressureBoost_psi + pressureIncrease_psi);
-
-    if (closedWellPressureBoost_psi > CLOSED_WELL_WARNING_PSI) {
-      window.__PRESSURE_COMPRESSION_WARNING = `⚠️ CLOSED WELL PRESSURE: ${closedWellPressureBoost_psi.toFixed(0)} psi - RCD SEALED!`;
-    }
-    if (closedWellPressureBoost_psi >= CLOSED_WELL_MAX_PSI) {
-      window.__PRESSURE_COMPRESSION_WARNING = `🛑 CRITICAL: Pressure limited at ${CLOSED_WELL_MAX_PSI} psi - STOP PUMPING!`;
-    }
+  if (mpdSurfaceSeal) {
+    applyClosedWellCompression(netVolumeChange_m3s, dt_s, 'RCD SEALED');
   } else if (!BOP_CLOSED) {
-    closedWellPressureBoost_psi *= 0.9;
-    if (!mpdSurfaceSeal) {
+    bleedClosedWellPressure(dt_s);
+    if (typeof window !== 'undefined') {
       window.__PRESSURE_COMPRESSION_WARNING = null;
     }
   }
@@ -4875,6 +4877,7 @@ function updateAllLossZones(dt_s) {
     if (typeof z._Q_filt === 'undefined') z._Q_filt = 0;
     if (typeof z._Q_vel === 'undefined') z._Q_vel = 0;
     if (typeof z._Q_cmd === 'undefined') z._Q_cmd = z._Q_filt || 0;
+    if (typeof z._dP_filt === 'undefined') z._dP_filt = 0;
   }
 
   // ========================================================================
@@ -4912,7 +4915,15 @@ function updateAllLossZones(dt_s) {
     // Calculate zone capacity based on pressure
     const P_psi = pressureAtDepth(z.depth_m);
     const P_frac_psi = z.fracPressure_psi || 0;
-    const dP = P_psi - P_frac_psi;
+    const dP_raw = P_psi - P_frac_psi;
+    const tau = Math.max(LOSS_P_TAU_S, 0);
+    if (tau > 0 && Number.isFinite(dt_s) && dt_s > 0) {
+      const alpha = dt_s / (tau + dt_s);
+      z._dP_filt = (z._dP_filt || 0) + alpha * (dP_raw - (z._dP_filt || 0));
+    } else {
+      z._dP_filt = dP_raw;
+    }
+    const dP = z._dP_filt;
 
     // === HYSTERESIS: Prevent chattering on/off ===
     if (!z._active) {
@@ -8319,11 +8330,15 @@ function drawCharts(x0, top = 150, h = 420){
 
     const y = map(formationFluidDepth_m, 0, MAX_DEPTH, yT, yB, true);
 
-    // Show formation fluid density in ppg
     const fluidProps = FORMATION_FLUID_TYPES[formationFluidType];
     const fluid_ppg = fluidProps ? fluidProps.density_ppg : 8.33;
+    let eq_ppg = fluid_ppg;
+    if (formationFluidDepth_m > 0 && isFinite(porePressure_psi)) {
+      const denom = Math.max(PSI_COEF * formationFluidDepth_m, 1e-6);
+      eq_ppg = porePressure_psi / denom;
+    }
 
-    const x = map(fluid_ppg, eMin, eMax, xL, xR, true);
+    const x = map(eq_ppg, eMin, eMax, xL, xR, true);
 
     // Draw triangle
     push();
@@ -8342,7 +8357,7 @@ function drawCharts(x0, top = 150, h = 420){
     noStroke(); fill(fluidColor[0], fluidColor[1], fluidColor[2]);
     textSize(10); textAlign(LEFT, BOTTOM);
     const typeStr = fluidProps ? fluidProps.name : 'Kick';
-    text(`${typeStr}: ${nf(fluid_ppg,1,2)} ppg @ ${nf(formationFluidDepth_m,1,0)} m`, x + 10, y - 2);
+    text(`${typeStr}: ${nf(eq_ppg,1,2)} ppg eq @ ${nf(formationFluidDepth_m,1,0)} m (P_pore=${nf(porePressure_psi,1,0)} psi)`, x + 10, y - 2);
     pop();
   }
 }
