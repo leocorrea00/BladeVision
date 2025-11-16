@@ -1599,17 +1599,35 @@ function updateFormationFluidMigration(dt_s) {
     window.__influxInventory_bbl = currentFormationFluidInventory_bbl();
   }
 
-  // Update front position (find highest cell with any formation fluid)
-  let highestCell = -1;
-  for (let i = 0; i < N_BELOW; i++) {
-    const total = (gasPhaseFrom_below[i] || 0) + (oilPhaseFrom_below[i] || 0) + (waterPhaseFrom_below[i] || 0);
-    if (total > 0.01) {
-      highestCell = i;
-      break;
+  // Update front position: shallowest depth containing any formation fluid
+  const FRACTION_THRESHOLD = 0.01;
+  let frontDepth_m = null;
+
+  // Check riser column first (closest to surface)
+  if (Array.isArray(gasPhaseFrom_above) && gasPhaseFrom_above.length) {
+    for (let i = 0; i < gasPhaseFrom_above.length; i++) {
+      const total = (gasPhaseFrom_above[i] || 0) + (oilPhaseFrom_above[i] || 0) + (waterPhaseFrom_above[i] || 0);
+      if (total > FRACTION_THRESHOLD) {
+        frontDepth_m = i * CELL_M;
+        break;
+      }
     }
   }
-  if (highestCell >= 0) {
-    formationFluidFront_m = BOP_DEPTH + highestCell * CELL_M;
+
+  if (frontDepth_m == null && Array.isArray(gasPhaseFrom_below) && gasPhaseFrom_below.length) {
+    for (let i = 0; i < gasPhaseFrom_below.length; i++) {
+      const total = (gasPhaseFrom_below[i] || 0) + (oilPhaseFrom_below[i] || 0) + (waterPhaseFrom_below[i] || 0);
+      if (total > FRACTION_THRESHOLD) {
+        frontDepth_m = BOP_DEPTH + i * CELL_M;
+        break;
+      }
+    }
+  }
+
+  if (frontDepth_m != null) {
+    formationFluidFront_m = frontDepth_m;
+  } else {
+    formationFluidFront_m = TD_DEPTH;
   }
 }
 
@@ -1841,10 +1859,11 @@ function stepAdvection(){
   const qFromAnnBelow = qAnnulusToRiser;
 
   const annulusTopMW = annBelowGrid[0] || dsEffluentMW;
-  let bopNodeMW = annulusTopMW;
+  const annulusTopEffMW = effectiveCellDensity_ppg(annulusTopMW, 0, false);
+  let bopNodeMW = annulusTopEffMW;
   if (qBopTotalUp > FLOW_THRESHOLD) {
     let bopMix = 0;
-    if (qAnnulusTotalUp > FLOW_THRESHOLD) bopMix += qAnnulusTotalUp * annulusTopMW;
+    if (qAnnulusTotalUp > FLOW_THRESHOLD) bopMix += qAnnulusTotalUp * annulusTopEffMW;
     if (qBO_up_total > FLOW_THRESHOLD) bopMix += qBO_up_total * boosterEffluentMW;
     if (qChokeMixUp_total > FLOW_THRESHOLD) bopMix += qChokeMixUp_total * chokeEffluentMW;
     if (qKillMixUp_total > FLOW_THRESHOLD) bopMix += qKillMixUp_total * killEffluentMW;
@@ -1871,7 +1890,7 @@ function stepAdvection(){
       let qTotal = 0;
 
       if (qFromAnnBelow > FLOW_THRESHOLD) {
-        mixMW += qFromAnnBelow * annulusTopMW;
+        mixMW += qFromAnnBelow * annulusTopEffMW;
         qTotal += qFromAnnBelow;
       }
 
@@ -1930,7 +1949,7 @@ function stepAdvection(){
       let qTotal = 0;
 
       if (qFromAnnBelow > FLOW_THRESHOLD) {
-        mixMW += qFromAnnBelow * annulusTopMW;
+        mixMW += qFromAnnBelow * annulusTopEffMW;
         qTotal += qFromAnnBelow;
       }
 
@@ -3914,7 +3933,10 @@ function routeAnnulusFlowsWithLosses(dt_s){
 
   // How to source qToLoss: prefer Booster + Choke/Kill (downward) while level below surface,
   // then DS, then TopFill; this ensures downward flows go DOWN to the zone when not full.
-  const riserFull = ((typeof annulusTopDepthGlobal==='function' ? annulusTopDepthGlobal() : (LOSS_TOP_DEPTH_m||0)) <= 0.5);
+  const connectedTopDepth = (typeof surfaceColumnTopDepth === 'function')
+    ? surfaceColumnTopDepth()
+    : ((typeof annulusTopDepthGlobal === 'function') ? annulusTopDepthGlobal() : (LOSS_TOP_DEPTH_m || 0));
+  const riserFull = connectedTopDepth <= 0.5;
 
   let takeBO = 0, takeDS = 0, takeTF = 0, takeChoke = 0, takeKill = 0;
 
@@ -4183,7 +4205,9 @@ function routeAnnulusFlowsWithLosses(dt_s){
   window.__qAnnBelow_m3s = qAnnBelow;  // Only DS through casing/OH
 
   // ------------------- Stable FLOW_OUT with hysteresis -------------------
-  const top = (typeof annulusTopDepthGlobal==='function') ? annulusTopDepthGlobal() : 0;
+  const top = (typeof surfaceColumnTopDepth === 'function')
+    ? surfaceColumnTopDepth()
+    : ((typeof annulusTopDepthGlobal === 'function') ? annulusTopDepthGlobal() : 0);
   const HYST_UP = 0.25, HYST_DN = 0.75;
   if (typeof routeAnnulusFlowsWithLosses._full === 'undefined'){
     routeAnnulusFlowsWithLosses._full = (top <= HYST_UP);
