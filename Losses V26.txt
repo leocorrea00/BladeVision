@@ -144,6 +144,7 @@ let formationFluidRate_gpm = 0; // Influx rate (manual mode)
 let formationFluidVolume_bbl = 0; // Total volume entered
 let formationFluidFront_m = TD_DEPTH; // Current front position
 let formationFluidMigrationModel = 'SHUTIN'; // 'SHUTIN', 'HARMATHY', 'MODIFIED_HARMATHY'
+let formationFluidOverflow_m3 = 0; // Volume that could not be accommodated this frame
 let kickMode = 'MANUAL'; // 'MANUAL' or 'PRESSURE_DRIVEN'
 let porePressure_psi = 7000; // Formation pore pressure
 let permeability_mD = 100; // Formation permeability (millidarcys)
@@ -697,6 +698,21 @@ const A_openAnn  = () => area_annulus(openhole_ODm,ds_OD_m);
 const A_DS       = () => Math.PI * ds_ID_m * ds_ID_m / 4;
 const A_booster  = () => Math.PI * booster_ID_m * booster_ID_m / 4;
 
+function averageAnnulusAreaBelowBOP(){
+  const L_csg = Math.max(SHOE_DEPTH - BOP_DEPTH, 0);
+  const L_oh  = Math.max(TD_DEPTH - SHOE_DEPTH, 0);
+  const total = L_csg + L_oh;
+  if (total <= 1e-9) return Math.max(A_casingAnn(), 1e-9);
+  return ((L_csg * A_casingAnn()) + (L_oh * A_openAnn())) / total;
+}
+
+function estimateTransitMinutes(length_m, q_m3s, area_m2){
+  if (q_m3s <= 1e-9 || area_m2 <= 1e-9) return Infinity;
+  const velocity = q_m3s / area_m2;
+  if (velocity <= 1e-9) return Infinity;
+  return (length_m / velocity) / 60;
+}
+
 function betaFluid(fl) {
   if (fl === 'OBM')   return 3.5e-10;   // 1/Pa
   if (fl === 'Diesel')return 8.0e-10;
@@ -1206,6 +1222,7 @@ function initializeFormationFluidCells() {
   oilPhaseFrom_above = new Array(N_ABV).fill(0);
   waterPhaseFrom_below = new Array(N_BELOW).fill(0);
   waterPhaseFrom_above = new Array(N_ABV).fill(0);
+  formationFluidOverflow_m3 = 0;
 }
 
 function calculateMigrationVelocity_m_s(fluidType, pressure_psi, mudWeight_ppg) {
@@ -1367,6 +1384,86 @@ function mixFormationFluidIntoGrid(grid, index, fluidDensity_ppg, fraction){
   grid[index] = base * (1 - f) + fluidDensity_ppg * f;
 }
 
+function formationSectionConfig(section){
+  if (section === 'below') {
+    return {
+      gas: gasPhaseFrom_below,
+      oil: oilPhaseFrom_below,
+      water: waterPhaseFrom_below,
+      grid: annBelowGrid,
+      depthOffset: BOP_DEPTH
+    };
+  }
+  if (section === 'above') {
+    return {
+      gas: gasPhaseFrom_above,
+      oil: oilPhaseFrom_above,
+      water: waterPhaseFrom_above,
+      grid: annAboveGrid,
+      depthOffset: 0
+    };
+  }
+  return null;
+}
+
+function formationCellVolume_m3(section, idx){
+  const cfg = formationSectionConfig(section);
+  if (!cfg || idx < 0 || idx >= cfg.gas.length) return 0;
+  const depthTop = cfg.depthOffset + idx * CELL_M;
+  const depthMid = depthTop + CELL_M * 0.5;
+  const area = areaAtDepthTop_(depthMid);
+  return Math.max(area * CELL_M, 1e-9);
+}
+
+function formationCellCapacity(section, idx){
+  const cfg = formationSectionConfig(section);
+  if (!cfg || idx < 0 || idx >= cfg.gas.length) return 0;
+  const occupied = (cfg.gas[idx] || 0) + (cfg.oil[idx] || 0) + (cfg.water[idx] || 0);
+  return clamp(1 - occupied, 0, 1);
+}
+
+function addFormationFluidFraction(section, idx, addFrac){
+  const cfg = formationSectionConfig(section);
+  if (!cfg || idx < 0 || idx >= cfg.gas.length) return;
+  const target = formationFluidType;
+  if (target === 'GAS') {
+    cfg.gas[idx] = Math.min(1.0, (cfg.gas[idx] || 0) + addFrac);
+  } else if (target === 'OIL' || target === 'BLACKOIL') {
+    cfg.oil[idx] = Math.min(1.0, (cfg.oil[idx] || 0) + addFrac);
+  } else {
+    cfg.water[idx] = Math.min(1.0, (cfg.water[idx] || 0) + addFrac);
+  }
+}
+
+function distributeFormationFluidVolume(section, startIdx, volume_m3, density_ppg){
+  const cfg = formationSectionConfig(section);
+  if (!cfg) return volume_m3;
+  const len = cfg.gas.length;
+  if (!len || volume_m3 <= 1e-12) return volume_m3;
+  let idx = clamp(startIdx, 0, len - 1);
+  let remaining = volume_m3;
+  while (remaining > 1e-9 && idx >= 0) {
+    const capacity = formationCellCapacity(section, idx);
+    if (capacity <= 1e-6) {
+      idx -= 1;
+      continue;
+    }
+    const cellVol = formationCellVolume_m3(section, idx);
+    const maxVolHere = capacity * cellVol;
+    const usedVol = Math.min(maxVolHere, remaining);
+    if (usedVol <= 0) {
+      idx -= 1;
+      continue;
+    }
+    const addFrac = usedVol / cellVol;
+    addFormationFluidFraction(section, idx, addFrac);
+    mixFormationFluidIntoGrid(cfg.grid, idx, density_ppg, addFrac);
+    remaining -= usedVol;
+    idx -= 1; // march toward surface/BOP
+  }
+  return remaining;
+}
+
 function currentFormationFluidInventory_m3(){
   const cellH = CELL_M;
   let total = 0;
@@ -1453,45 +1550,24 @@ function updateFormationFluidMigration(dt_s) {
   const influx_volume_m3 = influx_m3s * dt_s;
 
   // Determine which cell the influx enters and add to appropriate phase array
+  const densityForMix = fluidProps.density_ppg || MW_DS;
+
   if (formationFluidDepth_m >= BOP_DEPTH) {
     // Below BOP
     const cellIndex = Math.floor((formationFluidDepth_m - BOP_DEPTH) / CELL_M);
-    if (cellIndex >= 0 && cellIndex < N_BELOW) {
-      const cellVolume = areaAtDepthTop_(formationFluidDepth_m) * CELL_M;
-      const fraction = influx_volume_m3 / Math.max(cellVolume, 1e-9);
-
-      // Add to appropriate phase array based on fluid type
-      if (formationFluidType === 'GAS') {
-        gasPhaseFrom_below[cellIndex] = Math.min((gasPhaseFrom_below[cellIndex] || 0) + fraction, 1.0);
-      } else if (formationFluidType === 'OIL' || formationFluidType === 'BLACKOIL') {
-        oilPhaseFrom_below[cellIndex] = Math.min((oilPhaseFrom_below[cellIndex] || 0) + fraction, 1.0);
-      } else if (formationFluidType === 'WATER') {
-        waterPhaseFrom_below[cellIndex] = Math.min((waterPhaseFrom_below[cellIndex] || 0) + fraction, 1.0);
-      }
-
-      mixFormationFluidIntoGrid(annBelowGrid, cellIndex,
-        fluidProps.density_ppg || MW_DS,
-        Math.min(fraction, 0.95));
+    let leftover = distributeFormationFluidVolume('below', cellIndex, influx_volume_m3, densityForMix);
+    if (leftover > 1e-9 && !BOP_CLOSED && N_ABV > 0) {
+      leftover = distributeFormationFluidVolume('above', N_ABV - 1, leftover, densityForMix);
+    }
+    if (leftover > 1e-6) {
+      formationFluidOverflow_m3 += leftover;
     }
   } else {
     // Above BOP (riser)
     const cellIndex = Math.floor(formationFluidDepth_m / CELL_M);
-    if (cellIndex >= 0 && cellIndex < N_ABV) {
-      const cellVolume = areaAtDepthTop_(formationFluidDepth_m) * CELL_M;
-      const fraction = influx_volume_m3 / Math.max(cellVolume, 1e-9);
-
-      // Add to appropriate phase array based on fluid type
-      if (formationFluidType === 'GAS') {
-        gasPhaseFrom_above[cellIndex] = Math.min((gasPhaseFrom_above[cellIndex] || 0) + fraction, 1.0);
-      } else if (formationFluidType === 'OIL' || formationFluidType === 'BLACKOIL') {
-        oilPhaseFrom_above[cellIndex] = Math.min((oilPhaseFrom_above[cellIndex] || 0) + fraction, 1.0);
-      } else if (formationFluidType === 'WATER') {
-        waterPhaseFrom_above[cellIndex] = Math.min((waterPhaseFrom_above[cellIndex] || 0) + fraction, 1.0);
-      }
-
-      mixFormationFluidIntoGrid(annAboveGrid, cellIndex,
-        fluidProps.density_ppg || MW_DS,
-        Math.min(fraction, 0.95));
+    let leftover = distributeFormationFluidVolume('above', cellIndex, influx_volume_m3, densityForMix);
+    if (leftover > 1e-6) {
+      formationFluidOverflow_m3 += leftover;
     }
   }
 
@@ -1517,7 +1593,7 @@ function updateFormationFluidMigration(dt_s) {
   }
 
   // Update total volume
-  formationFluidVolume_bbl += (formationFluidRate_gpm * dt_s) / 42; // Convert to barrels
+  formationFluidVolume_bbl += (influxRate_gpm * dt_s) / 42; // Convert to barrels
 
   if (typeof window !== 'undefined') {
     window.__influxInventory_bbl = currentFormationFluidInventory_bbl();
@@ -9298,6 +9374,27 @@ function updateDiagnosticsUI(dt_s){
 
   const qDS_gpm = Q_DS || 0;
   const qBO_gpm = Q_BO || 0;
+  const qDS_m3s = qDS_gpm * M3_PER_GPM;
+  const qAnnulusReturn_m3s = Math.max(0,
+    (typeof window !== 'undefined' && typeof window.__dsFlux_m3s === 'number')
+      ? window.__dsFlux_m3s
+      : qDS_m3s);
+  const qRiserFeed_m3s = (() => {
+    if (typeof window === 'undefined') return 0;
+    if (typeof window.__qBOP_annulusToRiser_m3s === 'number' && window.__qBOP_annulusToRiser_m3s > 0) {
+      return window.__qBOP_annulusToRiser_m3s;
+    }
+    if (typeof window.__qRiserUp_m3s === 'number' && window.__qRiserUp_m3s > 0) {
+      return window.__qRiserUp_m3s;
+    }
+    if (typeof window.__qAnnUp_m3s === 'number' && window.__qAnnUp_m3s > 0) {
+      return window.__qAnnUp_m3s;
+    }
+    return 0;
+  })();
+  const dsTransit_min = estimateTransitMinutes(Math.max(TD_DEPTH, 1), qDS_m3s, A_DS());
+  const annTransit_min = estimateTransitMinutes(Math.max(TD_DEPTH - BOP_DEPTH, 1), qAnnulusReturn_m3s, averageAnnulusAreaBelowBOP());
+  const riserTransit_min = estimateTransitMinutes(Math.max(BOP_DEPTH, 1), qRiserFeed_m3s, A_riserAnn());
   const riserMW_ppg = averageEffectiveDensity(annAboveGrid, true);
   const chokeMW_ppg = (chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE);
   const killMW_ppg = (killGrid.length > 0 ? average(killGrid) : MW_KILL);
@@ -9326,6 +9423,10 @@ function updateDiagnosticsUI(dt_s){
   const influxInventoryDiag = (typeof window !== 'undefined' && typeof window.__influxInventory_bbl === 'number')
     ? window.__influxInventory_bbl
     : 0;
+  const kickFrontDepth_m = (typeof formationFluidFront_m === 'number' && isFinite(formationFluidFront_m))
+    ? formationFluidFront_m
+    : null;
+  const overflow_bbl = formationFluidOverflow_m3 * 6.28981;
 
   // Prefer residual published by the level solver; else compute locally
   const resid_gpm = (typeof window !== 'undefined' && typeof window.qResid_gpm === 'number')
@@ -9343,6 +9444,7 @@ function updateDiagnosticsUI(dt_s){
 
   const fmt = v => (+v).toFixed(1);
   const fmt2 = v => (+v).toFixed(2);
+  const fmtTransit = v => (isFinite(v) ? (+v).toFixed(1) : '∞');
 
   const diagLines = [
     `BOP: ${bopState}`,
@@ -9356,8 +9458,14 @@ function updateDiagnosticsUI(dt_s){
     `Q_CML_eff (gpm): ${fmt(qCML_gpm)} | Q_comp (gpm): ${fmt(qComp_gpm)}`,
     `MassBal Resid (gpm): ${fmt(resid_gpm)}`,
     `Shut-In (valves): ${sealedByValves ? 'YES' : 'NO'} | MPD Seal: ${mpdSeal ? 'YES' : 'NO'} | Closed boost (psi): ${fmt(closedBoost)}`,
-    `Influx (gpm): ${fmt(influxRateDiag)} | Kick Volume (bbl): ${fmt(influxInventoryDiag)}`
+    `Influx (gpm): ${fmt(influxRateDiag)} | Kick Volume (bbl): ${fmt(influxInventoryDiag)}`,
+    `Transit (min) DS/Ann/Riser: ${fmtTransit(dsTransit_min)} / ${fmtTransit(annTransit_min)} / ${fmtTransit(riserTransit_min)}`,
+    `Kick front depth (m): ${kickFrontDepth_m != null ? fmt(kickFrontDepth_m) : '--'} | Total kick in (bbl): ${fmt(formationFluidVolume_bbl)}`
   ];
+
+  if (overflow_bbl > 0.01) {
+    diagLines.push(`Kick overflow buffer (bbl): ${fmt(overflow_bbl)}`);
+  }
 
   uiDiag.text.html(diagLines.join('<br/>'));
 }
