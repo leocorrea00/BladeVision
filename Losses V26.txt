@@ -5810,31 +5810,31 @@ function showFittedParams(){
 // --- Global annulus top (can drop below BOP due to losses) ---
 function annulusTopDepthGlobal(){
   // Returns the PHYSICAL top of fluid column (deepest of all constraints)
-  
+
   let top = 0;
-  
-  // CML contribution
+
+  // CML contribution (represents riser/free surface when the BOP is open)
   if (CML_ON && typeof CML_TOP_DEPTH === 'number') {
     top = Math.max(top, CML_TOP_DEPTH);
   }
-  
-  // Loss contribution
+
+  // Loss contribution (applies everywhere in the wellbore)
   if (LOSSES_ON && typeof LOSS_TOP_DEPTH_m === 'number') {
     top = Math.max(top, LOSS_TOP_DEPTH_m);
   }
-  
-  // ✅ CRITICAL FIX: When BOTH are active, they should converge
-  // If losses are occurring, LOSS_TOP_DEPTH_m is the TRUE physical boundary
-  if (LOSSES_ON && totalLossRate_gpm() > 0) {
-    // Loss-driven top takes precedence
-    top = LOSS_TOP_DEPTH_m;
-    
-    // Sync CML to match (they should be the same in steady state)
-    if (CML_ON && Math.abs(CML_TOP_DEPTH - LOSS_TOP_DEPTH_m) > 0.1) {
-      CML_TOP_DEPTH = LOSS_TOP_DEPTH_m; // Force sync
+
+  const lossActivelyDraining = LOSSES_ON && totalLossRate_gpm() > 0;
+  if (lossActivelyDraining) {
+    // Loss-driven top takes precedence for the connected annulus
+    top = Math.max(top, LOSS_TOP_DEPTH_m || 0);
+
+    // Only force the riser/CML reference to follow losses while the BOP is open
+    if (!BOP_CLOSED && CML_ON && typeof CML_TOP_DEPTH === 'number'
+        && Math.abs(CML_TOP_DEPTH - LOSS_TOP_DEPTH_m) > 0.1) {
+      CML_TOP_DEPTH = LOSS_TOP_DEPTH_m;
     }
   }
-  
+
   return top;
 }
 
@@ -7022,8 +7022,9 @@ if (formationFluidEnabled) {
 const cmlActive = CML_ON && CML_TOP_DEPTH > 0.01;
 const lossActive = LOSSES_ON && LOSS_TOP_DEPTH_m > 0.01;
 const topsDiffer = Math.abs((CML_TOP_DEPTH || 0) - (LOSS_TOP_DEPTH_m || 0)) > 10;
+const canUnifyLevels = !BOP_CLOSED && cmlActive && lossActive && !topsDiffer;
 
-if (cmlActive && lossActive && !topsDiffer) {
+if (canUnifyLevels) {
   // ✅ UNIFIED: Both active and at same depth
   const levelY = mapDepthToY(Math.min(LOSS_TOP_DEPTH_m, TD_DEPTH));
   
@@ -7063,11 +7064,11 @@ if (cmlActive && lossActive && !topsDiffer) {
     textAlign(CENTER, CENTER);
   }
   
-  if (lossActive && topsDiffer) {
+  if (lossActive && (!canUnifyLevels)) {
     const levelY_loss = mapDepthToY(Math.min(LOSS_TOP_DEPTH_m, TD_DEPTH));
     noStroke(); fill(0, 0, 0, 60);
-    
-    if (LOSS_TOP_DEPTH_m <= BOP_DEPTH) {
+
+    if (LOSS_TOP_DEPTH_m <= BOP_DEPTH && !BOP_CLOSED) {
       if (wLeftAnn > 0) rect(xLeftAnn, well.y, wLeftAnn, levelY_loss - well.y);
       if (wRightAnn > 0) rect(xRightAnn, well.y, wRightAnn, levelY_loss - well.y);
     } else {
@@ -9283,10 +9284,12 @@ function updateDiagnosticsUI(dt_s){
                       ? (compressionEquivalentFlow_gpm(Math.max(dt_s, 1/120)) || 0)
                       : 0);
 
-  // Surface returns only when riser is "full"
-  const topDepth = (typeof annulusTopDepthGlobal === 'function')
-    ? annulusTopDepthGlobal()
-    : (typeof riserTopDepth === 'function' ? riserTopDepth() : 0);
+  // Surface returns only when the column that vents to surface is "full"
+  const topDepth = (typeof surfaceColumnTopDepth === 'function')
+    ? surfaceColumnTopDepth()
+    : ((typeof annulusTopDepthGlobal === 'function')
+        ? annulusTopDepthGlobal()
+        : (typeof riserTopDepth === 'function' ? riserTopDepth() : 0));
   const qOutSurf_gpm = (topDepth <= 0.5) ? (FLOW_OUT_gpm || 0) : 0;
 
   // Include TopFill in the inflow tally (if on)
