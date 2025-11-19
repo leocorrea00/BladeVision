@@ -36,6 +36,9 @@ let simElapsedSeconds = 0;
 let playButton, pauseButton, resetButton;
 let simClockDiv;
 
+// Pressure-driven influx balancing (auto SBP target when sealed)
+let autoKickBalancePsi = 0;
+
 function currentTimeScaleFactor(baseDt){
   const preset = TIME_SCALE_PRESETS[activeTimeScaleKey];
   if (!preset) return 1.0;
@@ -386,7 +389,10 @@ function sbpAppliedPsi(){
   const extraFromCompression = (!BOP_CLOSED && mpdSealActive())
     ? Math.max(0, closedWellPressureBoost_psi || 0)
     : 0;
-  return base + extraFromCompression;
+  const autoKick = (kickMode === 'PRESSURE_DRIVEN' && autoKickBalancePsi > 0)
+    ? autoKickBalancePsi
+    : 0;
+  return base + extraFromCompression + autoKick;
 }
 let ANCHOR_DEPTH = 0;
 let ANCHOR_ECD = 0;
@@ -1618,6 +1624,7 @@ function currentFormationFluidInventory_bbl(){
 function updateFormationFluidMigration(dt_s) {
   // Reset influx rate
   current_influx_m3s = 0;
+  autoKickBalancePsi = 0;
 
   if (!formationFluidEnabled) {
     if (typeof window !== 'undefined') {
@@ -1634,15 +1641,30 @@ function updateFormationFluidMigration(dt_s) {
   window.__gasExpansion_m3s = 0;
 
   const sealedByValves = isWellShutInByValves();
+  const mpdSealed = (typeof mpdSealActive === 'function') ? mpdSealActive() : false;
 
   // Calculate influx rate based on mode
   let influxRate_gpm = 0;
   const BHP_psi = pressureAtDepth(formationFluidDepth_m);
+  const bhpNoSBP_psi = pressureAtDepth_noSBP_withCML(formationFluidDepth_m);
   if (kickMode === 'MANUAL') {
     influxRate_gpm = formationFluidRate_gpm;
   } else if (kickMode === 'PRESSURE_DRIVEN') {
     const deltaP = Math.max(0, porePressure_psi - BHP_psi);
-    influxRate_gpm = productivityIndex_gpm_psi * deltaP;
+    if (deltaP < 0.5) {
+      influxRate_gpm = 0; // Treat equilibrium as no new influx
+    } else {
+      influxRate_gpm = productivityIndex_gpm_psi * deltaP;
+    }
+
+    // Determine the surface pressure required to hold equilibrium when sealed
+    if (sealedByValves || mpdSealed) {
+      const neededPsi = Math.max(0, porePressure_psi - bhpNoSBP_psi);
+      // Smooth to avoid jumps when turning seals on/off
+      autoKickBalancePsi = (isFinite(autoKickBalancePsi) ? autoKickBalancePsi : 0);
+      const alpha = 0.25;
+      autoKickBalancePsi = (1 - alpha) * autoKickBalancePsi + alpha * neededPsi;
+    }
   }
 
   if (sealedByValves) {
@@ -1653,6 +1675,9 @@ function updateFormationFluidMigration(dt_s) {
       const maxRate = productivityIndex_gpm_psi * availableDraw;
       influxRate_gpm = Math.min(influxRate_gpm, maxRate);
     }
+  } else if (!mpdSealed) {
+    // No surface seal: zero the auto SBP contribution
+    autoKickBalancePsi = 0;
   }
 
   // Store current influx rate for flow routing (even if zero)
@@ -1660,6 +1685,7 @@ function updateFormationFluidMigration(dt_s) {
   current_influx_m3s = influx_m3s + expansion_m3s;
   if (typeof window !== 'undefined') {
     window.__influxRate_gpm = influxRate_gpm;
+    window.__autoKickBalancePsi = autoKickBalancePsi;
   }
 
   if (influxRate_gpm <= 0) {
@@ -9674,6 +9700,9 @@ function updateDiagnosticsUI(dt_s){
   const sealedByValves = isWellShutInByValves();
   const mpdSeal = mpdSealActive();
   const closedBoost = closedWellPressureBoost_psi || 0;
+  const autoKickPsi = (typeof window !== 'undefined' && typeof window.__autoKickBalancePsi === 'number')
+    ? window.__autoKickBalancePsi
+    : autoKickBalancePsi;
   const influxRateDiag = (typeof window !== 'undefined' && typeof window.__influxRate_gpm === 'number')
     ? window.__influxRate_gpm
     : formationFluidRate_gpm;
@@ -9716,6 +9745,7 @@ function updateDiagnosticsUI(dt_s){
     `Q_CML_eff (gpm): ${fmt(qCML_gpm)} | Q_comp (gpm): ${fmt(qComp_gpm)}`,
     `MassBal Resid (gpm): ${fmt(resid_gpm)}`,
     `Shut-In (valves): ${sealedByValves ? 'YES' : 'NO'} | MPD Seal: ${mpdSeal ? 'YES' : 'NO'} | Closed boost (psi): ${fmt(closedBoost)}`,
+    `Auto SBP for kick balance (psi): ${fmt(autoKickPsi)}`,
     `Influx (gpm): ${fmt(influxRateDiag)} | Kick Volume (bbl): ${fmt(influxInventoryDiag)}`,
     `Transit (min) DS/Ann/Riser: ${fmtTransit(dsTransit_min)} / ${fmtTransit(annTransit_min)} / ${fmtTransit(riserTransit_min)}`,
     `Kick front depth (m): ${kickFrontDepth_m != null ? fmt(kickFrontDepth_m) : '--'} | Total kick in (bbl): ${fmt(formationFluidVolume_bbl)}`
