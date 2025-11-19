@@ -387,6 +387,13 @@ function effectiveSurfaceSealActive(){
   if (isWellShutInByValves()) return true;
   if (mpdSealActive()) return true;
 
+  // If the riser is vented to atmosphere (BOP open and RCD open), treat the
+  // system as unsealed even if FlowOut is low because there is still a free
+  // path to surface. This avoids mistakenly applying auto surface pressure
+  // during loss-driven low-flow conditions.
+  const riserVented = (!BOP_CLOSED) && !RCD_CLOSED;
+  if (riserVented) return false;
+
   // If the stack is closed and an up-line is selected but surface flow is
   // effectively zero, treat it as a trapped column so pressure can build.
   if (BOP_CLOSED){
@@ -1676,33 +1683,34 @@ function updateFormationFluidMigration(dt_s) {
   let influxRate_gpm = 0;
   const BHP_psi = pressureAtDepth(formationFluidDepth_m);
   const bhpNoSBP_psi = pressureAtDepth_noSBP_withCML(formationFluidDepth_m);
+  let effectiveBhp_psi = BHP_psi;
+
+  if (surfaceSealed) {
+    const neededPsi = Math.max(0, porePressure_psi - bhpNoSBP_psi);
+    autoKickBalancePsi = isFinite(autoKickBalancePsi) ? autoKickBalancePsi : 0;
+    const alpha = 0.25;
+    autoKickBalancePsi = (1 - alpha) * autoKickBalancePsi + alpha * neededPsi;
+    effectiveBhp_psi = Math.max(BHP_psi, bhpNoSBP_psi + autoKickBalancePsi);
+  } else {
+    // Let the auto-balance pressure decay smoothly when the seal opens to
+    // avoid abrupt drops on the pressure plot while still clearing the
+    // stored value quickly enough once the well is vented.
+    autoKickBalancePsi *= 0.7;
+  }
+
   if (kickMode === 'MANUAL') {
     influxRate_gpm = formationFluidRate_gpm;
   } else if (kickMode === 'PRESSURE_DRIVEN') {
-    const deltaP = Math.max(0, porePressure_psi - BHP_psi);
-    if (deltaP < 0.25) {
+    const deltaP = Math.max(0, porePressure_psi - effectiveBhp_psi);
+    if (deltaP < 0.1) {
       influxRate_gpm = 0; // Treat near-equilibrium as no new influx
     } else {
       influxRate_gpm = productivityIndex_gpm_psi * deltaP;
     }
 
-    // Determine the surface pressure required to hold equilibrium when sealed
-    if (surfaceSealed) {
-      const neededPsi = Math.max(0, porePressure_psi - bhpNoSBP_psi);
-      autoKickBalancePsi = (isFinite(autoKickBalancePsi) ? autoKickBalancePsi : 0);
-      const alpha = 0.2;
-      autoKickBalancePsi = (1 - alpha) * autoKickBalancePsi + alpha * neededPsi;
-
-      // If the applied auto pressure brings BHP to equilibrium, stop inflow
-      const bhpWithAuto = BHP_psi + autoKickBalancePsi;
-      if (bhpWithAuto >= porePressure_psi - 0.25) {
-        influxRate_gpm = 0;
-      }
-    } else {
-      // Let the auto-balance pressure decay smoothly when the seal opens to
-      // avoid abrupt drops on the pressure plot while still clearing the
-      // stored value quickly enough once the well is vented.
-      autoKickBalancePsi *= 0.85;
+    // If the applied auto pressure brings BHP to equilibrium, stop inflow
+    if (surfaceSealed && effectiveBhp_psi >= porePressure_psi - 0.05) {
+      influxRate_gpm = 0;
     }
   }
 
