@@ -395,6 +395,18 @@ function effectiveSurfaceSealActive(){
     const fo = (typeof FLOW_OUT_gpm === 'number') ? FLOW_OUT_gpm : 0;
     if ((chokeUp || killUp) && fo < 0.5) return true;
   }
+
+  // If the BOP is open but an up-line (choke or kill) is closed at surface
+  // such that there is essentially no return flow, the riser/line system is
+  // still sealed and trapped pressure can build. Treat very low surface flow
+  // as a seal so pressure-driven influx can hand off to surface pressure
+  // rather than continuing to admit new kick volume.
+  const chokeUpOpen = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+  const killUpOpen  = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
+  const flowOut = (typeof FLOW_OUT_gpm === 'number') ? FLOW_OUT_gpm : 0;
+  if (!BOP_CLOSED && flowOut < 0.5 && (chokeUpOpen || killUpOpen)) {
+    return true;
+  }
   return false;
 }
 
@@ -1687,7 +1699,10 @@ function updateFormationFluidMigration(dt_s) {
         influxRate_gpm = 0;
       }
     } else {
-      autoKickBalancePsi = 0;
+      // Let the auto-balance pressure decay smoothly when the seal opens to
+      // avoid abrupt drops on the pressure plot while still clearing the
+      // stored value quickly enough once the well is vented.
+      autoKickBalancePsi *= 0.85;
     }
   }
 
@@ -2788,9 +2803,10 @@ function averageEffectiveDensity(grid, isAboveBOP){
 }
 
 function effectiveFluidTopForDepth(depth){
-  const topGlobal = (typeof annulusTopDepthGlobal === 'function')
-    ? annulusTopDepthGlobal()
-    : 0;
+  const topGlobal = (typeof surfaceColumnTopDepth === 'function')
+    ? surfaceColumnTopDepth()
+    : (typeof annulusTopDepthGlobal === 'function' ? annulusTopDepthGlobal() : 0);
+
   if (BOP_CLOSED && depth >= BOP_DEPTH) {
     return Math.max(topGlobal, BOP_DEPTH);
   }
