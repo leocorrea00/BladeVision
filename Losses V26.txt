@@ -383,13 +383,29 @@ function sbpCanPressurizeAnnulus(){
   return riserFullEnoughForSBP();
 }
 
+function effectiveSurfaceSealActive(){
+  if (isWellShutInByValves()) return true;
+  if (mpdSealActive()) return true;
+
+  // If the stack is closed and an up-line is selected but surface flow is
+  // effectively zero, treat it as a trapped column so pressure can build.
+  if (BOP_CLOSED){
+    const chokeUp = CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP';
+    const killUp  = KILL_LINE_OPEN && KILL_DIRECTION === 'UP';
+    const fo = (typeof FLOW_OUT_gpm === 'number') ? FLOW_OUT_gpm : 0;
+    if ((chokeUp || killUp) && fo < 0.5) return true;
+  }
+  return false;
+}
+
 function sbpAppliedPsi(){
-  if (!sbpCanPressurizeAnnulus()) return 0;
-  const base = Math.max(0, CURRENT_SBP || 0);
+  const baseEnabled = sbpCanPressurizeAnnulus();
+  const base = baseEnabled ? Math.max(0, CURRENT_SBP || 0) : 0;
   const extraFromCompression = (!BOP_CLOSED && mpdSealActive())
     ? Math.max(0, closedWellPressureBoost_psi || 0)
     : 0;
-  const autoKick = (kickMode === 'PRESSURE_DRIVEN' && autoKickBalancePsi > 0)
+  const allowAutoKick = effectiveSurfaceSealActive();
+  const autoKick = (kickMode === 'PRESSURE_DRIVEN' && allowAutoKick && autoKickBalancePsi > 0)
     ? autoKickBalancePsi
     : 0;
   return base + extraFromCompression + autoKick;
@@ -1642,6 +1658,7 @@ function updateFormationFluidMigration(dt_s) {
 
   const sealedByValves = isWellShutInByValves();
   const mpdSealed = (typeof mpdSealActive === 'function') ? mpdSealActive() : false;
+  const surfaceSealed = effectiveSurfaceSealActive();
 
   // Calculate influx rate based on mode
   let influxRate_gpm = 0;
@@ -1651,23 +1668,30 @@ function updateFormationFluidMigration(dt_s) {
     influxRate_gpm = formationFluidRate_gpm;
   } else if (kickMode === 'PRESSURE_DRIVEN') {
     const deltaP = Math.max(0, porePressure_psi - BHP_psi);
-    if (deltaP < 0.5) {
-      influxRate_gpm = 0; // Treat equilibrium as no new influx
+    if (deltaP < 0.25) {
+      influxRate_gpm = 0; // Treat near-equilibrium as no new influx
     } else {
       influxRate_gpm = productivityIndex_gpm_psi * deltaP;
     }
 
     // Determine the surface pressure required to hold equilibrium when sealed
-    if (sealedByValves || mpdSealed) {
+    if (surfaceSealed) {
       const neededPsi = Math.max(0, porePressure_psi - bhpNoSBP_psi);
-      // Smooth to avoid jumps when turning seals on/off
       autoKickBalancePsi = (isFinite(autoKickBalancePsi) ? autoKickBalancePsi : 0);
-      const alpha = 0.25;
+      const alpha = 0.2;
       autoKickBalancePsi = (1 - alpha) * autoKickBalancePsi + alpha * neededPsi;
+
+      // If the applied auto pressure brings BHP to equilibrium, stop inflow
+      const bhpWithAuto = BHP_psi + autoKickBalancePsi;
+      if (bhpWithAuto >= porePressure_psi - 0.25) {
+        influxRate_gpm = 0;
+      }
+    } else {
+      autoKickBalancePsi = 0;
     }
   }
 
-  if (sealedByValves) {
+  if (surfaceSealed) {
     const availableDraw = Math.max(0, porePressure_psi - BHP_psi);
     if (availableDraw <= 0) {
       influxRate_gpm = 0;
@@ -1676,7 +1700,6 @@ function updateFormationFluidMigration(dt_s) {
       influxRate_gpm = Math.min(influxRate_gpm, maxRate);
     }
   } else if (!mpdSealed) {
-    // No surface seal: zero the auto SBP contribution
     autoKickBalancePsi = 0;
   }
 
