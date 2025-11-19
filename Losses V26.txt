@@ -5826,6 +5826,15 @@ function updateRiserLevelWithLosses(dt_s) {
     : 0;
   const qCML_m3s = to_m3s(effective_Q_CML_gpm() || 0);
 
+  // When the BOP is closed, the surface-connected column is the active
+  // choke/kill leg. Booster/top-fill/CML act only on the isolated riser and
+  // must not influence the below-BOP mass balance that sets choke/kill levels
+  // or loss drawdown. Zero their contribution for the surface-connected column
+  // whenever the stack is shut.
+  const qBO_eff_m3s = BOP_CLOSED ? 0 : qBO_m3s;
+  const qTF_eff_m3s = BOP_CLOSED ? 0 : qTF_m3s;
+  const qCML_eff_m3s = BOP_CLOSED ? 0 : qCML_m3s;
+
   // Get active loss zones sorted by depth (deepest first)
   const activeLossZones = (LOSSES_ON && Array.isArray(lossZones))
     ? lossZones.filter(z => z && z.enabled && (z.Qloss_gpm || 0) > 1.0).sort((a,b) => b.depth_m - a.depth_m)
@@ -5841,7 +5850,7 @@ function updateRiserLevelWithLosses(dt_s) {
 
   if (activeLossZones.length === 0) {
     // NO ACTIVE LOSSES: Simple global mass balance
-    const qIn_total = qDS_m3s + qBO_m3s + qTF_m3s + qChokeDown_m3s + qKillDown_m3s - qCML_m3s;
+    const qIn_total = qDS_m3s + qBO_eff_m3s + qTF_eff_m3s + qChokeDown_m3s + qKillDown_m3s - qCML_eff_m3s;
     const qOut_total = qOutSurface_m3s;
     const qNet = qIn_total - qOut_total;
 
@@ -5899,8 +5908,8 @@ function updateRiserLevelWithLosses(dt_s) {
     window.__qLossDeficit_m3s = qDeficit_m3s;
   }
 
-  const qIn_total_m3s = qDS_m3s + qBO_m3s + qTF_m3s + qChokeDown_m3s + qKillDown_m3s;
-  const qOut_total_m3s = qLoss_total_m3s + qOutSurface_m3s + qCML_m3s;
+  const qIn_total_m3s = qDS_m3s + qBO_eff_m3s + qTF_eff_m3s + qChokeDown_m3s + qKillDown_m3s;
+  const qOut_total_m3s = qLoss_total_m3s + qOutSurface_m3s + qCML_eff_m3s;
   const qNet_total_m3s = qIn_total_m3s - qOut_total_m3s - qDeficit_m3s;
 
   let dV_total = qNet_total_m3s * dt_s;
@@ -8017,17 +8026,19 @@ if (BOP_DEPTH > 0 && BOP_DEPTH <= TD_DEPTH) {
 }
 
 // MPD RCD cap
-if (MPD_ON && RCD_CLOSED){
+if (MPD_ON){
   const capY = well.y - 8;
   const xL = well.x + 2;
   const xR = well.x + well.w - 2;
+  const isClosed = !!RCD_CLOSED;
+  const hue = isClosed ? 0 : 210; // red when closed, blue when open
   noStroke();
-  fill(0, 80, 80, 230);
+  fill(hue, 80, 80, 230);
   rect(xL, capY, xR - xL, 14, 3);
   fill(0,0,100);
   textSize(12);
   textAlign(CENTER, BASELINE);
-  text("RCD", (xL + xR)/2, capY + 12);
+  text(isClosed ? "RCD CLOSED" : "RCD OPEN", (xL + xR)/2, capY + 12);
   textAlign(CENTER, CENTER);
 }
 
