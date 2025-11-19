@@ -4118,6 +4118,23 @@ function routeAnnulusFlowsWithLosses(dt_s){
     if (CHOKE_DIRECTION === "DOWN" && CHOKE_LINE_OPEN) qIn_belowBOP += qChoke_m3s;
     if (KILL_DIRECTION === "DOWN" && KILL_LINE_OPEN) qIn_belowBOP += qKill_m3s;
 
+    // Track the mud weight being pushed down the stack so the annulus and
+    // choke/kill upflow can mix with the correct composition (including
+    // injected pills that differ from the annulus/kick blend).
+    const qDown_choke = (CHOKE_DIRECTION === "DOWN" && CHOKE_LINE_OPEN) ? qChoke_m3s : 0;
+    const qDown_kill  = (KILL_DIRECTION === "DOWN" && KILL_LINE_OPEN)  ? qKill_m3s  : 0;
+    const downEffluentMW = (() => {
+      const effChoke = (chokeGrid && chokeGrid.length)
+        ? (chokeGrid[chokeGrid.length - 1] || MW_CHOKE)
+        : MW_CHOKE;
+      const effKill = (killGrid && killGrid.length)
+        ? (killGrid[killGrid.length - 1] || MW_KILL)
+        : MW_KILL;
+      const qDownTotal = qDown_choke + qDown_kill;
+      if (qDownTotal <= 1e-9) return null;
+      return ((qDown_choke * effChoke) + (qDown_kill * effKill)) / qDownTotal;
+    })();
+
     // Losses consume fluid from below-BOP annulus (can exceed instantaneous inflow)
     const qToLoss = qLossActual;
     const qStorageDraw_m3s = Math.max(0, qToLoss - Math.max(0, qIn_belowBOP));
@@ -4225,6 +4242,16 @@ function routeAnnulusFlowsWithLosses(dt_s){
     window.__qBOP_killDownIntoRiser_m3s = 0;
     window.__Q_TOTAL_UP_m3s = qToSurface_belowBOP;
 
+    // Publish downward injection so advection and hydrostatic use the injected mud
+    // weight (important when pumping a different MW pill while closed in).
+    const qDown_total = qDown_choke + qDown_kill;
+    window.__qAnnDown_m3s = qDown_total;
+    window.__qAnnDown_reachDepth_m = BOP_DEPTH;
+    window.__qAnnDown_mw_ppg = (downEffluentMW != null && isFinite(downEffluentMW))
+      ? downEffluentMW
+      : null;
+    window.__qAnnDown_breakdown = { booster: 0, choke: qDown_choke, kill: qDown_kill, topfill: 0 };
+
     // === CLOSED WELL PHYSICS ===
     // When pumping to a closed well (no UP path, more IN than losses), pressure builds
     const netVolumeChange_m3s = qIn_belowBOP - qToLoss - qToSurface_belowBOP;
@@ -4244,11 +4271,11 @@ function routeAnnulusFlowsWithLosses(dt_s){
     const qNet_riser = qIn_aboveBOP - qOut_aboveBOP;
 
     // Publish separated flows for friction calculation
-    window.__qToLoss_m3s = qToLoss;
-    window.__qAnnBelow_m3s = Math.max(0, qIn_belowBOP - qToLoss - qToSurface_belowBOP); // Net upward in annulus below BOP
-    window.__qAnnAbove_m3s = qNet_riser; // Net flow in riser
-    window.__qAnnUp_m3s = qToSurface_belowBOP; // Flow through choke/kill lines
-    window.__qAnnDown_m3s = 0; // No downward flow when BOP closed
+      window.__qToLoss_m3s = qToLoss;
+      window.__qAnnBelow_m3s = Math.max(0, qIn_belowBOP - qToLoss - qToSurface_belowBOP); // Net upward in annulus below BOP
+      window.__qAnnAbove_m3s = qNet_riser; // Net flow in riser
+      window.__qAnnUp_m3s = qToSurface_belowBOP; // Flow through choke/kill lines
+      window.__qAnnDown_m3s = qDown_total; // Downward injections crossing the stack
 
     // Flow Out calculation - from choke/kill lines
     const targetFO_gpm = Math.max(0, qToSurface_belowBOP * 15850.323);
