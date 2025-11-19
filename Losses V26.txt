@@ -39,7 +39,7 @@ const PROCESSING_PRESETS = {
 };
 const PROCESSING_ORDER = ['SINGLE', 'PASS10', 'PASS30', 'PASS50'];
 
-let activeTimeScaleKey = 'FAST';
+let activeTimeScaleKey = 'SUPER_SLOW';
 let activeProcessingKey = 'SINGLE';
 let timeScaleSelect;
 let processingSelect;
@@ -3046,10 +3046,11 @@ function ecdAtDepth(d){
 
 
 // --- ECD (ppg) that includes SBP + friction at depth ---
-function ecdWithSBPAtDepth(d){
+function ecdWithSBPAtDepth(d, opts = {}){
   const depth = Math.max(1, Math.min(d, TD_DEPTH));
-  const P = pressureAtDepth(depth);             // hydro + friction + SBP
-  return P / ((typeof PSI_COEF === 'number' ? PSI_COEF : 0.1704) * depth);
+  const Pabs = pressureAtDepth(depth, opts);             // hydro + friction + SBP
+  const Pgauge = Math.max(0, Pabs - 14.7);
+  return Pgauge / ((typeof PSI_COEF === 'number' ? PSI_COEF : 0.1704) * depth);
 }
 function pressureAtDepth_noSBP(d){
   const depth = Math.max(0, Math.min(d, TD_DEPTH));
@@ -3295,10 +3296,11 @@ function pressureAtDepth(d, opts = {}){
 }
 
 // --- ECD (ppg) from full pressure (includes SBP + friction) ---
-function ecdWithSBPAtDepth(d){
+function ecdWithSBPAtDepth(d, opts = {}){
   const depth = Math.max(1, d); // avoid /0
-  const P     = pressureAtDepth(depth);
-  return P / ((typeof PSI_COEF==='number' ? PSI_COEF : 0.1704) * depth);
+  const Pabs  = pressureAtDepth(depth, opts);
+  const Pgauge = Math.max(0, Pabs - 14.7);
+  return Pgauge / ((typeof PSI_COEF==='number' ? PSI_COEF : 0.1704) * depth);
 }
 
 
@@ -8649,6 +8651,16 @@ function drawCharts(x0, top = 150, h = 420){
   const ecdValueSafe = (val) => (isFinite(val) ? val : NaN);
 
   if (BOP_CLOSED) {
+    const activeBopSeg = (typeof dominantBopLineSegment === 'function') ? dominantBopLineSegment() : null;
+    const useIsolatedRiserTop = !activeBopSeg;
+    let isolatedRiserTop = NaN;
+    if (useIsolatedRiserTop) {
+      const globalTop = (typeof annulusTopDepthGlobal === 'function')
+        ? annulusTopDepthGlobal()
+        : 0;
+      isolatedRiserTop = clamp(Math.min(globalTop, BOP_DEPTH), 0, BOP_DEPTH);
+    }
+
     const appliedEcdFn = (d) => {
       if (d >= BOP_DEPTH) {
         return ecdValueSafe(ecdWithSBPAtDepth(d));
@@ -8658,7 +8670,14 @@ function drawCharts(x0, top = 150, h = 420){
     plotDepthFunctionAdvanced(ex, ey, wE, h, padL, padR, padT, padB,
       appliedEcdFn, 6, 18, ecdMainColor, { strokeWeight: 3.2 });
 
-    const riserEcdFn = (d) => (d <= BOP_DEPTH) ? ecdValueSafe(ecdWithSBPAtDepth(d)) : NaN;
+    const riserEcdFn = (d) => {
+      if (d > BOP_DEPTH) return NaN;
+      const opts = { includeBopLines: false, includeClosedWell: false };
+      if (useIsolatedRiserTop && Number.isFinite(isolatedRiserTop)) {
+        opts.overrideFluidTop = isolatedRiserTop;
+      }
+      return ecdValueSafe(ecdWithSBPAtDepth(d, opts));
+    };
     plotDepthFunctionAdvanced(ex, ey, wE, h, padL, padR, padT, padB,
       riserEcdFn, 6, 18, ecdDashColor, { depthMax: BOP_DEPTH, dashed: true, strokeWeight: 2.2 });
   } else {
