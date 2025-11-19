@@ -3196,7 +3196,13 @@ function pressureAtDepth(d, opts = {}){
   if (d < 0) return 0;
   if (d > TD_DEPTH) d = TD_DEPTH;
 
-  let fluidTop = effectiveFluidTopForDepth(d);
+  const overrideTopRaw = (typeof opts.overrideFluidTop === 'number')
+    ? Number(opts.overrideFluidTop)
+    : null;
+  const hasOverrideTop = Number.isFinite(overrideTopRaw);
+  let fluidTop = hasOverrideTop
+    ? clamp(overrideTopRaw, 0, TD_DEPTH)
+    : effectiveFluidTopForDepth(d);
 
   // Refresh section flows
   if (typeof window.__qAnnAbove_m3s !== 'number' || typeof window.__qAnnBelow_m3s !== 'number'){
@@ -3211,7 +3217,7 @@ function pressureAtDepth(d, opts = {}){
   const bopIsolated = BOP_CLOSED && belowBOP;
   const mpdSurfaceSeal = (typeof mpdSealActive === 'function') ? mpdSealActive() : false;
 
-  if (bopIsolated) {
+  if (bopIsolated && !hasOverrideTop) {
     fluidTop = Math.max(fluidTop, BOP_DEPTH);
   }
 
@@ -8465,6 +8471,15 @@ function drawCharts(x0, top = 150, h = 420){
   if (BOP_CLOSED) {
     const appliedColor = lineColP;
     const riserDashColor = color(hue(lineColP), saturation(lineColP), brightness(lineColP), 150);
+    const activeBopSeg = (typeof dominantBopLineSegment === 'function') ? dominantBopLineSegment() : null;
+    const useIsolatedRiserTop = !activeBopSeg;
+    let isolatedRiserTop = NaN;
+    if (useIsolatedRiserTop) {
+      const globalTop = (typeof annulusTopDepthGlobal === 'function')
+        ? annulusTopDepthGlobal()
+        : 0;
+      isolatedRiserTop = clamp(Math.min(globalTop, BOP_DEPTH), 0, BOP_DEPTH);
+    }
     const wellPressureFn = (d) => {
       if (d >= BOP_DEPTH) {
         return pressureAtDepth(d);
@@ -8474,9 +8489,14 @@ function drawCharts(x0, top = 150, h = 420){
     plotDepthFunctionAdvanced(px, py, wP, h, padL, padR, padT, padB,
       wellPressureFn, 0, 16000, appliedColor, { strokeWeight: 3.2 });
 
-    const riserPressureFn = (d) => (d <= BOP_DEPTH
-      ? pressureAtDepth(d, { includeBopLines: false, includeClosedWell: false })
-      : NaN);
+    const riserPressureFn = (d) => {
+      if (d > BOP_DEPTH) return NaN;
+      const opts = { includeBopLines: false, includeClosedWell: false };
+      if (useIsolatedRiserTop && Number.isFinite(isolatedRiserTop)) {
+        opts.overrideFluidTop = isolatedRiserTop;
+      }
+      return pressureAtDepth(d, opts);
+    };
     plotDepthFunctionAdvanced(px, py, wP, h, padL, padR, padT, padB,
       riserPressureFn, 0, 16000, riserDashColor,
       { depthMax: BOP_DEPTH, dashed: true, strokeWeight: 2.2 });
