@@ -1229,8 +1229,8 @@ function updateFormationFluidMigration(dt_s) {
     const BHP_psi = pressureAtDepth(formationFluidDepth_m);
     const deltaP = Math.max(0, porePressure_psi - BHP_psi);
 
-    // Small deadband prevents chattering when approaching balance
-    const effectiveDelta = (deltaP <= 0.5) ? 0 : deltaP;
+    // Halt influx as soon as BHP balances pore pressure (tiny tolerance to avoid chatter)
+    const effectiveDelta = (deltaP <= 0.05) ? 0 : deltaP;
     influxRate_gpm = productivityIndex_gpm_psi * effectiveDelta;
   }
 
@@ -1327,9 +1327,9 @@ function applyKickSurfacePressure(requiredPressure_psi){
   const riserFull = (annulusTopDepthGlobal() <= 0);
 
   if (BOP_CLOSED) {
-    if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP') {
+    if (CHOKE_DIRECTION === 'UP') {
       CHOKE_PRESSURE_psi = Math.max(CHOKE_PRESSURE_psi, AUTO_SURFACE_PRESSURE_psi);
-    } else if (KILL_LINE_OPEN && KILL_DIRECTION === 'UP') {
+    } else if (KILL_DIRECTION === 'UP') {
       KILL_PRESSURE_psi = Math.max(KILL_PRESSURE_psi, AUTO_SURFACE_PRESSURE_psi);
     }
   } else if (MPD_ON && riserFull) {
@@ -2277,8 +2277,14 @@ function ecdWithSBPAtDepth(d){
   return P / ((typeof PSI_COEF === 'number' ? PSI_COEF : 0.1704) * depth);
 }
 function pressureAtDepth_noSBP(d){
-  const P_hyd = PSI_COEF * ecdAtDepth(d) * d;
-  const P_fric = frictionPsi(d);
+  const depth = Math.max(0, Math.min(d, MAX_DEPTH));
+
+  const fluidTop = annulusTopDepthGlobal();
+  if (depth < fluidTop) return 14.7;
+
+  const wetDepth = depth - fluidTop;
+  const P_hyd = PSI_COEF * ecdAtDepth(depth) * wetDepth;
+  const P_fric = frictionPsi_withCML_rheo(depth);
   return P_hyd + P_fric;
 }
 
@@ -2413,21 +2419,7 @@ function frictionPsiAtDepth(depth_m){ return frictionPsi_withCML(depth_m); }
 
 // --- Pressure without SBP: hydro (wet-top aware) + rheology-aware friction ---
 function pressureAtDepth_noSBP_withCML(d){
-  // clamp depth
-  const depth = Math.max(0, Math.min(d, (typeof TD_DEPTH==='number' ? TD_DEPTH : d)));
-
-  // wet top can sink below BOP when riser is dry
-  const topGlobal = (typeof annulusTopDepthGlobal==='function')
-    ? annulusTopDepthGlobal()
-    : (typeof riserTopDepth==='function' ? riserTopDepth() : 0);
-
-  const effDepth = Math.max(0, depth - topGlobal);
-  const ecd_ppg  = (typeof ecdAtDepth==='function') ? ecdAtDepth(depth) : (window.MW_DS ?? 9.5);
-
-  const P_hyd  = (typeof PSI_COEF==='number' ? PSI_COEF : 0.1704) * ecd_ppg * effDepth;
-  const P_fric = (typeof frictionPsi_withCML_rheo==='function') ? frictionPsi_withCML_rheo(depth) : 0;
-
-  return P_hyd + P_fric;
+  return pressureAtDepth_noSBP(d);
 }
 
 // --- Total annulus pressure (psi): hydro + friction + SBP ---
