@@ -111,6 +111,7 @@ let kickMode = 'MANUAL'; // 'MANUAL' or 'PRESSURE_DRIVEN'
 let porePressure_psi = 7000; // Formation pore pressure
 let permeability_mD = 100; // Formation permeability (millidarcys)
 let productivityIndex_gpm_psi = 0.5; // Productivity index (gpm/psi)
+let AUTO_SURFACE_PRESSURE_psi = 0; // Auto-applied SBP to balance pressure-driven kicks
 
 // Track formation fluid in cells (parallel to annulus grids)
 let formationFluidCells_below = []; // Formation fluid fraction in each cell below BOP
@@ -1206,6 +1207,7 @@ function migrateKickFluids(dt_s) {
 function updateFormationFluidMigration(dt_s) {
   // Reset influx rate
   current_influx_m3s = 0;
+  AUTO_SURFACE_PRESSURE_psi = 0;
 
   if (!formationFluidEnabled) return;
 
@@ -1217,10 +1219,19 @@ function updateFormationFluidMigration(dt_s) {
   if (kickMode === 'MANUAL') {
     influxRate_gpm = formationFluidRate_gpm;
   } else if (kickMode === 'PRESSURE_DRIVEN') {
-    // Calculate BHP at kick depth
+    // Calculate required surface pressure to balance BHP with pore pressure
+    const bhpNoSurface_psi = pressureAtDepth_noSBP(formationFluidDepth_m);
+    const requiredSurfacePressure_psi = Math.max(0, porePressure_psi - bhpNoSurface_psi);
+
+    applyKickSurfacePressure(requiredSurfacePressure_psi);
+
+    // Re-evaluate BHP with the applied surface pressure contribution
     const BHP_psi = pressureAtDepth(formationFluidDepth_m);
     const deltaP = Math.max(0, porePressure_psi - BHP_psi);
-    influxRate_gpm = productivityIndex_gpm_psi * deltaP;
+
+    // Small deadband prevents chattering when approaching balance
+    const effectiveDelta = (deltaP <= 0.5) ? 0 : deltaP;
+    influxRate_gpm = productivityIndex_gpm_psi * effectiveDelta;
   }
 
   // Store current influx rate for flow routing (even if zero)
@@ -1306,6 +1317,23 @@ function updateFormationFluidMigration(dt_s) {
   }
   if (highestCell >= 0) {
     formationFluidFront_m = BOP_DEPTH + highestCell * CELL_M;
+  }
+}
+
+function applyKickSurfacePressure(requiredPressure_psi){
+  AUTO_SURFACE_PRESSURE_psi = Math.max(0, requiredPressure_psi);
+  if (AUTO_SURFACE_PRESSURE_psi <= 0) return;
+
+  const riserFull = (annulusTopDepthGlobal() <= 0);
+
+  if (BOP_CLOSED) {
+    if (CHOKE_LINE_OPEN && CHOKE_DIRECTION === 'UP') {
+      CHOKE_PRESSURE_psi = Math.max(CHOKE_PRESSURE_psi, AUTO_SURFACE_PRESSURE_psi);
+    } else if (KILL_LINE_OPEN && KILL_DIRECTION === 'UP') {
+      KILL_PRESSURE_psi = Math.max(KILL_PRESSURE_psi, AUTO_SURFACE_PRESSURE_psi);
+    }
+  } else if (MPD_ON && riserFull) {
+    SBP_MANUAL = Math.max(SBP_MANUAL, AUTO_SURFACE_PRESSURE_psi);
   }
 }
 
@@ -2441,7 +2469,11 @@ function pressureAtDepth(d){
   // Closed Well Pressure Boost (when pumping to closed well with no exit)
   const P_closed_well = BOP_CLOSED ? (closedWellPressureBoost_psi || 0) : 0;
 
-  const total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well;
+  // Auto-applied surface pressure for pressure-driven kicks
+  const canApplyAuto = (AUTO_SURFACE_PRESSURE_psi > 0) && (BOP_CLOSED || (MPD_ON && riserFull));
+  const P_auto = canApplyAuto ? AUTO_SURFACE_PRESSURE_psi : 0;
+
+  const total = P_hydro + P_fric + P_sbp + P_bop_lines + P_closed_well + P_auto;
   return total;
 }
 
@@ -2512,18 +2544,18 @@ function bopLinePressureContribution(){
   let totalContribution = 0;
 
   // Choke Line
-  if (CHOKE_DIRECTION === "UP" && Q_CHOKE > 0 && CHOKE_LINE_OPEN) {
-    const qChoke_m3s = Q_CHOKE / 15850.323;
-    const friction_psi = chokeFrictionPsiLength(BOP_DEPTH, qChoke_m3s);
-    // When flowing UP: Friction + Applied Choke Pressure adds to BHP
+  if (CHOKE_DIRECTION === "UP" && CHOKE_LINE_OPEN) {
+    const qChoke_m3s = Math.max(0, Q_CHOKE) / 15850.323;
+    const friction_psi = qChoke_m3s > 0 ? chokeFrictionPsiLength(BOP_DEPTH, qChoke_m3s) : 0;
+    // When flowing or held shut UP: Friction + Applied Choke Pressure adds to BHP
     totalContribution += friction_psi + CHOKE_PRESSURE_psi;
   }
 
   // Kill Line
-  if (KILL_DIRECTION === "UP" && Q_KILL > 0 && KILL_LINE_OPEN) {
-    const qKill_m3s = Q_KILL / 15850.323;
-    const friction_psi = killFrictionPsiLength(BOP_DEPTH, qKill_m3s);
-    // When flowing UP: Friction + Applied Kill Pressure adds to BHP
+  if (KILL_DIRECTION === "UP" && KILL_LINE_OPEN) {
+    const qKill_m3s = Math.max(0, Q_KILL) / 15850.323;
+    const friction_psi = qKill_m3s > 0 ? killFrictionPsiLength(BOP_DEPTH, qKill_m3s) : 0;
+    // When flowing or held shut UP: Friction + Applied Kill Pressure adds to BHP
     totalContribution += friction_psi + KILL_PRESSURE_psi;
   }
 
