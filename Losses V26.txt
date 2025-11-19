@@ -619,6 +619,26 @@ function smoothFrictionPsi(key, targetPsi){
   return next;
 }
 
+// Prevent friction from decreasing while the corresponding flow is rising
+const monotonicFrictionState = {};
+function enforceMonotonicFriction(key, flow_m3s, rawPsi){
+  if (!isFinite(rawPsi)) return 0;
+  const flow = Math.max(0, flow_m3s || 0);
+  const prev = monotonicFrictionState[key];
+  if (!prev || flow < 1e-6) {
+    monotonicFrictionState[key] = { flow, psi: rawPsi };
+    return rawPsi;
+  }
+
+  let psi = rawPsi;
+  if (flow >= prev.flow && rawPsi < prev.psi) {
+    psi = prev.psi;
+  }
+
+  monotonicFrictionState[key] = { flow, psi };
+  return psi;
+}
+
 // Add near top with other globals (around line 50):
 let frictionCache = {};
 let frictionCacheFrame = -1;
@@ -3167,7 +3187,12 @@ function frictionPsi_withCML_rheo(d){
   const dpdm_csg   = (L_csg  >0) ? dP_per_m_annulus_withRPM(qBelow, rho, ID_csg, OD_ds, K, n, tauY, RPM) * PA_TO_PSI : 0;
   const dpdm_oh    = (L_oh   >0) ? dP_per_m_annulus_withRPM(qBelow, rho, ID_oh,  OD_ds, K, n, tauY, RPM) * PA_TO_PSI : 0;
 
-  const totalFriction = dpdm_riser*L_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
+  let psi_riser = dpdm_riser * L_riser;
+  if (L_riser > 0) {
+    psi_riser = enforceMonotonicFriction('riser_total', qAbove, psi_riser);
+  }
+
+  const totalFriction = psi_riser + dpdm_csg*L_csg + dpdm_oh*L_oh;
   return totalFriction;
 }
 
