@@ -436,6 +436,22 @@ function sbpCanPressurizeAnnulus(){
   return riserFullEnoughForSBP();
 }
 
+function lineSurfacePressureApplied(which){
+  if (!linePressureAnchorArmed(which)) return 0;
+  const raw = (which === 'choke') ? CHOKE_PRESSURE_psi : KILL_PRESSURE_psi;
+  return Math.max(0, raw || 0);
+}
+
+function enforceConventionalSurfaceBoundary(){
+  const conventionalVent = (!MPD_ON) && (!BOP_CLOSED) && (!RCD_CLOSED);
+  if (!conventionalVent) return;
+  autoKickBalancePsi = 0;
+  closedWellPressureBoost_psi = 0;
+  if (typeof window !== 'undefined') {
+    window.__PRESSURE_COMPRESSION_WARNING = null;
+  }
+}
+
 function updateLinePressureAnchors(){
   updateSingleLinePressureAnchor('choke', levelDeficit_choke_m || 0);
   updateSingleLinePressureAnchor('kill', levelDeficit_kill_m || 0);
@@ -3381,7 +3397,7 @@ function activeBopLineSegments(){
         wetLen,
         mw: chokeMW,
         frictionPsi: friction_psi,
-        surfacePressure: CHOKE_PRESSURE_psi,
+        surfacePressure: lineSurfacePressureApplied('choke'),
         flow_m3s: qChoke_m3s
       });
     }
@@ -3401,7 +3417,7 @@ function activeBopLineSegments(){
         wetLen,
         mw: killMW,
         frictionPsi: friction_psi,
-        surfacePressure: KILL_PRESSURE_psi,
+        surfacePressure: lineSurfacePressureApplied('kill'),
         flow_m3s: qKill_m3s
       });
     }
@@ -4192,7 +4208,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
       const actualFriction = chokeFrictionPsiLength(wetLen, qChoke_actual);
       const actualHydro = PSI_COEF * chokeMW * wetLen;
       const actualSurfaceP = Math.max(0, BHP_at_BOP - actualHydro - actualFriction);
-      chokeSurfacePressure_calc_psi = actualSurfaceP;
+      const appliedSurface = linePressureAnchorArmed('choke') ? actualSurfaceP : 0;
+      chokeSurfacePressure_calc_psi = appliedSurface;
       if (chokeLineHasUserPressureControl()) {
         const target = CHOKE_PRESSURE_TARGET_psi;
         const pressureDiff = Math.abs(actualSurfaceP - target);
@@ -4200,14 +4217,15 @@ function routeAnnulusFlowsWithLosses(dt_s){
           window.__CHOKE_PRESSURE_WARNING = `Target: ${target.toFixed(0)} psi, Actual: ${actualSurfaceP.toFixed(0)} psi`;
         }
       } else {
-        CHOKE_PRESSURE_psi = actualSurfaceP;
+        CHOKE_PRESSURE_psi = appliedSurface;
       }
     } else if (CHOKE_DIRECTION === 'UP') {
       const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
       const wetLen = chokeWetLength_m();
       const staticSurface = Math.max(0, BHP_at_BOP - PSI_COEF * chokeMW * wetLen);
-      chokeSurfacePressure_calc_psi = staticSurface;
-      CHOKE_PRESSURE_psi = staticSurface;
+      const appliedSurface = linePressureAnchorArmed('choke') ? staticSurface : 0;
+      chokeSurfacePressure_calc_psi = appliedSurface;
+      CHOKE_PRESSURE_psi = appliedSurface;
     }
 
     if (killUpActive) {
@@ -4216,7 +4234,8 @@ function routeAnnulusFlowsWithLosses(dt_s){
       const actualFriction = killFrictionPsiLength(wetLen, qKill_actual);
       const actualHydro = PSI_COEF * killMW * wetLen;
       const actualSurfaceP = Math.max(0, BHP_at_BOP - actualHydro - actualFriction);
-      killSurfacePressure_calc_psi = actualSurfaceP;
+      const appliedSurface = linePressureAnchorArmed('kill') ? actualSurfaceP : 0;
+      killSurfacePressure_calc_psi = appliedSurface;
       if (killLineHasUserPressureControl()) {
         const target = KILL_PRESSURE_TARGET_psi;
         const pressureDiff = Math.abs(actualSurfaceP - target);
@@ -4224,14 +4243,15 @@ function routeAnnulusFlowsWithLosses(dt_s){
           window.__KILL_PRESSURE_WARNING = `Target: ${target.toFixed(0)} psi, Actual: ${actualSurfaceP.toFixed(0)} psi`;
         }
       } else {
-        KILL_PRESSURE_psi = actualSurfaceP;
+        KILL_PRESSURE_psi = appliedSurface;
       }
     } else if (KILL_DIRECTION === 'UP') {
       const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
       const wetLen = killWetLength_m();
       const staticSurface = Math.max(0, BHP_at_BOP - PSI_COEF * killMW * wetLen);
-      killSurfacePressure_calc_psi = staticSurface;
-      KILL_PRESSURE_psi = staticSurface;
+      const appliedSurface = linePressureAnchorArmed('kill') ? staticSurface : 0;
+      killSurfacePressure_calc_psi = appliedSurface;
+      KILL_PRESSURE_psi = appliedSurface;
     }
 
     // Flow reaching surface through choke/kill lines
@@ -4545,21 +4565,23 @@ function routeAnnulusFlowsWithLosses(dt_s){
       const friction = chokeFrictionPsiLength(wetLen, Q_choke_actual);
       const hydro = PSI_COEF * chokeMW * wetLen;
       const actualSurface = Math.max(0, BHP_at_BOP - hydro - friction);
-      chokeSurfacePressure_calc_psi = actualSurface;
+      const appliedSurface = linePressureAnchorArmed('choke') ? actualSurface : 0;
+      chokeSurfacePressure_calc_psi = appliedSurface;
       if (chokeLineHasUserPressureControl()) {
         const target = CHOKE_PRESSURE_TARGET_psi;
         if (Math.abs(actualSurface - target) > 50) {
           window.__CHOKE_PRESSURE_WARNING = `Target: ${target.toFixed(0)} psi, Actual: ${actualSurface.toFixed(0)} psi`;
         }
       } else {
-        CHOKE_PRESSURE_psi = actualSurface;
+        CHOKE_PRESSURE_psi = appliedSurface;
       }
     } else if (CHOKE_DIRECTION === 'UP') {
       const chokeMW = chokeGrid.length > 0 ? average(chokeGrid) : MW_CHOKE;
       const wetLen = chokeWetLength_m();
       const staticSurface = Math.max(0, BHP_at_BOP - PSI_COEF * chokeMW * wetLen);
-      chokeSurfacePressure_calc_psi = staticSurface;
-      CHOKE_PRESSURE_psi = staticSurface;
+      const appliedSurface = linePressureAnchorArmed('choke') ? staticSurface : 0;
+      chokeSurfacePressure_calc_psi = appliedSurface;
+      CHOKE_PRESSURE_psi = appliedSurface;
     }
 
     if (hasKillUP) {
@@ -4571,21 +4593,23 @@ function routeAnnulusFlowsWithLosses(dt_s){
       const friction = killFrictionPsiLength(wetLen, Q_kill_actual);
       const hydro = PSI_COEF * killMW * wetLen;
       const actualSurface = Math.max(0, BHP_at_BOP - hydro - friction);
-      killSurfacePressure_calc_psi = actualSurface;
+      const appliedSurface = linePressureAnchorArmed('kill') ? actualSurface : 0;
+      killSurfacePressure_calc_psi = appliedSurface;
       if (killLineHasUserPressureControl()) {
         const target = KILL_PRESSURE_TARGET_psi;
         if (Math.abs(actualSurface - target) > 50) {
           window.__KILL_PRESSURE_WARNING = `Target: ${target.toFixed(0)} psi, Actual: ${actualSurface.toFixed(0)} psi`;
         }
       } else {
-        KILL_PRESSURE_psi = actualSurface;
+        KILL_PRESSURE_psi = appliedSurface;
       }
     } else if (KILL_DIRECTION === 'UP') {
       const killMW = killGrid.length > 0 ? average(killGrid) : MW_KILL;
       const wetLen = killWetLength_m();
       const staticSurface = Math.max(0, BHP_at_BOP - PSI_COEF * killMW * wetLen);
-      killSurfacePressure_calc_psi = staticSurface;
-      KILL_PRESSURE_psi = staticSurface;
+      const appliedSurface = linePressureAnchorArmed('kill') ? staticSurface : 0;
+      killSurfacePressure_calc_psi = appliedSurface;
+      KILL_PRESSURE_psi = appliedSurface;
     }
   } else {
     // No choke/kill lines open for UP, all flow through riser
@@ -7323,6 +7347,7 @@ function draw(){
   // The SBP logic below calls pressureAtDepth_noSBP() which needs friction which
   // needs window.__qAnnBelow_m3s. Update flows first to avoid 1-frame lag!
   // Call with dt_s=0 to just update flow variables without advancing simulation time
+  enforceConventionalSurfaceBoundary();
   updateLinePressureAnchors();
   routeAnnulusFlowsWithLosses(0);
 
